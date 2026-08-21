@@ -1,14 +1,25 @@
-use bevy::{math::DVec3, prelude::*, reflect::TypePath, render::render_resource::*};
+use bevy::{
+    math::DVec3,
+    pbr::MaterialPlugin,
+    prelude::*,
+    reflect::TypePath,
+    render::render_resource::*,
+};
 use bevy_terrain::prelude::*;
 
 const PATH: &str = "terrains/spherical";
-const RADIUS: f64 = 6371000.0;
-const MAJOR_AXES: f64 = 6378137.0;
-const MINOR_AXES: f64 = 6356752.314245;
-const MIN_HEIGHT: f32 = -12000.0;
-const MAX_HEIGHT: f32 = 9000.0;
+
+const RADIUS: f64 = 6_371_000.0;
+
+const MIN_HEIGHT: f32 = -12_000.0;
+const MAX_HEIGHT: f32 = 9_000.0;
+
 const TEXTURE_SIZE: u32 = 512;
 const LOD_COUNT: u32 = 5;
+
+//
+// Terrain material
+//
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 pub struct TerrainMaterial {
@@ -23,15 +34,33 @@ impl Material for TerrainMaterial {
     }
 }
 
+//
+// Ocean material
+//
+
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct OceanMaterial {
+    #[texture(0)]
+    ocean_mask: Handle<Image>,
+}
+
+impl Material for OceanMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/ocean.wgsl".into()
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins.build().disable::<TransformPlugin>(),
+            DefaultPlugins
+                .build()
+                .disable::<TransformPlugin>(),
             TerrainPlugin,
             TerrainMaterialPlugin::<TerrainMaterial>::default(),
-            TerrainDebugPlugin, // enable debug settings and controls
+            TerrainDebugPlugin,
+            MaterialPlugin::<OceanMaterial>::default(),
         ))
-        // .insert_resource(ClearColor(Color::WHITE))
         .add_systems(Startup, setup)
         .run();
 }
@@ -40,30 +69,40 @@ fn setup(
     mut commands: Commands,
     mut images: ResMut<LoadingImages>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<TerrainMaterial>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
+    mut ocean_materials: ResMut<Assets<OceanMaterial>>,
     mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
     asset_server: Res<AssetServer>,
 ) {
-    let gradient = asset_server.load("textures/gradient.png");
+    //
+    // Terrain material
+    //
+
+    let gradient =
+        asset_server.load("textures/gradient.png");
+
     images.load_image(
         &gradient,
         TextureDimension::D1,
         TextureFormat::Rgba8UnormSrgb,
     );
 
-    // Configure all the important properties of the terrain, as well as its attachments.
+    //
+    // Planet
+    //
+
     let config = TerrainConfig {
         lod_count: LOD_COUNT,
-        model: TerrainModel::ellipsoid(DVec3::ZERO, MAJOR_AXES, MINOR_AXES, MIN_HEIGHT, MAX_HEIGHT),
-        // model: TerrainModel::ellipsoid(
-        //     DVec3::ZERO,
-        //     6378137.0,
-        //     6378137.0 * 0.5,
-        //     MIN_HEIGHT,
-        //     MAX_HEIGHT,
-        // ),
-        // model: TerrainModel::sphere(DVec3::ZERO, RADIUS),
+
+        model: TerrainModel::sphere(
+            DVec3::ZERO,
+            RADIUS,
+            MIN_HEIGHT,
+            MAX_HEIGHT,
+        ),
+
         path: PATH.to_string(),
+
         ..default()
     }
     .add_attachment(AttachmentConfig {
@@ -74,49 +113,113 @@ fn setup(
         format: AttachmentFormat::R16,
     });
 
-    // Configure the quality settings of the terrain view. Adapt the settings to your liking.
-    let view_config = TerrainViewConfig::default();
+    let view_config =
+        TerrainViewConfig::default();
 
-    let tile_atlas = TileAtlas::new(&config);
-    let tile_tree = TileTree::new(&tile_atlas, &view_config);
+    let tile_atlas =
+        TileAtlas::new(&config);
 
-    commands.spawn_big_space(ReferenceFrame::default(), |root| {
-        let frame = root.frame().clone();
+    let tile_tree =
+        TileTree::new(
+            &tile_atlas,
+            &view_config,
+        );
 
-        let terrain = root
-            .spawn_spatial((
-                TerrainBundle::new(tile_atlas, &frame),
-                materials.add(TerrainMaterial {
-                    gradient: gradient.clone(),
-                }),
-            ))
-            .id();
+    //
+    // Ocean mask
+    //
 
-        let view = root
-            .spawn_spatial(DebugCameraBundle::new(
-                -DVec3::X * RADIUS * 3.0,
-                RADIUS,
-                &frame,
-            ))
-            .id();
+    let ocean_mask =
+        asset_server.load(
+            "world/ocean_atlas.png"
+        );
 
-        tile_trees.insert((terrain, view), tile_tree);
+    //
+    // World
+    //
 
-        let sun_position = DVec3::new(-1.0, 1.0, -1.0) * RADIUS * 10.0;
-        let (sun_cell, sun_translation) = frame.translation_to_grid(sun_position);
+    commands.spawn_big_space(
+        ReferenceFrame::default(),
+        |root| {
+            let frame =
+                root.frame().clone();
 
-        root.spawn_spatial((
-            PbrBundle {
-                mesh: meshes.add(Sphere::new(RADIUS as f32 * 2.0).mesh().build()),
-                transform: Transform::from_translation(sun_translation),
-                ..default()
-            },
-            sun_cell,
-        ));
+            //
+            // Terrain
+            //
 
-        root.spawn_spatial(PbrBundle {
-            mesh: meshes.add(Cuboid::from_length(RADIUS as f32 * 0.1)),
-            ..default()
-        });
-    });
+            let terrain = root
+                .spawn_spatial((
+                    TerrainBundle::new(
+                        tile_atlas,
+                        &frame,
+                    ),
+                    terrain_materials.add(
+                        TerrainMaterial {
+                            gradient:
+                                gradient.clone(),
+                        },
+                    ),
+                ))
+                .id();
+
+            //
+            // Camera
+            //
+
+            let view = root
+                .spawn_spatial(
+                    DebugCameraBundle::new(
+                        -DVec3::X
+                            * RADIUS
+                            * 3.0,
+                        RADIUS,
+                        &frame,
+                    ),
+                )
+                .id();
+
+            tile_trees.insert(
+                (terrain, view),
+                tile_tree,
+            );
+
+            //
+            // Ocean
+            //
+            // Это всё ещё одна сфера уровня моря.
+            //
+            // НО shader делает discard везде,
+            // где ocean_mask == 0.
+            //
+
+let ocean_mesh =
+    meshes.add(
+        Sphere::new(
+            RADIUS as f32 + 100_000.0
+        )
+        .mesh()
+        .ico(6)
+        .expect(
+            "failed to create ocean sphere"
+        ),
+    );
+
+            let ocean_material =
+                ocean_materials.add(
+                    OceanMaterial {
+                        ocean_mask,
+                    },
+                );
+
+            root.spawn_spatial(
+                MaterialMeshBundle::<OceanMaterial> {
+                    mesh: ocean_mesh,
+                    material:
+                        ocean_material,
+                    ..default()
+                },
+            );
+        },
+    );
 }

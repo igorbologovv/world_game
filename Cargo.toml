@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 bevy = "0.14.0"
 bevy_terrain = { path = "../bevy_terrain", features = ["high_precision"] }
+image = { version = "0.25", features = ["tiff"] }
+noise = "0.9"
