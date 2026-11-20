@@ -27,13 +27,18 @@ const PATCH_METERS: f64 = 145.0;
 const PATCH_ANGLE: f64 = PATCH_METERS / RADIUS;
 // Render only a small, camera-facing neighborhood, even on a spherical world.
 const PATCH_RADIUS: i32 = 4;
-const CANDIDATES_PER_PATCH: usize = 8;
-const LOD_DISTANCES: [f64; 3] = [65.0, 145.0, 275.0];
-const VIEW_RANGE: f64 = 450.0;
+const CANDIDATES_PER_PATCH: usize = 112;
+const LOD_DISTANCES: [f64; 3] = [55.0, 135.0, 260.0];
+const VIEW_RANGE: f64 = 420.0;
 const PATCH_PRELOAD_MARGIN: f64 = PATCH_METERS * 1.2;
-const MAX_NEW_PATCHES_PER_TICK: usize = 2;
-const STREAM_INTERVAL: f64 = 0.10;
-const MAX_FOREST_ALTITUDE: f64 = 1_800.0;
+const PATCH_UNLOAD_MARGIN: f64 = PATCH_METERS * 2.7;
+const MAX_PATCHES_PER_TICK: usize = 2;
+const CANDIDATES_PER_TICK_PER_PATCH: usize = 12;
+const MAX_NEW_TREES_PER_TICK: usize = 8;
+const MAX_ACTIVE_TREES: usize = 560;
+const STREAM_INTERVAL: f64 = 0.12;
+const LOD_INTERVAL: f64 = 0.14;
+const MAX_FOREST_ALTITUDE: f64 = 1_450.0;
 const VARIANTS: usize = 3;
 
 #[derive(Clone, Copy, Debug)]
@@ -80,9 +85,14 @@ struct PatchKey {
     col: i32,
 }
 
+#[derive(Default)]
+struct PatchState {
+    entities: Vec<Entity>,
+    next_candidate: usize,
+}
 #[derive(Resource, Default)]
 struct ForestWorld {
-    patches: HashMap<PatchKey, Vec<Entity>>,
+    patches: HashMap<PatchKey, PatchState>,
     last_check: f64,
 }
 
@@ -182,117 +192,105 @@ fn stream_patches(
     mut forest: ResMut<ForestWorld>,
     models: Res<ForestModels>,
     heights: Res<SurfaceHeights>,
-    players: Query<&Player>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     reference_frames: ReferenceFrames,
     frame_entities: Query<Entity, With<ReferenceFrame>>,
 ) {
-    let Ok(player) = players.get_single() else { return };
     let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = reference_frames.parent_frame(camera_entity) else { return };
     let Ok(frame_entity) = frame_entities.get_single() else { return };
-    let camera_position = frame.grid_position_double(&camera.cell, &camera.transform);
-    let camera_altitude = camera_position.length() - RADIUS;
+    let eye = frame.grid_position_double(&camera.cell, &camera.transform);
+    let altitude = eye.length() - RADIUS;
 
-    // No thousands of distant trees when viewing the entire globe.
-    if camera_altitude > MAX_FOREST_ALTITUDE {
-        for (_, entities) in forest.patches.drain() {
-            for entity in entities { commands.entity(entity).despawn_recursive(); }
+    if altitude > MAX_FOREST_ALTITUDE {
+        for (_, patch) in forest.patches.drain() {
+            for entity in patch.entities { commands.entity(entity).despawn_recursive(); }
         }
         return;
     }
-
     let now = time.elapsed_seconds_f64();
     if now - forest.last_check < STREAM_INTERVAL { return }
     forest.last_check = now;
+    let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
 
-    let camera_forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
-    let center = player.surface_direction();
-    let mut wanted: Vec<_> = nearby_patches(center)
-        .into_iter()
-        .filter_map(|key| {
-            let direction = patch_center_direction(key);
-            let ground = heights.sample(direction).unwrap_or(0.0).max(0.0);
-            let location = direction * (RADIUS + ground);
-            let distance = camera_position.distance(location);
-            (distance <= VIEW_RANGE + PATCH_PRELOAD_MARGIN
-                && within_horizon(camera_position, location, PATCH_PRELOAD_MARGIN)
-                && within_camera_cone(
-                    camera_position, camera_forward, projection, location,
-                    PATCH_PRELOAD_MARGIN,
-                ))
-                .then_some((key, distance))
-        })
-        .collect();
-
-    // HashMap/HashSet iteration order is not deterministic; always spawn the
-    // closest camera-visible patches first and cap the creation work per tick.
-    wanted.sort_by(|a, b| a.1.total_cmp(&b.1)
-        .then_with(|| a.0.row.cmp(&b.0.row))
-        .then_with(|| a.0.col.cmp(&b.0.col)));
-    let wanted_set: HashSet<PatchKey> = wanted.iter().map(|(key, _)| *key).collect();
-    forest.patches.retain(|key, roots| {
-        if wanted_set.contains(key) { return true }
-        for entity in roots.drain(..) { commands.entity(entity).despawn_recursive(); }
+    // Keep already generated patches behind the camera until physically far
+    // away. Turning around must not tear down and rebuild a whole forest.
+    forest.patches.retain(|key, patch| {
+        let center = patch_center_direction(*key);
+        let anchor = center * (RADIUS + heights.sample(center).unwrap_or(0.0).max(0.0));
+        if eye.distance(anchor) <= VIEW_RANGE + PATCH_UNLOAD_MARGIN
+            && within_horizon(eye, anchor, PATCH_UNLOAD_MARGIN) { return true }
+        for entity in patch.entities.drain(..) {
+            commands.entity(entity).despawn_recursive();
+        }
         false
     });
 
-    // Materialize the keys before mutating forest.patches below.
-    // Otherwise the filter closure holds an immutable borrow for the loop.
-    let new_patches: Vec<PatchKey> = wanted
+    let mut wanted: Vec<_> = nearby_patches(eye.normalize())
         .into_iter()
-        .filter(|(key, _)| !forest.patches.contains_key(key))
-        .take(MAX_NEW_PATCHES_PER_TICK)
-        .map(|(key, _)| key)
-        .collect();
-    for key in new_patches {
-        let mut spawned = Vec::new();
-        let mut random = Random::new(patch_seed(key));
-        let (min_latitude, longitude_step) = patch_bounds(key);
-        for _ in 0..CANDIDATES_PER_PATCH {
-            let latitude = (min_latitude + random.unit64() * PATCH_ANGLE)
-                .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
-            let longitude = (f64::from(key.col) + random.unit64()) * longitude_step;
-            let (sin_lat, cos_lat) = latitude.sin_cos();
-            let direction = DVec3::new(
-                cos_lat * longitude.cos(),
-                sin_lat,
-                cos_lat * longitude.sin(),
-            );
-            let Some(ground) = heights.sample(direction) else { continue };
-            if !(3.5..=2_850.0).contains(&ground) || heights.is_river(direction) { continue }
-            let Some(species) = select_species(direction, ground, &mut random) else { continue };
-            let (east, north) = tangent_basis(direction);
-            let offset = 4.0 / RADIUS;
-            let height_east = heights.sample((direction + east * offset).normalize()).unwrap_or(ground);
-            let height_north = heights.sample((direction + north * offset).normalize()).unwrap_or(ground);
-            let grade = ((height_east - ground).hypot(height_north - ground)) / 4.0;
-            if grade > 0.62 { continue }
-            let aligned = terrain_aligned_direction(direction);
-            let tree_position = aligned * (RADIUS + ground - 0.28);
-            let distance = camera_position.distance(tree_position);
-            // Do not skip trees hidden by the current camera angle.
-            // Once a patch is loaded, rotating the camera must reveal its
-            // existing trees without requiring the patch to regenerate.
-            if distance > VIEW_RANGE + PATCH_PRELOAD_MARGIN { continue; }
-            let selected_variant = (random.next_u32() as usize) % VARIANTS;
-            let scale = random.range(0.83, 1.24);
-            let yaw = random.range(0.0, std::f32::consts::TAU);
-            let root = spawn_tree(
-                &mut commands,
-                frame_entity,
-                frame,
-                tree_position,
-                species,
-                selected_variant,
-                scale,
-                yaw,
-                distance,
-                &models,
-            );
-            spawned.push(root);
+        .filter_map(|key| {
+            let direction = patch_center_direction(key);
+            let anchor = direction * (RADIUS + heights.sample(direction).unwrap_or(0.0).max(0.0));
+            let distance = eye.distance(anchor);
+            (distance <= VIEW_RANGE + PATCH_PRELOAD_MARGIN
+                && within_horizon(eye, anchor, PATCH_PRELOAD_MARGIN)
+                && within_camera_cone(eye, forward, projection, anchor, PATCH_PRELOAD_MARGIN))
+                .then_some((key, distance))
+        }).collect();
+    wanted.sort_by(|a,b| a.1.total_cmp(&b.1)
+        .then_with(|| a.0.row.cmp(&b.0.row))
+        .then_with(|| a.0.col.cmp(&b.0.col)));
+
+    let mut active = forest.patches.values().map(|p| p.entities.len()).sum::<usize>();
+    // Materialize worklist before mutating the HashMap (avoids E0502).
+    let work: Vec<_> = wanted.into_iter()
+        .filter(|(key,_)| forest.patches.get(key)
+            .map(|patch| patch.next_candidate < CANDIDATES_PER_PATCH)
+            .unwrap_or(true))
+        .take(MAX_PATCHES_PER_TICK)
+        .map(|(key,_)|key).collect();
+
+    let mut remaining = MAX_NEW_TREES_PER_TICK;
+    for key in work {
+        if remaining == 0 || active >= MAX_ACTIVE_TREES { break }
+        let start = forest.patches.get(&key).map_or(0, |p|p.next_candidate);
+        let end = (start + CANDIDATES_PER_TICK_PER_PATCH).min(CANDIDATES_PER_PATCH);
+        let (min_latitude,longitude_step) = patch_bounds(key);
+        let mut roots = Vec::new();
+        let mut progressed = start;
+        for candidate in start..end {
+            if remaining == 0 || active >= MAX_ACTIVE_TREES { break }
+            progressed = candidate + 1;
+            let seed = patch_seed(key) ^ (candidate as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15);
+            let mut rng = Random::new(seed);
+            let latitude = (min_latitude + rng.unit64() * PATCH_ANGLE)
+                .clamp(-std::f64::consts::FRAC_PI_2,std::f64::consts::FRAC_PI_2);
+            let longitude = (f64::from(key.col) + rng.unit64()) * longitude_step;
+            let (sin_lat,cos_lat)=latitude.sin_cos();
+            let direction=DVec3::new(cos_lat*longitude.cos(),sin_lat,cos_lat*longitude.sin());
+            let Some(ground)=heights.sample(direction) else {continue};
+            if !(3.5..=2600.0).contains(&ground) || heights.is_river(direction) {continue}
+            let Some(species)=select_species(direction,ground,&mut rng) else {continue};
+            let (east,north)=tangent_basis(direction);
+            let offset=4.0/RADIUS;
+            let he=heights.sample((direction+east*offset).normalize()).unwrap_or(ground);
+            let hn=heights.sample((direction+north*offset).normalize()).unwrap_or(ground);
+            if (he-ground).hypot(hn-ground)/4.0 > 0.58 {continue}
+            let aligned=terrain_aligned_direction(direction);
+            let pos=aligned*(RADIUS+ground-0.4);
+            let distance=eye.distance(pos);
+            if distance>VIEW_RANGE+PATCH_PRELOAD_MARGIN {continue}
+            let variant=(rng.next_u32() as usize)%VARIANTS;
+            let scale=rng.range(0.84,1.28);
+            let yaw=rng.range(0.0,std::f32::consts::TAU);
+            roots.push(spawn_tree(
+                &mut commands,frame_entity,frame,pos,species,variant,scale,yaw,distance,&models));
+            active+=1;
+            remaining-=1;
         }
-        forest.patches.insert(key, spawned);
+        let patch=forest.patches.entry(key).or_default();
+        patch.next_candidate=progressed;
+        patch.entities.extend(roots);
     }
 }
 
@@ -362,6 +360,8 @@ fn spawn_tree(
 }
 
 fn update_lods(
+    time: Res<Time>,
+    mut last_update: Local<f64>,
     models: Res<ForestModels>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     frames: ReferenceFrames,
@@ -378,6 +378,9 @@ fn update_lods(
         (With<CanopyMesh>, Without<TrunkMesh>),
     >,
 ) {
+    let now = time.elapsed_seconds_f64();
+    if now - *last_update < LOD_INTERVAL { return }
+    *last_update = now;
     let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = frames.parent_frame(camera_entity) else { return };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
