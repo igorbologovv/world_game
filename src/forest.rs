@@ -209,6 +209,7 @@ fn stream_patches(
     mut forest: ResMut<ForestWorld>,
     models: Res<ForestModels>,
     heights: Res<SurfaceHeights>,
+    view_mode: Res<ForestView>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     reference_frames: ReferenceFrames,
     frame_entities: Query<Entity, With<ReferenceFrame>>,
@@ -217,9 +218,13 @@ fn stream_patches(
     let Some(frame) = reference_frames.parent_frame(camera_entity) else { return };
     let Ok(frame_entity) = frame_entities.get_single() else { return };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
-    let altitude = eye.length() - RADIUS;
+    // Camera altitude above its local terrain, not above the planet's sea level.
+    // High-elevation jungle must still render from eye height.
+    let local_ground = heights.sample(eye.normalize()).unwrap_or(0.0);
+    let altitude = eye.length() - RADIUS - local_ground;
+    let view_range = forest_range(view_mode.first_person);
 
-    if altitude > MAX_FOREST_ALTITUDE {
+    if altitude > MAX_FOREST_ABOVE_GROUND {
         for (_, patch) in forest.patches.drain() {
             for entity in patch.entities { commands.entity(entity).despawn_recursive(); }
         }
@@ -235,7 +240,7 @@ fn stream_patches(
     forest.patches.retain(|key, patch| {
         let center = patch_center_direction(*key);
         let anchor = center * (RADIUS + heights.sample(center).unwrap_or(0.0).max(0.0));
-        if eye.distance(anchor) <= VIEW_RANGE + PATCH_UNLOAD_MARGIN
+        if eye.distance(anchor) <= view_range + PATCH_UNLOAD_MARGIN
             && within_horizon(eye, anchor, PATCH_UNLOAD_MARGIN) { return true }
         for entity in patch.entities.drain(..) {
             commands.entity(entity).despawn_recursive();
@@ -249,7 +254,7 @@ fn stream_patches(
             let direction = patch_center_direction(key);
             let anchor = direction * (RADIUS + heights.sample(direction).unwrap_or(0.0).max(0.0));
             let distance = eye.distance(anchor);
-            (distance <= VIEW_RANGE + PATCH_PRELOAD_MARGIN
+            (distance <= view_range + PATCH_PRELOAD_MARGIN
                 && within_horizon(eye, anchor, PATCH_PRELOAD_MARGIN)
                 && within_camera_cone(eye, forward, projection, anchor, PATCH_PRELOAD_MARGIN))
                 .then_some((key, distance))
@@ -268,7 +273,7 @@ fn stream_patches(
             let location = center * (RADIUS + heights.sample(center).unwrap_or(0.0).max(0.0));
             let distance = eye.distance(location);
             (!within_camera_cone(eye, forward, projection, location, PATCH_METERS)
-                && distance > VIEW_RANGE * 0.55)
+                && distance > view_range * 0.55)
                 .then_some((key, distance))
         }).collect();
         eviction.sort_by(|a,b| b.1.total_cmp(&a.1));
@@ -308,18 +313,20 @@ fn stream_patches(
             let longitude = (f64::from(key.col) + rng.unit64()) * longitude_step;
             let (sin_lat,cos_lat)=latitude.sin_cos();
             let direction=DVec3::new(cos_lat*longitude.cos(),sin_lat,cos_lat*longitude.sin());
-            let Some(ground)=heights.sample(direction) else {continue};
-            if !(3.5..=2600.0).contains(&ground) || heights.is_river(direction) {continue}
+            // Align direction first so sampled height and rendered terrain
+            // address the same cube-face texel. Sink roots slightly into soil.
+            let aligned = terrain_aligned_direction(direction);
+            let Some(ground)=heights.sample(aligned) else {continue};
+            if !(3.5..=2600.0).contains(&ground) || heights.is_river(aligned) {continue}
             let Some(species)=select_species(direction,ground,&mut rng) else {continue};
             let (east,north)=tangent_basis(direction);
             let offset=4.0/RADIUS;
             let he=heights.sample((direction+east*offset).normalize()).unwrap_or(ground);
             let hn=heights.sample((direction+north*offset).normalize()).unwrap_or(ground);
             if (he-ground).hypot(hn-ground)/4.0 > 0.58 {continue}
-            let aligned=terrain_aligned_direction(direction);
-            let pos=aligned*(RADIUS+ground-0.4);
+            let pos=aligned*(RADIUS+ground-1.6);
             let distance=eye.distance(pos);
-            if distance>VIEW_RANGE+PATCH_PRELOAD_MARGIN {continue}
+            if distance>view_range+PATCH_PRELOAD_MARGIN {continue}
             let variant=(rng.next_u32() as usize)%VARIANTS;
             let scale=rng.range(0.84,1.28);
             let yaw=rng.range(0.0,std::f32::consts::TAU);
@@ -409,6 +416,7 @@ fn update_lods(
     models: Res<ForestModels>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     frames: ReferenceFrames,
+    view_mode: Res<ForestView>,
     mut trees: Query<
         (&mut TreeInstance, &mut Visibility),
         (Without<TrunkMesh>, Without<CanopyMesh>),
@@ -429,9 +437,10 @@ fn update_lods(
     let Some(frame) = frames.parent_frame(camera_entity) else { return };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
+    let view_range = forest_range(view_mode.first_person);
 
     for (mut tree, mut visibility) in &mut trees {
-        let in_view = eye.distance(tree.position) <= VIEW_RANGE
+        let in_view = eye.distance(tree.position) <= view_range
             && within_horizon(eye, tree.position, 25.0)
             && within_camera_cone(eye, forward, projection, tree.position, 24.0);
         let next = if in_view {
@@ -466,8 +475,12 @@ fn update_lods(
     }
 }
 
+fn forest_range(first_person: bool) -> f64 {
+    if first_person { FIRST_PERSON_RANGE } else { THIRD_PERSON_RANGE }
+}
+
 fn select_lod(distance: f64) -> Option<usize> {
-    if distance > VIEW_RANGE { return None }
+    if distance > THIRD_PERSON_RANGE { return None }
     Some(LOD_DISTANCES.iter().position(|&d| distance < d).unwrap_or(3))
 }
 
