@@ -668,6 +668,25 @@ mod tests {
     }
 
     #[test]
+    fn wasd_motion_follows_spherical_surface_and_stops_at_water() {
+        let mut player = Player::default();
+        player.grounded = true;
+        let original = player.up;
+        let direction = player.forward;
+        player.walk_direction(direction, 5.0, |_| SPAWN_ELEVATION, |_| false);
+        let travelled = original.angle_between(player.up) * RADIUS;
+        assert!(travelled > 4.0 && travelled < 5.1);
+        assert!(player.moving);
+        assert!(player.destination.is_none());
+
+        let blocked_at = player.up;
+        player.moving = false;
+        player.walk_direction(direction, 3.0, |_| SPAWN_ELEVATION, |_| true);
+        assert!(player.up.abs_diff_eq(blocked_at, 1e-12));
+        assert!(!player.moving);
+    }
+
+    #[test]
     fn high_speed_does_not_skip_a_water_obstacle() {
         let mut player = Player::default();
         let start = player.up;
