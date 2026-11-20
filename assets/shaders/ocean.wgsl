@@ -88,12 +88,12 @@ fn read_ocean_mask(face_uv: FaceUv) -> f32 {
     let row = face_uv.face / 3u;
 
     let local_x = min(
-        u32(face_uv.uv.x * f32(face_width - 1u)),
+        u32(round(face_uv.uv.x * f32(face_width - 1u))),
         face_width - 1u,
     );
 
     let local_y = min(
-        u32(face_uv.uv.y * f32(face_height - 1u)),
+        u32(round(face_uv.uv.y * f32(face_height - 1u))),
         face_height - 1u,
     );
 
@@ -115,17 +115,12 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let face_uv =
         direction_to_face_uv(mesh.world_normal);
 
-    let ocean =
-        read_ocean_mask(face_uv);
-
-    if ocean < 0.5 {
+    let water = read_ocean_mask(face_uv);
+    if water < 0.25 {
         discard;
     }
 
-    return vec4<f32>(
-        0.01,
-        0.16,
-        0.42,
-        1.0,
-    );
+    let lake = vec3<f32>(0.025, 0.34, 0.40);
+    let ocean = vec3<f32>(0.01, 0.16, 0.42);
+    return vec4<f32>(select(lake, ocean, water > 0.85), 1.0);
 }

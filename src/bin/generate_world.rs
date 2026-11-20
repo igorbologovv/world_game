@@ -1,3 +1,8 @@
+#[path = "../planet.rs"]
+mod planet;
+#[path = "../river_generation.rs"]
+mod river_generation;
+
 use image::{ImageBuffer, Luma};
 use noise::{NoiseFn, Perlin};
 use std::{
@@ -8,7 +13,7 @@ use std::{
 };
 
 const FACE_COUNT: usize = 6;
-const SIZE: usize = 1024;
+const SIZE: usize = planet::HEIGHT_MAP_SIZE as usize;
 
 const MIN_HEIGHT: f64 = -12_000.0;
 const MAX_HEIGHT: f64 = 9_000.0;
@@ -84,9 +89,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(ocean_output)?;
     fs::create_dir_all(basin_output)?;
 
-    let continents = Perlin::new(42);
-    let detail = Perlin::new(1337);
-    let mountains = Perlin::new(9001);
+    let continents = Perlin::new(73);
+    let detail = Perlin::new(2531);
+    let mountains = Perlin::new(12097);
+    let archipelagos = Perlin::new(27109);
+    let lakes = Perlin::new(8431);
 
     let pixels_per_face = SIZE * SIZE;
     let total_pixels = FACE_COUNT * pixels_per_face;
@@ -107,69 +114,38 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let direction = sphere_direction(face, u, v);
 
-                let continental = fbm(
-                    &continents,
-                    direction,
-                    0.75,
-                    5,
-                    2.0,
-                    0.52,
-                );
+                let continental = fbm(&continents, direction, 0.75, 5, 2.0, 0.52);
+                let regional = fbm(&detail, direction, 3.0, 5, 2.05, 0.50);
+                let coast = fbm(&detail, direction, 24.0, 4, 2.0, 0.55);
+                let continent = continental * 0.82 + regional * 0.18;
+                let chain_noise = fbm(&archipelagos, direction, 4.9, 3, 2.0, 0.5);
+                let chain = (1.0 - chain_noise.abs() * 2.6).max(0.0).powi(3);
+                let islands = fbm(&archipelagos, direction, 19.0, 4, 2.0, 0.54);
+                let island_rise = chain * smoothstep(0.05, 0.48, islands) * 0.48;
+                let shore = continent - 0.028 + coast * 0.075 + island_rise;
 
-                let regional = fbm(
-                    &detail,
-                    direction,
-                    3.0,
-                    5,
-                    2.05,
-                    0.50,
-                );
+                let elevation = if shore <= 0.0 {
+                    -shore.abs() * 850.0 - (shore.abs() / 0.7).powf(1.65) * 9_500.0
+                } else {
+                    let inland = smoothstep(0.008, 0.09, shore);
+                    let mountain_noise = fbm(&mountains, direction, 4.5, 3, 2.0, 0.52);
+                    let mountain_belt = smoothstep(0.05, 0.49, mountain_noise);
+                    let ridge = ridge_height(&mountains, direction);
+                    let upland = smoothstep(0.055, 0.29, shore);
+                    let mountain_height = mountain_belt * upland * ridge * 9_000.0;
+                    let relief = fbm(&detail, direction, 14.0, 6, 2.0, 0.53);
+                    let ground = (shore * 3_600.0 + inland * (relief * 850.0 + 250.0))
+                        .max(8.0)
+                        + mountain_height;
 
-                let ridge_noise = fbm(
-                    &mountains,
-                    direction,
-                    2.2,
-                    5,
-                    2.1,
-                    0.52,
-                );
-
-                let ridges =
-                    (1.0 - ridge_noise.abs()).powf(3.2);
-
-                let continent =
-                    continental * 0.82 + regional * 0.18;
-
-                // Это не уровень воды.
-                // Это только threshold генератора материков.
-                let continent_threshold = 0.02;
-
-                let elevation =
-                    if continent <= continent_threshold {
-                        let depth = (
-                            (continent_threshold - continent) / 0.75
-                        )
-                            .clamp(0.0, 1.0);
-
-                        -150.0 - depth.powf(1.65) * 9_500.0
-                    } else {
-                        let land = (
-                            (continent - continent_threshold) / 0.65
-                        )
-                            .clamp(0.0, 1.0);
-
-                        let base = 80.0
-                            + land.powf(1.4) * 2_100.0
-                            + regional.max(0.0) * 650.0;
-
-                        let inland_mask =
-                            smoothstep(0.06, 0.38, land);
-
-                        let mountain_height =
-                            ridges * inland_mask * 6_500.0;
-
-                        base + mountain_height
-                    };
+                    let lake_noise = fbm(&lakes, direction, 17.0, 4, 2.1, 0.48);
+                    let lowland = smoothstep(0.045, 0.075, shore)
+                        * (1.0 - smoothstep(0.15, 0.27, shore));
+                    let depression = smoothstep(0.16, 0.37, lake_noise)
+                        * lowland
+                        * (1.0 - smoothstep(0.25, 0.65, mountain_belt));
+                    ground * (1.0 - depression) - depression * 220.0
+                };
 
                 let index = index(face, x, y);
 
@@ -179,6 +155,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let river_output = ocean_output.with_file_name("river_atlas.png");
+    let river_surface = Path::new("assets").join(planet::RIVER_SURFACE_PATH);
+    river_generation::generate(&mut heights, &mut encoded, &river_output, &river_surface)?;
     save_heightmaps(&encoded, height_output)?;
 
     println!();
@@ -229,7 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut basin_count = 0_usize;
 
     for i in 0..total_pixels {
-        if labels[i] == largest_label {
+        if largest_label != 0 && labels[i] == largest_label {
             ocean_mask[i] = true;
             ocean_count += 1;
         } else if heights[i] < SEA_LEVEL {
@@ -259,7 +238,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     println!(
-        "dry basins <0m:  {:>6.2}%",
+        "inland lakes:   {:>6.2}%",
         basin_count as f64 / total_pixels as f64 * 100.0
     );
 
@@ -274,7 +253,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Generated:");
     println!("  heightmaps -> assets/terrains/spherical/source/height/");
     println!("  ocean mask -> assets/world/ocean/");
-    println!("  basin mask -> assets/world/basins/");
+    println!("  lake masks -> assets/world/basins/");
+    println!("  water atlas -> assets/world/ocean_atlas.png");
+    println!("  river atlas -> assets/world/river_atlas.png");
+    println!("  river surface -> {}", river_surface.display());
 
     Ok(())
 }
@@ -406,53 +388,34 @@ fn save_masks(
     ocean_output: &Path,
     basin_output: &Path,
 ) -> Result<(), Box<dyn Error>> {
+    let side = SIZE as u32;
+    let mut atlas = ImageBuffer::<Luma<u8>, Vec<u8>>::new(side * 3, side * 2);
+
     for face in 0..FACE_COUNT {
-        let mut ocean =
-            ImageBuffer::<Luma<u8>, Vec<u8>>::new(
-                SIZE as u32,
-                SIZE as u32,
-            );
+        let mut ocean = ImageBuffer::<Luma<u8>, Vec<u8>>::new(side, side);
+        let mut lakes = ImageBuffer::<Luma<u8>, Vec<u8>>::new(side, side);
+        let atlas_x = (face as u32 % 3) * side;
+        let atlas_y = (face as u32 / 3) * side;
 
-        let mut basins =
-            ImageBuffer::<Luma<u8>, Vec<u8>>::new(
-                SIZE as u32,
-                SIZE as u32,
-            );
+        for y in 0..side {
+            for x in 0..side {
+                let i = index(face, x as usize, y as usize);
 
-        for y in 0..SIZE {
-            for x in 0..SIZE {
-                let i = index(face, x, y);
-
-                ocean.put_pixel(
-                    x as u32,
-                    y as u32,
-                    Luma([
-                        if ocean_mask[i] { 255 } else { 0 }
-                    ]),
-                );
-
-                let is_dry_basin =
-                    heights[i] < SEA_LEVEL
-                        && !ocean_mask[i];
-
-                basins.put_pixel(
-                    x as u32,
-                    y as u32,
-                    Luma([
-                        if is_dry_basin { 255 } else { 0 }
-                    ]),
-                );
+                if ocean_mask[i] {
+                    ocean.put_pixel(x, y, Luma([255]));
+                    atlas.put_pixel(atlas_x + x, atlas_y + y, Luma([255]));
+                } else if heights[i] < SEA_LEVEL {
+                    lakes.put_pixel(x, y, Luma([255]));
+                    atlas.put_pixel(atlas_x + x, atlas_y + y, Luma([192]));
+                }
             }
         }
 
-        ocean.save(
-            ocean_output.join(format!("face{face}.png"))
-        )?;
-
-        basins.save(
-            basin_output.join(format!("face{face}.png"))
-        )?;
+        ocean.save(ocean_output.join(format!("face{face}.png")))?;
+        lakes.save(basin_output.join(format!("face{face}.png")))?;
     }
+
+    atlas.save(ocean_output.with_file_name("ocean_atlas.png"))?;
 
     Ok(())
 }
@@ -539,6 +502,22 @@ fn fbm(
     }
 
     value / weight
+}
+
+fn ridge_height(noise: &Perlin, direction: [f64; 3]) -> f64 {
+    let mut frequency = 9.0;
+    let mut amplitude = 0.56;
+    let mut height = 0.0;
+
+    for _ in 0..6 {
+        let value = noise.get(direction.map(|coordinate| coordinate * frequency));
+        let ridge = (1.0 - value.abs()).powi(4);
+        height += ridge * amplitude;
+        frequency *= 2.12;
+        amplitude *= 0.47;
+    }
+
+    height
 }
 
 fn smoothstep(
