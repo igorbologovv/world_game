@@ -1,4 +1,5 @@
 mod forest;
+mod ocean;
 mod planet;
 mod performance;
 mod river_surface;
@@ -18,10 +19,16 @@ use bevy::{
             ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
             ImageSamplerDescriptor,
         },
+        ExtractSchedule, RenderApp,
     },
     transform::TransformSystem,
 };
-use bevy_terrain::prelude::*;
+use bevy_terrain::{
+    debug::{
+        camera::camera_controller, extract_debug, toggle_debug, update_view_parameter, DebugTerrain,
+    },
+    prelude::*,
+};
 
 const PATH: &str = "terrains/spherical";
 
@@ -80,44 +87,52 @@ impl Material for TerrainMaterial {
     }
 }
 
-//
-// Ocean material
-//
-
-#[derive(Asset, AsBindGroup, TypePath, Clone)]
-pub struct OceanMaterial {
-    #[texture(0)]
-    ocean_mask: Handle<Image>,
-}
-
-impl Material for OceanMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/ocean.wgsl".into()
-    }
-}
-
 fn main() {
-    App::new()
-        .add_plugins((
-            DefaultPlugins
-                .build()
-                .disable::<TransformPlugin>(),
-            TerrainPlugin,
-            TerrainMaterialPlugin::<TerrainMaterial>::default(),
-            TerrainDebugPlugin,
-            MaterialPlugin::<OceanMaterial>::default(),
-            MaterialPlugin::<river_surface::RiverMaterial>::default(),
-        ))
-        .add_plugins((forest::ProceduralForestPlugin, performance::FrameStatsPlugin))
-        .insert_gizmo_config(river_surface::RiverMapLines, GizmoConfig {
+    let mut app = App::new();
+    app.add_plugins((
+        DefaultPlugins.build().disable::<TransformPlugin>(),
+        TerrainPlugin,
+        TerrainMaterialPlugin::<TerrainMaterial>::default(),
+        MaterialPlugin::<ocean::OceanMaterial>::default(),
+        MaterialPlugin::<river_surface::RiverMaterial>::default(),
+    ))
+    .add_plugins((forest::ProceduralForestPlugin, performance::FrameStatsPlugin))
+    .insert_gizmo_config(
+        river_surface::RiverMapLines,
+        GizmoConfig {
             line_width: 2.25,
             ..default()
-        })
-        .add_systems(PostUpdate, river_surface::draw_map.after(TransformSystem::TransformPropagate))
-        .init_resource::<trip::TravelSpeed>()
-        .add_systems(Startup, (setup, trip::spawn))
-        .add_systems(Update, (trip::change_speed, player::walk, player::animate, trip::update).chain())
-        .run();
+        },
+    )
+    .add_systems(
+        PostUpdate,
+        river_surface::draw_map.after(TransformSystem::TransformPropagate),
+    )
+    .add_systems(
+        PostUpdate,
+        (camera_controller, ocean::cull_patches)
+            .chain()
+            .before(TransformSystem::TransformPropagate),
+    )
+    .init_resource::<DebugTerrain>()
+    .add_systems(
+        Update,
+        (toggle_debug, update_view_parameter).run_if(terrain_debug_modifier),
+    )
+    .init_resource::<trip::TravelSpeed>()
+    .add_systems(Startup, (setup, trip::spawn))
+    .add_systems(
+        Update,
+        (trip::change_speed, player::walk, player::animate, trip::update).chain(),
+    );
+    app.sub_app_mut(RenderApp)
+        .init_resource::<DebugTerrain>()
+        .add_systems(ExtractSchedule, extract_debug);
+    app.run();
+}
+
+fn terrain_debug_modifier(keys: Res<ButtonInput<KeyCode>>) -> bool {
+    keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight])
 }
 
 fn setup(
@@ -126,7 +141,8 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut river_materials: ResMut<Assets<river_surface::RiverMaterial>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
-    mut ocean_materials: ResMut<Assets<OceanMaterial>>,
+    mut ocean_materials: ResMut<Assets<ocean::OceanMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
     asset_server: Res<AssetServer>,
 ) {
@@ -163,10 +179,12 @@ fn setup(
     });
 
     let view_config = TerrainViewConfig {
-        grid_size: 64,
+        grid_size: 32,
         load_distance: 3.5,
         blend_distance: 2.8,
-        morph_distance: 20.0,
+        // Start geometry refinement closer to the camera. Height texture LOD
+        // and blending use their own distances and retain their resolution.
+        morph_distance: 10.0,
         precision_threshold_distance: 0.00003,
         ..default()
     };
@@ -180,14 +198,20 @@ fn setup(
             &view_config,
         );
 
-    //
-    // Ocean mask
-    //
+    let ocean = ocean::load(&mut images);
 
-    let ocean_mask =
-        asset_server.load(
-            "world/ocean_atlas.png"
-        );
+    commands.spawn(DirectionalLightBundle {
+        directional_light: DirectionalLight {
+            illuminance: 5000.0,
+            ..default()
+        },
+        transform: Transform::from_xyz(-1.0, 1.0, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
+    commands.insert_resource(AmbientLight {
+        brightness: 100.0,
+        ..default()
+    });
 
     //
     // World
@@ -276,23 +300,20 @@ fn setup(
                 ));
             }
 
-            let ocean_mesh = meshes.add(Sphere::new(RADIUS as f32 + 1.1).mesh().uv(1024, 512));
-
-            let ocean_material =
-                ocean_materials.add(
-                    OceanMaterial {
-                        ocean_mask,
-                    },
-                );
-
-            root.spawn_spatial(
-                MaterialMeshBundle::<OceanMaterial> {
-                    mesh: ocean_mesh,
-                    material:
-                        ocean_material,
-                    ..default()
-                },
-            );
+            if let Some((material, patches)) = ocean {
+                let material = ocean_materials.add(material);
+                for (mesh, bounds) in patches {
+                    root.spawn_spatial((
+                        MaterialMeshBundle::<ocean::OceanMaterial> {
+                            mesh: meshes.add(mesh),
+                            material: material.clone(),
+                            ..default()
+                        },
+                        bounds,
+                        NotShadowCaster,
+                    ));
+                }
+            }
         },
     );
 }

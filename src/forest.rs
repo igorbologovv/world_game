@@ -9,6 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         mesh::Indices,
+        primitives::Aabb,
         render_asset::RenderAssetUsages,
         render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
     },
@@ -40,6 +41,7 @@ const MAX_PATCHES_PER_TICK: usize = 2;
 const CANDIDATES_PER_TICK_PER_PATCH: usize = 14;
 const MAX_NEW_TREES_PER_TICK: usize = 6;
 const MAX_ACTIVE_TREES: usize = 320;
+const MAX_DESPAWNS_PER_FRAME: usize = 16;
 const STREAM_INTERVAL: f64 = 0.10;
 const LOD_INTERVAL: f64 = 0.08;
 const MAX_FOREST_ABOVE_GROUND: f64 = 700.0;
@@ -97,6 +99,7 @@ struct PatchState {
 #[derive(Resource, Default)]
 struct ForestWorld {
     patches: HashMap<PatchKey, PatchState>,
+    retiring: Vec<Entity>,
     last_check: f64,
 }
 
@@ -107,7 +110,7 @@ struct TreeInstance {
     position: DVec3,
     species: Species,
     variant: usize,
-    current_lod: Option<usize>,
+    current_lod: usize,
     trunk: Entity,
     canopy: Entity,
 }
@@ -206,6 +209,15 @@ fn stream_patches(
     reference_frames: ReferenceFrames,
     frame_entities: Query<Entity, With<ReferenceFrame>>,
 ) {
+    // Patch retirement may span several frames during fast travel or zooming.
+    let retired = forest.retiring.len();
+    for entity in forest.retiring.drain(retired.saturating_sub(MAX_DESPAWNS_PER_FRAME)..) {
+        commands.entity(entity).despawn_recursive();
+    }
+    let now = time.elapsed_seconds_f64();
+    if now - forest.last_check < STREAM_INTERVAL { return }
+    forest.last_check = now;
+
     let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = reference_frames.parent_frame(camera_entity) else { return };
     let Ok(frame_entity) = frame_entities.get_single() else { return };
@@ -217,33 +229,21 @@ fn stream_patches(
     let view_range = forest_range(is_pov_projection(projection));
 
     if altitude > MAX_FOREST_ABOVE_GROUND {
-        // Avoid destroying the entire forest on a single frame while zooming
-        // out to the planet. Each patch may own hundreds of Bevy entities.
-        let expired: Vec<PatchKey> = forest.patches.keys().copied().take(2).collect();
-        for key in expired {
-            if let Some(patch) = forest.patches.remove(&key) {
-                for entity in patch.entities {
-                    commands.entity(entity).despawn_recursive();
-                }
-            }
-        }
+        let ForestWorld { patches, retiring, .. } = &mut *forest;
+        retiring.extend(patches.drain().flat_map(|(_, patch)| patch.entities));
         return;
     }
-    let now = time.elapsed_seconds_f64();
-    if now - forest.last_check < STREAM_INTERVAL { return }
-    forest.last_check = now;
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
 
     // Keep already generated patches behind the camera until physically far
     // away. Turning around must not tear down and rebuild a whole forest.
-    forest.patches.retain(|key, patch| {
+    let ForestWorld { patches, retiring, .. } = &mut *forest;
+    patches.retain(|key, patch| {
         let center = patch_center_direction(*key);
         let anchor = center * (RADIUS + heights.sample(center).unwrap_or(0.0).max(0.0));
         if eye.distance(anchor) <= view_range + PATCH_UNLOAD_MARGIN
             && within_horizon(eye, anchor, PATCH_UNLOAD_MARGIN) { return true }
-        for entity in patch.entities.drain(..) {
-            commands.entity(entity).despawn_recursive();
-        }
+        retiring.append(&mut patch.entities);
         false
     });
 
@@ -280,9 +280,7 @@ fn stream_patches(
             if active <= MAX_ACTIVE_TREES - MAX_NEW_TREES_PER_TICK * 3 { break }
             if let Some(old) = forest.patches.remove(&key) {
                 active = active.saturating_sub(old.entities.len());
-                for entity in old.entities {
-                    commands.entity(entity).despawn_recursive();
-                }
+                forest.retiring.extend(old.entities);
             }
         }
     }
@@ -402,7 +400,7 @@ fn spawn_tree(
         position,
         species,
         variant,
-        current_lod: Some(level),
+        current_lod: level,
         trunk,
         canopy,
     });
@@ -410,6 +408,7 @@ fn spawn_tree(
 }
 
 fn update_lods(
+    mut commands: Commands,
     time: Res<Time>,
     mut last_update: Local<f64>,
     models: Res<ForestModels>,
@@ -434,52 +433,51 @@ fn update_lods(
     let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = frames.parent_frame(camera_entity) else { return };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
-    let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
     let view_range = forest_range(is_pov_projection(projection));
 
     for (mut tree, mut visibility) in &mut trees {
         let distance = eye.distance(tree.position);
-        let in_view = distance <= view_range
-            && within_horizon(eye, tree.position, 25.0)
-            && within_camera_cone(eye, forward, projection, tree.position, 24.0);
-        let next = if in_view {
-            Some(lod_with_hysteresis(distance, tree.current_lod))
-        } else {
-            None
-        };
-        let desired_visibility = if next.is_some() {
+        // Bevy culls the meshes against the actual frustum every frame.
+        let in_range = distance <= view_range && within_horizon(eye, tree.position, 25.0);
+        let desired_visibility = if in_range {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
-        if *visibility != desired_visibility { *visibility = desired_visibility; }
-
-        if tree.current_lod == next { continue }
-        if let Some(level) = next {
-            let model = &models.variants[tree.species as usize][tree.variant].lods[level];
-            if let Ok((mut mesh, mut visible)) = trunks.get_mut(tree.trunk) {
-                if let Some(wood) = &model.wood {
-                    *mesh = wood.clone();
-                    *visible = Visibility::Inherited;
-                } else {
-                    *visible = Visibility::Hidden;
+        visibility.set_if_neq(desired_visibility);
+        if !in_range {
+            continue;
+        }
+        let level = lod_with_hysteresis(distance, tree.current_lod);
+        if tree.current_lod == level {
+            continue;
+        }
+        let model = &models.variants[tree.species as usize][tree.variant].lods[level];
+        if let Ok((mut mesh, mut visible)) = trunks.get_mut(tree.trunk) {
+            if let Some(wood) = &model.wood {
+                if mesh.set_if_neq(wood.clone()) {
+                    commands.entity(tree.trunk).remove::<Aabb>();
                 }
-            }
-            if let Ok((mut mesh, mut material)) = canopies.get_mut(tree.canopy) {
-                *mesh = model.foliage.clone();
-                *material = model.foliage_material.clone();
+                visible.set_if_neq(Visibility::Inherited);
+            } else {
+                visible.set_if_neq(Visibility::Hidden);
             }
         }
-        tree.current_lod = next;
+        if let Ok((mut mesh, mut material)) = canopies.get_mut(tree.canopy) {
+            *mesh = model.foliage.clone();
+            material.set_if_neq(model.foliage_material.clone());
+            // Bevy only computes mesh bounds when the entity has no AABB.
+            commands.entity(tree.canopy).remove::<Aabb>();
+        }
+        tree.current_lod = level;
     }
 }
 
 // A 12% dead band around LOD boundaries prevents flickering and mesh
 // uploads when the camera hovers near 50/100/170 metres.
-fn lod_with_hysteresis(distance: f64, previous: Option<usize>) -> usize {
+fn lod_with_hysteresis(distance: f64, previous: usize) -> usize {
     let desired = select_lod(distance).unwrap_or(3);
-    let Some(previous) = previous else { return desired };
-    let mut current = previous.min(3);
+    let mut current = previous;
     if desired > current {
         while current < desired && distance > LOD_DISTANCES[current] * 1.12 {
             current += 1;
@@ -1021,10 +1019,16 @@ fn impostor_texture(species: Species) -> Image {
         let center_x=64.0+angle.cos()*r*spread_x;
         let center_y=crown_y+angle.sin()*r*spread_y;
         let radius=rng.range(5.5,13.0);
-        for iy in 0..SIZE {
-            for ix in 0..SIZE {
+        let radius_y = radius * 0.75;
+        let min_x = (center_x - radius).floor().max(0.0) as usize;
+        let min_y = (center_y - radius_y).floor().max(0.0) as usize;
+        let max_x = ((center_x + radius).ceil() as usize).min(SIZE - 1);
+        let max_y = ((center_y + radius_y).ceil() as usize).min(SIZE - 1);
+        for iy in min_y..=max_y {
+            let dy = ((iy as f32 - center_y) / radius_y).powi(2);
+            for ix in min_x..=max_x {
                 let distance = ((ix as f32-center_x)/radius).powi(2)
-                    + ((iy as f32-center_y)/(radius*0.75)).powi(2);
+                    + dy;
                 if distance<1.0 {
                     let shade=rng.range(0.77,1.12);
                     paint(ix,iy,[green[0]*shade,green[1]*shade,green[2]*shade],255);
@@ -1068,12 +1072,12 @@ mod tests {
     }
     #[test]
     fn lod_hysteresis_avoids_threshold_thrashing() {
-        assert_eq!(lod_with_hysteresis(51.0, Some(0)), 0);
-        assert_eq!(lod_with_hysteresis(57.0, Some(0)), 1);
-        assert_eq!(lod_with_hysteresis(48.0, Some(1)), 1);
-        assert_eq!(lod_with_hysteresis(42.0, Some(1)), 0);
-        assert_eq!(lod_with_hysteresis(110.0, Some(1)), 1);
-        assert_eq!(lod_with_hysteresis(115.0, Some(1)), 2);
+        assert_eq!(lod_with_hysteresis(51.0, 0), 0);
+        assert_eq!(lod_with_hysteresis(57.0, 0), 1);
+        assert_eq!(lod_with_hysteresis(48.0, 1), 1);
+        assert_eq!(lod_with_hysteresis(42.0, 1), 0);
+        assert_eq!(lod_with_hysteresis(110.0, 1), 1);
+        assert_eq!(lod_with_hysteresis(115.0, 1), 2);
     }
     #[test]
     fn forest_view_range_is_shorter_in_pov() {
