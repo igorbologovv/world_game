@@ -25,7 +25,11 @@ const GLOBE_RADIUS_MULTIPLIER: f64 = 3.2;
 const GLOBE_DRAG_ZOOM: f64 = 0.82;
 const POV_EYE_HEIGHT: f64 = 2.2;
 const MAX_LOOK_PITCH: f64 = 1.48;
-const LOOK_SENSITIVITY: f64 = 0.005;
+const LOOK_SENSITIVITY: f64 = 0.003;
+const WALK_SPEED: f64 = 5.5;
+const SPRINT_MULTIPLIER: f64 = 2.2;
+const THIRD_PERSON_PITCH_MIN: f64 = -1.05;
+const THIRD_PERSON_PITCH_MAX: f64 = 0.50;
 const POV_FOV: f32 = std::f32::consts::FRAC_PI_3;
 const MAP_FOV: f32 = std::f32::consts::FRAC_PI_4;
 
@@ -34,6 +38,7 @@ pub struct MapView {
     target_zoom: f64,
     globe_center: Option<DVec3>,
     first_person: Option<FirstPersonView>,
+    camera_pitch: f64,
 }
 
 impl Default for MapView {
@@ -44,6 +49,7 @@ impl Default for MapView {
             target_zoom: zoom,
             globe_center: None,
             first_person: None,
+            camera_pitch: -0.27,
         }
     }
 }
@@ -145,6 +151,48 @@ impl Player {
         })
     }
 
+    /// Walk on the sphere in an arbitrary tangent-space direction.
+    /// Movement intentionally uses the same terrain and river checks as click-to-move.
+    fn walk_direction(
+        &mut self,
+        direction: DVec3,
+        distance: f64,
+        ground_at: impl Fn(DVec3) -> f64,
+        river_at: impl Fn(DVec3) -> bool,
+    ) {
+        if !self.grounded || distance <= 0.0 {
+            return;
+        }
+        self.destination = None;
+        self.route_blocked = false;
+        let mut remaining = distance;
+        let mut ground = ground_at(self.up);
+        while remaining > 0.0 && ground > WATER_LEVEL {
+            let tangent_direction = tangent(direction, self.up);
+            let probe = remaining.min(1.5);
+            let next_up = (self.up + tangent_direction * (probe / (RADIUS + self.height))).normalize();
+            let ahead = ground_at(next_up);
+            if ahead <= WATER_LEVEL || river_at(next_up) {
+                break;
+            }
+            let slope = (ahead - ground) / probe;
+            let pace = slope.hypot(1.0).recip().max(MIN_SLOPE_PACE);
+            let step = (probe * pace).min(remaining);
+            let next_up = (self.up + tangent_direction * (step / (RADIUS + self.height))).normalize();
+            let next_height = if step >= probe { ahead } else { ground_at(next_up) };
+            if next_height <= WATER_LEVEL || river_at(next_up) {
+                break;
+            }
+            self.up = next_up;
+            self.height = next_height;
+            self.facing = tangent(tangent_direction, next_up);
+            self.walk_phase = (self.walk_phase + step as f32 * 4.0) % std::f32::consts::TAU;
+            self.moving = true;
+            ground = next_height;
+            remaining -= probe;
+        }
+    }
+
     fn distance_to(&self, target: DVec3) -> f64 {
         self.up.angle_between(target) * (RADIUS + self.height)
     }
@@ -204,8 +252,10 @@ impl Player {
         let globe_center = map.globe_center.unwrap_or(self.up);
         let orbit = DQuat::IDENTITY.slerp(DQuat::from_rotation_arc(self.up, globe_center), globe);
         let radial = orbit * self.up;
+        let pitch = map.camera_pitch * (1.0 - globe);
+        let camera_back = self.forward * pitch.cos() + self.up * pitch.sin();
         let position = radial * (RADIUS + self.height * (1.0 - globe) + eye_height)
-            - self.forward * (CAMERA_DISTANCE * (1.0 - globe));
+            - camera_back * (CAMERA_DISTANCE * (1.0 - globe));
         let focus = (self.up * (RADIUS + self.height + 1.5) + self.forward * 58.0) * (1.0 - globe);
         let north = (DVec3::Y - radial * radial.y)
             .try_normalize()
@@ -356,6 +406,7 @@ pub fn walk(
     if let Some(pov) = &mut map.first_person {
         if rotation_drag {
             pov.look(player.up, drag);
+            player.forward = tangent(pov.heading, player.up);
         }
     } else {
         map.target_zoom = (map.target_zoom - scroll * 0.10).clamp(0.0, 1.0);
@@ -367,9 +418,13 @@ pub fn walk(
         if map.zoom <= 0.5 {
             map.globe_center = None;
             if rotation_drag {
-                player.forward =
+                player.forward = tangent(
                     DQuat::from_axis_angle(player.up, -f64::from(drag.x) * LOOK_SENSITIVITY)
-                        * player.forward;
+                        * player.forward,
+                    player.up,
+                );
+                map.camera_pitch = (map.camera_pitch + f64::from(drag.y) * LOOK_SENSITIVITY)
+                    .clamp(THIRD_PERSON_PITCH_MIN, THIRD_PERSON_PITCH_MAX);
             }
         } else if map.zoom >= GLOBE_DRAG_ZOOM && rotation_drag {
             let center = map.globe_center.unwrap_or(player.up);
@@ -423,12 +478,36 @@ pub fn walk(
         }
     }
 
-    player.advance(
-        speed.meters_per_second() * time.delta_seconds_f64(),
-        ground,
-        ground_at,
-        |up| surface.is_river(up),
-    );
+    // Conventional camera-relative WASD movement. Keyboard input overrides
+    // click-to-move immediately, and diagonals are normalized.
+    let axis_forward = (keys.pressed(KeyCode::KeyW) as i32
+        - keys.pressed(KeyCode::KeyS) as i32) as f64;
+    let axis_right = (keys.pressed(KeyCode::KeyD) as i32
+        - keys.pressed(KeyCode::KeyA) as i32) as f64;
+    if axis_forward != 0.0 || axis_right != 0.0 {
+        let forward = if let Some(pov) = &map.first_person {
+            tangent(pov.heading, player.up)
+        } else {
+            tangent(player.forward, player.up)
+        };
+        let right = forward.cross(player.up).normalize();
+        let movement = (forward * axis_forward + right * axis_right).normalize();
+        let sprint = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+        let move_speed = WALK_SPEED * if sprint { SPRINT_MULTIPLIER } else { 1.0 };
+        player.walk_direction(
+            movement,
+            move_speed * time.delta_seconds_f64().min(0.05),
+            ground_at,
+            |up| surface.is_river(up),
+        );
+    } else {
+        player.advance(
+            speed.meters_per_second() * time.delta_seconds_f64(),
+            ground,
+            ground_at,
+            |up| surface.is_river(up),
+        );
+    }
 
     let position = player.up * (RADIUS + player.height + 0.38);
     let (cell, translation) = frame.translation_to_grid(position);
