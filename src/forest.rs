@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{
     math::DVec3,
+    pbr::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
     render::{
         mesh::Indices,
@@ -19,7 +20,7 @@ use bevy_terrain::{
 
 use crate::{
     planet::RADIUS,
-    player::Player,
+    player,
     surface_heights::{terrain_aligned_direction, SurfaceHeights},
 };
 
@@ -28,17 +29,20 @@ const PATCH_ANGLE: f64 = PATCH_METERS / RADIUS;
 // Render only a small, camera-facing neighborhood, even on a spherical world.
 const PATCH_RADIUS: i32 = 4;
 const CANDIDATES_PER_PATCH: usize = 112;
-const LOD_DISTANCES: [f64; 3] = [55.0, 135.0, 260.0];
-const VIEW_RANGE: f64 = 420.0;
-const PATCH_PRELOAD_MARGIN: f64 = PATCH_METERS * 1.2;
-const PATCH_UNLOAD_MARGIN: f64 = PATCH_METERS * 2.7;
+// High quality only inside 50m; cheaper foliage before 100m;
+// only sparse geometry / textured impostors past that.
+const LOD_DISTANCES: [f64; 3] = [50.0, 100.0, 170.0];
+const FIRST_PERSON_RANGE: f64 = 275.0;
+const THIRD_PERSON_RANGE: f64 = 375.0;
+const PATCH_PRELOAD_MARGIN: f64 = 86.0;
+const PATCH_UNLOAD_MARGIN: f64 = 260.0;
 const MAX_PATCHES_PER_TICK: usize = 2;
-const CANDIDATES_PER_TICK_PER_PATCH: usize = 12;
-const MAX_NEW_TREES_PER_TICK: usize = 8;
-const MAX_ACTIVE_TREES: usize = 560;
-const STREAM_INTERVAL: f64 = 0.12;
-const LOD_INTERVAL: f64 = 0.14;
-const MAX_FOREST_ALTITUDE: f64 = 1_450.0;
+const CANDIDATES_PER_TICK_PER_PATCH: usize = 14;
+const MAX_NEW_TREES_PER_TICK: usize = 6;
+const MAX_ACTIVE_TREES: usize = 320;
+const STREAM_INTERVAL: f64 = 0.10;
+const LOD_INTERVAL: f64 = 0.08;
+const MAX_FOREST_ABOVE_GROUND: f64 = 700.0;
 const VARIANTS: usize = 3;
 
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +94,12 @@ struct PatchState {
     entities: Vec<Entity>,
     next_candidate: usize,
 }
+/// Updated by player control after the first/third-person camera is positioned.
+#[derive(Resource, Default)]
+pub struct ForestView {
+    pub first_person: bool,
+}
+
 #[derive(Resource, Default)]
 struct ForestWorld {
     patches: HashMap<PatchKey, PatchState>,
@@ -119,8 +129,10 @@ pub struct ProceduralForestPlugin;
 impl Plugin for ProceduralForestPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ForestWorld>()
+            .init_resource::<ForestView>()
             .add_systems(Startup, build_models)
-            .add_systems(Update, (stream_patches, update_lods).chain());
+            // Read the current camera position, not the previous frame's.
+            .add_systems(Update, (stream_patches, update_lods).chain().after(player::walk));
     }
 }
 
@@ -355,6 +367,8 @@ fn spawn_tree(
 
     let trunk = commands.spawn((
         TrunkMesh,
+        NotShadowCaster,
+        NotShadowReceiver,
         PbrBundle {
             mesh: model.wood.clone().unwrap_or_default(),
             material: models.bark_material.clone(),
@@ -368,6 +382,8 @@ fn spawn_tree(
     )).id();
     let canopy = commands.spawn((
         CanopyMesh,
+        NotShadowCaster,
+        NotShadowReceiver,
         PbrBundle {
             mesh: model.foliage.clone(),
             material: model.foliage_material.clone(),
@@ -761,6 +777,16 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
     let trunk_radius = match species { Species::Jungle => 0.75, Species::Oak=>0.65, Species::Pine=>0.44,Species::Acacia=>0.52 };
     let trunk_length = match species { Species::Pine => height * 0.92, Species::Jungle=>height * 0.78,Species::Oak=>height * 0.72,Species::Acacia=>height * 0.57};
     let trunk_segments = [7, 5, 3][lod];
+    // Extend the root below ground to hide tile-LOD height differences.
+    // The visible trunk starts at ground level as before.
+    wood.tube(
+        Vec3::Y * -2.6,
+        Vec3::Y * 0.10,
+        trunk_radius * 1.18,
+        trunk_radius,
+        sides,
+        bark,
+    );
     let mut prev = Vec3::ZERO;
     for segment in 1..=trunk_segments {
         let t = segment as f32 / trunk_segments as f32;
