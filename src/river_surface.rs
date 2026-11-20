@@ -3,7 +3,8 @@ use std::fs;
 use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
-    render::{render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
+    reflect::TypePath,
+    render::{render_asset::RenderAssetUsages, render_resource::{AsBindGroup, PrimitiveTopology}},
 };
 
 use bevy_terrain::prelude::DebugCameraController;
