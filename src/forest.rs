@@ -1043,6 +1043,17 @@ mod tests {
         assert_eq!(select_lod(900.0),None);
     }
     #[test]
+    fn forest_view_range_is_shorter_in_pov() {
+        assert_eq!(forest_range(true), FIRST_PERSON_RANGE);
+        assert_eq!(forest_range(false), THIRD_PERSON_RANGE);
+        assert!(forest_range(true) < forest_range(false));
+        assert_eq!(select_lod(49.0), Some(0));
+        assert_eq!(select_lod(75.0), Some(1));
+        assert_eq!(select_lod(120.0), Some(2));
+        assert_eq!(select_lod(200.0), Some(3));
+    }
+
+    #[test]
     fn spherical_horizon_rejects_the_far_side() {
         let eye = DVec3::X * (RADIUS + 80.0);
         let near = DVec3::X * (RADIUS + 20.0);
