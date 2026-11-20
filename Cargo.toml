@@ -2,6 +2,7 @@
 name = "world-client"
 version = "0.1.0"
 edition = "2021"
+default-run = "world-client"
 
 [dependencies]
 bevy = "0.14.0"
