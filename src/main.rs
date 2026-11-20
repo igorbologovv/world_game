@@ -1,5 +1,6 @@
 mod forest;
 mod planet;
+mod performance;
 mod river_surface;
 mod player;
 mod surface_heights;
@@ -107,7 +108,7 @@ fn main() {
             MaterialPlugin::<OceanMaterial>::default(),
             MaterialPlugin::<river_surface::RiverMaterial>::default(),
         ))
-        .add_plugins(forest::ProceduralForestPlugin)
+        .add_plugins((forest::ProceduralForestPlugin, performance::FrameStatsPlugin))
         .insert_gizmo_config(river_surface::RiverMapLines, GizmoConfig {
             line_width: 2.25,
             ..default()
