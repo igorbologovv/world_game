@@ -25,10 +25,14 @@ use crate::{
 
 const PATCH_METERS: f64 = 145.0;
 const PATCH_ANGLE: f64 = PATCH_METERS / RADIUS;
+// Render only a small, camera-facing neighborhood, even on a spherical world.
 const PATCH_RADIUS: i32 = 4;
 const CANDIDATES_PER_PATCH: usize = 8;
-const LOD_DISTANCES: [f64; 3] = [80.0, 225.0, 480.0];
-const VIEW_RANGE: f64 = 850.0;
+const LOD_DISTANCES: [f64; 3] = [65.0, 145.0, 275.0];
+const VIEW_RANGE: f64 = 450.0;
+const PATCH_PRELOAD_MARGIN: f64 = PATCH_METERS * 1.2;
+const MAX_NEW_PATCHES_PER_TICK: usize = 2;
+const STREAM_INTERVAL: f64 = 0.10;
 const MAX_FOREST_ALTITUDE: f64 = 1_800.0;
 const VARIANTS: usize = 3;
 
@@ -80,14 +84,25 @@ struct PatchKey {
 struct ForestWorld {
     patches: HashMap<PatchKey, Vec<Entity>>,
     last_check: f64,
-    last_position: Option<DVec3>,
+}
+
+// Every tree has only two renderable children, rather than spawning all four
+// LODs at once. All instances share one of the precomputed meshes.
+#[derive(Component)]
+struct TreeInstance {
+    position: DVec3,
+    species: Species,
+    variant: usize,
+    current_lod: Option<usize>,
+    trunk: Entity,
+    canopy: Entity,
 }
 
 #[derive(Component)]
-struct TreeLod {
-    position: DVec3,
-    level: usize,
-}
+struct TrunkMesh;
+
+#[derive(Component)]
+struct CanopyMesh;
 
 pub struct ProceduralForestPlugin;
 
@@ -168,42 +183,65 @@ fn stream_patches(
     models: Res<ForestModels>,
     heights: Res<SurfaceHeights>,
     players: Query<&Player>,
-    cameras: Query<(Entity, GridTransform), With<DebugCameraController>>,
+    cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     reference_frames: ReferenceFrames,
     frame_entities: Query<Entity, With<ReferenceFrame>>,
 ) {
     let Ok(player) = players.get_single() else { return };
-    let Ok((camera_entity, camera)) = cameras.get_single() else { return };
+    let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = reference_frames.parent_frame(camera_entity) else { return };
     let Ok(frame_entity) = frame_entities.get_single() else { return };
     let camera_position = frame.grid_position_double(&camera.cell, &camera.transform);
     let camera_altitude = camera_position.length() - RADIUS;
+
+    // No thousands of distant trees when viewing the entire globe.
     if camera_altitude > MAX_FOREST_ALTITUDE {
-        if !forest.patches.is_empty() {
-            for (_, entities) in forest.patches.drain() {
-                for entity in entities { commands.entity(entity).despawn_recursive(); }
-            }
+        for (_, entities) in forest.patches.drain() {
+            for entity in entities { commands.entity(entity).despawn_recursive(); }
         }
-        forest.last_position = None;
         return;
     }
-    let position = player.surface_direction();
-    let now = time.elapsed_seconds_f64();
-    if now - forest.last_check < 0.6 { return }
-    forest.last_check = now;
-    if let Some(last) = forest.last_position {
-        if last.angle_between(position) * RADIUS < 45.0 { return }
-    }
-    forest.last_position = Some(position);
 
-    let wanted = nearby_patches(position);
+    let now = time.elapsed_seconds_f64();
+    if now - forest.last_check < STREAM_INTERVAL { return }
+    forest.last_check = now;
+
+    let camera_forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
+    let center = player.surface_direction();
+    let mut wanted: Vec<_> = nearby_patches(center)
+        .into_iter()
+        .filter_map(|key| {
+            let direction = patch_center_direction(key);
+            let ground = heights.sample(direction).unwrap_or(0.0).max(0.0);
+            let location = direction * (RADIUS + ground);
+            let distance = camera_position.distance(location);
+            (distance <= VIEW_RANGE + PATCH_PRELOAD_MARGIN
+                && within_horizon(camera_position, location, PATCH_PRELOAD_MARGIN)
+                && within_camera_cone(
+                    camera_position, camera_forward, projection, location,
+                    PATCH_PRELOAD_MARGIN,
+                ))
+                .then_some((key, distance))
+        })
+        .collect();
+
+    // HashMap/HashSet iteration order is not deterministic; always spawn the
+    // closest camera-visible patches first and cap the creation work per tick.
+    wanted.sort_by(|a, b| a.1.total_cmp(&b.1)
+        .then_with(|| a.0.row.cmp(&b.0.row))
+        .then_with(|| a.0.col.cmp(&b.0.col)));
+    let wanted_set: HashSet<PatchKey> = wanted.iter().map(|(key, _)| *key).collect();
     forest.patches.retain(|key, roots| {
-        if wanted.contains(key) { return true }
+        if wanted_set.contains(key) { return true }
         for entity in roots.drain(..) { commands.entity(entity).despawn_recursive(); }
         false
     });
-    for key in wanted {
-        if forest.patches.contains_key(&key) { continue }
+
+    for (key, _) in wanted
+        .into_iter()
+        .filter(|(key, _)| !forest.patches.contains_key(key))
+        .take(MAX_NEW_PATCHES_PER_TICK)
+    {
         let mut spawned = Vec::new();
         let mut random = Random::new(patch_seed(key));
         let (min_latitude, longitude_step) = patch_bounds(key);
@@ -219,8 +257,7 @@ fn stream_patches(
             );
             let Some(ground) = heights.sample(direction) else { continue };
             if !(3.5..=2_850.0).contains(&ground) || heights.is_river(direction) { continue }
-            let biome = select_species(direction, ground, &mut random);
-            let Some(species) = biome else { continue };
+            let Some(species) = select_species(direction, ground, &mut random) else { continue };
             let (east, north) = tangent_basis(direction);
             let offset = 4.0 / RADIUS;
             let height_east = heights.sample((direction + east * offset).normalize()).unwrap_or(ground);
@@ -229,10 +266,16 @@ fn stream_patches(
             if grade > 0.62 { continue }
             let aligned = terrain_aligned_direction(direction);
             let tree_position = aligned * (RADIUS + ground - 0.28);
+            let distance = camera_position.distance(tree_position);
+            if distance > VIEW_RANGE
+                || !within_horizon(camera_position, tree_position, 30.0)
+                || !within_camera_cone(camera_position, camera_forward, projection, tree_position, 25.0)
+            {
+                continue;
+            }
             let selected_variant = (random.next_u32() as usize) % VARIANTS;
             let scale = random.range(0.83, 1.24);
             let yaw = random.range(0.0, std::f32::consts::TAU);
-            let distance = camera_position.distance(tree_position);
             let root = spawn_tree(
                 &mut commands,
                 frame_entity,
@@ -266,65 +309,153 @@ fn spawn_tree(
     let (cell, translation) = frame.translation_to_grid(position);
     let rotation = Quat::from_rotation_arc(Vec3::Y, position.normalize().as_vec3())
         * Quat::from_rotation_y(yaw);
+    let level = select_lod(distance).unwrap_or(3);
+    let model = &models.variants[species as usize][variant].lods[level];
+
     let root = commands.spawn((
         cell,
         SpatialBundle {
-            transform: Transform { translation, rotation, scale: Vec3::splat(scale) },
+            transform: Transform {
+                translation,
+                rotation,
+                scale: Vec3::splat(scale),
+            },
             ..default()
         },
     )).id();
     commands.entity(frame_entity).add_child(root);
-    let selected = select_lod(distance);
-    let model = &models.variants[species as usize][variant];
-    for (level, lod) in model.lods.iter().enumerate() {
-        let group = commands.spawn((
-            SpatialBundle {
-                visibility: if selected == Some(level) {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                },
-                ..default()
+
+    let trunk = commands.spawn((
+        TrunkMesh,
+        PbrBundle {
+            mesh: model.wood.clone().unwrap_or_default(),
+            material: models.bark_material.clone(),
+            visibility: if model.wood.is_some() {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
             },
-            TreeLod { position, level },
-        )).id();
-        commands.entity(root).add_child(group);
-        if let Some(wood) = &lod.wood {
-            let trunk = commands.spawn(PbrBundle {
-                mesh: wood.clone(),
-                material: models.bark_material.clone(),
-                ..default()
-            }).id();
-            commands.entity(group).add_child(trunk);
-        }
-        let canopy = commands.spawn(PbrBundle {
-            mesh: lod.foliage.clone(),
-            material: lod.foliage_material.clone(),
             ..default()
-        }).id();
-        commands.entity(group).add_child(canopy);
-    }
+        },
+    )).id();
+    let canopy = commands.spawn((
+        CanopyMesh,
+        PbrBundle {
+            mesh: model.foliage.clone(),
+            material: model.foliage_material.clone(),
+            ..default()
+        },
+    )).id();
+    commands.entity(root).add_child(trunk);
+    commands.entity(root).add_child(canopy);
+    commands.entity(root).insert(TreeInstance {
+        position,
+        species,
+        variant,
+        current_lod: Some(level),
+        trunk,
+        canopy,
+    });
     root
 }
 
 fn update_lods(
-    cameras: Query<(Entity, GridTransform), With<DebugCameraController>>,
+    models: Res<ForestModels>,
+    cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     frames: ReferenceFrames,
-    mut lods: Query<(&TreeLod, &mut Visibility)>,
+    mut trees: Query<(&mut TreeInstance, &mut Visibility)>,
+    mut trunks: Query<(&mut Handle<Mesh>, &mut Visibility), With<TrunkMesh>>,
+    mut canopies: Query<(&mut Handle<Mesh>, &mut Handle<StandardMaterial>), With<CanopyMesh>>,
 ) {
-    let Ok((camera_entity, camera)) = cameras.get_single() else { return };
+    let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = frames.parent_frame(camera_entity) else { return };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
-    for (lod, mut visibility) in &mut lods {
-        let selected = select_lod(eye.distance(lod.position));
-        let next = if selected == Some(lod.level) { Visibility::Inherited } else { Visibility::Hidden };
-        if *visibility != next { *visibility = next; }
+    let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
+
+    for (mut tree, mut visibility) in &mut trees {
+        let in_view = eye.distance(tree.position) <= VIEW_RANGE
+            && within_horizon(eye, tree.position, 25.0)
+            && within_camera_cone(eye, forward, projection, tree.position, 24.0);
+        let next = if in_view {
+            select_lod(eye.distance(tree.position))
+        } else {
+            None
+        };
+        let desired_visibility = if next.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != desired_visibility { *visibility = desired_visibility; }
+
+        if tree.current_lod == next { continue }
+        if let Some(level) = next {
+            let model = &models.variants[tree.species as usize][tree.variant].lods[level];
+            if let Ok((mut mesh, mut visible)) = trunks.get_mut(tree.trunk) {
+                if let Some(wood) = &model.wood {
+                    *mesh = wood.clone();
+                    *visible = Visibility::Inherited;
+                } else {
+                    *visible = Visibility::Hidden;
+                }
+            }
+            if let Ok((mut mesh, mut material)) = canopies.get_mut(tree.canopy) {
+                *mesh = model.foliage.clone();
+                *material = model.foliage_material.clone();
+            }
+        }
+        tree.current_lod = next;
     }
 }
 
 fn select_lod(distance: f64) -> Option<usize> {
     if distance > VIEW_RANGE { return None }
     Some(LOD_DISTANCES.iter().position(|&d| distance < d).unwrap_or(3))
+}
+
+// A conservative spherical-horizon test; large trees remain visible
+// slightly beyond the ground horizon to avoid clipping their crowns.
+fn within_horizon(eye: DVec3, position: DVec3, extra_height: f64) -> bool {
+    let radius = position.length();
+    eye.dot(position) + eye.length() * extra_height >= radius * radius
+}
+
+// Perspective camera frustum approximation with a diagonal cone, expanded by
+// tree/patch extent. Conservative for both tall and wide windows.
+fn within_camera_cone(
+    eye: DVec3,
+    forward: DVec3,
+    projection: &Projection,
+    position: DVec3,
+    radius: f64,
+) -> bool {
+    let vector = position - eye;
+    let distance = vector.length();
+    if distance <= radius.max(0.1) { return true }
+    let half_angle = match projection {
+        Projection::Perspective(p) => {
+            let vertical = f64::from(p.fov) * 0.5;
+            let horizontal = (vertical.tan() * f64::from(p.aspect_ratio)).atan();
+            vertical.hypot(horizontal)
+        }
+        Projection::Orthographic(_) => return true,
+    };
+    let extension = (radius / distance).clamp(0.0, 1.0).asin() + 0.06;
+    let angle = (half_angle + extension).min(std::f64::consts::PI);
+    forward.dot(vector / distance) >= angle.cos()
+}
+
+fn patch_center_direction(key: PatchKey) -> DVec3 {
+    let (min_latitude, longitude_step) = patch_bounds(key);
+    let latitude = (min_latitude + PATCH_ANGLE * 0.5)
+        .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+    let longitude = (f64::from(key.col) + 0.5) * longitude_step;
+    let (sin_lat, cos_lat) = latitude.sin_cos();
+    DVec3::new(
+        cos_lat * longitude.cos(),
+        sin_lat,
+        cos_lat * longitude.sin(),
+    )
 }
 
 fn nearby_patches(direction: DVec3) -> HashSet<PatchKey> {
