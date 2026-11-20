@@ -31,7 +31,7 @@ From PowerShell inside `world_game`:
 .\scripts\windows-build.ps1 -Run
 ```
 
-The script checks that Cargo and the sibling crate exist, runs `cargo build --locked`, and optionally starts the client with `cargo run --locked`. Alternatively, run those Cargo commands manually from the repository root. Do not run them from `Epic_Game_V` when building the client.
+The script checks that Cargo and the sibling crate exist, runs `cargo build --locked`, and optionally starts the client with `cargo run --locked --bin world-client`. The root Cargo manifest also sets `default-run = "world-client"`, so `cargo run --locked` starts the client by default. To run the world generator instead, use `cargo run --locked --bin generate_world`. Alternatively, run those Cargo commands manually from the repository root. Do not run them from `Epic_Game_V` when building the client.
 
 If PowerShell blocks the script, run it for the current process with:
 
