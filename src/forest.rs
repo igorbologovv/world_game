@@ -217,8 +217,15 @@ fn stream_patches(
     let view_range = forest_range(is_pov_projection(projection));
 
     if altitude > MAX_FOREST_ABOVE_GROUND {
-        for (_, patch) in forest.patches.drain() {
-            for entity in patch.entities { commands.entity(entity).despawn_recursive(); }
+        // Avoid destroying the entire forest on a single frame while zooming
+        // out to the planet. Each patch may own hundreds of Bevy entities.
+        let expired: Vec<PatchKey> = forest.patches.keys().copied().take(2).collect();
+        for key in expired {
+            if let Some(patch) = forest.patches.remove(&key) {
+                for entity in patch.entities {
+                    commands.entity(entity).despawn_recursive();
+                }
+            }
         }
         return;
     }
@@ -269,7 +276,7 @@ fn stream_patches(
                 .then_some((key, distance))
         }).collect();
         eviction.sort_by(|a,b| b.1.total_cmp(&a.1));
-        for (key, _) in eviction {
+        for (key, _) in eviction.into_iter().take(2) {
             if active <= MAX_ACTIVE_TREES - MAX_NEW_TREES_PER_TICK * 3 { break }
             if let Some(old) = forest.patches.remove(&key) {
                 active = active.saturating_sub(old.entities.len());
