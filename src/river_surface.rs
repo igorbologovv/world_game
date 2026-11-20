@@ -3,7 +3,8 @@ use std::fs;
 use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
-    render::{render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
+    reflect::TypePath,
+    render::{render_asset::RenderAssetUsages, render_resource::{AsBindGroup, PrimitiveTopology}},
 };
 
 use bevy_terrain::prelude::DebugCameraController;
@@ -16,6 +17,19 @@ use crate::{
 
 #[derive(Component)]
 pub struct RiverWater;
+
+// Bevy's view globals supply animation time directly; no per-frame CPU updates.
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct RiverMaterial {
+    #[uniform(0)]
+    pub brightness: f32,
+}
+
+impl Material for RiverMaterial {
+    fn fragment_shader() -> bevy::render::render_resource::ShaderRef {
+        "shaders/river_water.wgsl".into()
+    }
+}
 
 #[derive(Default, Reflect, GizmoConfigGroup)]
 pub struct RiverMapLines;
@@ -65,8 +79,30 @@ pub fn load() -> Option<(Mesh, RiverCenterlines)> {
             [start, end]
         })
         .collect();
+    // Assign each triangle downstream distance (U, in meters) and bank-to-bank
+    // offset (V). Generate UVs from the existing surface: no river binary format
+    // changes and no regeneration of world assets are required.
+    let mut uvs = Vec::with_capacity(positions.len());
+    for reach in positions.chunks_exact(RIVER_REACH_VERTICES) {
+        let start = Vec3::from_array(reach[6]);
+        let left_end = Vec3::from_array(reach[1]);
+        let right_end = Vec3::from_array(reach[5]);
+        let end = (left_end + right_end).normalize()
+            * ((left_end.length() + right_end.length()) * 0.5);
+        let flow = (end - start).normalize_or_zero();
+        let left_start = Vec3::from_array(reach[0]);
+        let right_start = Vec3::from_array(reach[2]);
+        let bank_vector = right_start - left_start;
+        let width = bank_vector.length().max(0.01);
+        let across = bank_vector / width;
+        for vertex in reach {
+            let offset = Vec3::from_array(*vertex) - start;
+            uvs.push([offset.dot(flow), 0.5 + offset.dot(across) / width]);
+        }
+    }
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     Some((mesh, RiverCenterlines(centerlines)))
 }
 

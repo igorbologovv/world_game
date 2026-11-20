@@ -104,6 +104,7 @@ fn main() {
             TerrainMaterialPlugin::<TerrainMaterial>::default(),
             TerrainDebugPlugin,
             MaterialPlugin::<OceanMaterial>::default(),
+            MaterialPlugin::<river_surface::RiverMaterial>::default(),
         ))
         .insert_gizmo_config(river_surface::RiverMapLines, GizmoConfig {
             line_width: 2.25,
@@ -120,6 +121,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut river_materials: ResMut<Assets<river_surface::RiverMaterial>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut ocean_materials: ResMut<Assets<OceanMaterial>>,
     mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
@@ -259,12 +261,10 @@ fn setup(
 
             if let Some(surface) = river {
                 root.spawn_spatial((
-                    PbrBundle {
+                    MaterialMeshBundle::<river_surface::RiverMaterial> {
                         mesh: meshes.add(surface),
-                        material: materials.add(StandardMaterial {
-                            base_color: Color::srgb(0.12, 0.59, 0.72),
-                            unlit: true,
-                            ..default()
+                        material: river_materials.add(river_surface::RiverMaterial {
+                            brightness: 1.0,
                         }),
                         ..default()
                     },

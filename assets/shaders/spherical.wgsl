@@ -39,18 +39,95 @@ fn macro_noise(position: vec3<f32>) -> f32 {
     return mix(near, far, w.z) - 0.5;
 }
 
-fn material_weights(height: f32, slope: f32, variation: f32) -> array<f32, 5> {
-    // The height atlas is smoothed at planetary scale. Use its resolved grades for exposed rock.
-    let exposed = smoothstep(0.016, 0.045, slope);
-    let snow = smoothstep(3200.0, 5000.0, height - 1400.0 * exposed + 900.0 * variation)
-        * (1.0 - 0.85 * exposed);
-    let rock = (1.0 - snow) * exposed;
-    let ground = (1.0 - snow) * (1.0 - exposed);
-    let sand = ground * (1.0 - smoothstep(60.0, 250.0, height + 100.0 * variation));
-    let dirt = clamp(0.27 + 0.32 * smoothstep(600.0, 3300.0, height)
-        + 0.26 * smoothstep(0.004, 0.027, slope) + 0.85 * variation, 0.05, 0.95);
-    let soil = ground - sand;
-    return array(sand, soil * (1.0 - dirt), soil * dirt, rock, snow);
+// A biome is climate, not simply a height band. Direction is in the planet's
+// local frame, so climate stays fixed when the high-precision origin shifts.
+struct BiomeSurface {
+    weights: array<f32, 5>,
+    vegetation_tint: vec3<f32>,
+    forest_cover: f32,
+}
+
+fn biome_surface(
+    height: f32,
+    slope: f32,
+    direction: vec3<f32>,
+    variation: f32,
+) -> BiomeSurface {
+    // Y is the planet's north/south axis. Separate broad moisture systems from
+    // shorter weather-scale patches; neither depends on terrain tile boundaries.
+    let latitude = abs(direction.y);
+    let weather = macro_noise(direction * 5.8 + vec3<f32>(17.3, -4.7, 11.8));
+    let rainfall_patches = macro_noise(direction * 17.0 + vec3<f32>(-2.1, 9.4, 4.6));
+    let moisture = clamp(
+        0.50 + 0.96 * weather + 0.32 * rainfall_patches + 0.13 * variation,
+        0.0, 1.0,
+    );
+    let temperature = clamp(
+        1.02 - 1.10 * latitude - max(height, 0.0) / 12500.0
+            + 0.13 * macro_noise(direction * 4.1 + vec3<f32>(3.2, 18.6, -8.4)),
+        0.0, 1.0,
+    );
+
+    // The old 0.016–0.045 slope interval made almost every slope bare rock.
+    // 0.48–0.88 on sin(inclination) restricts rock to genuinely steep cliffs.
+    let cliff = smoothstep(0.48, 0.88, slope);
+    let mountain_snow = smoothstep(
+        2850.0, 4750.0,
+        height + (0.52 - temperature) * 1400.0 + variation * 400.0,
+    );
+    let polar_snow = smoothstep(0.76, 0.96, latitude);
+    let snow = clamp(max(mountain_snow, polar_snow) * (1.0 - 0.20 * cliff), 0.0, 1.0);
+    let rock = (1.0 - snow) * cliff;
+    let soil_available = (1.0 - snow) * (1.0 - cliff);
+
+    // Sand on coastlines and in warm dry interiors, not on all low terrain.
+    let beach = 1.0 - smoothstep(20.0, 170.0, height + variation * 80.0);
+    let desert = smoothstep(0.65, 0.86, temperature)
+        * (1.0 - smoothstep(0.19, 0.43, moisture));
+    let sand = soil_available * max(beach, desert);
+    let vegetated = max(soil_available - sand, 0.0);
+    let exposed_soil = clamp(
+        0.12 + 0.32 * (1.0 - moisture)
+            + 0.14 * smoothstep(900.0, 3900.0, height) + 0.16 * variation,
+        0.07, 0.65,
+    );
+
+    // Smooth, overlapping climate zones: tropical rainforest, temperate
+    // forest, savanna, steppe, temperate grassland and polar tundra.
+    let rainforest = smoothstep(0.68, 0.88, temperature)
+        * smoothstep(0.58, 0.82, moisture);
+    let temperate_forest = smoothstep(0.29, 0.49, temperature)
+        * (1.0 - smoothstep(0.70, 0.90, temperature))
+        * smoothstep(0.53, 0.79, moisture);
+    let forest = clamp(max(rainforest, temperate_forest), 0.0, 1.0);
+    let savanna = smoothstep(0.68, 0.86, temperature)
+        * smoothstep(0.18, 0.37, moisture)
+        * (1.0 - smoothstep(0.49, 0.70, moisture));
+    let steppe = (1.0 - smoothstep(0.22, 0.54, moisture))
+        * (1.0 - savanna)
+        * smoothstep(0.25, 0.51, temperature);
+    let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
+
+    // Tint only the grass/dirt layers. Rock remains mineral-grey and snow
+    // remains white. Triplanar PBR albedo/normal/roughness stay in use.
+    var foliage = vec3<f32>(0.91, 1.09, 0.83);
+    foliage = mix(foliage, vec3<f32>(1.38, 1.12, 0.64), savanna);
+    foliage = mix(foliage, vec3<f32>(1.23, 1.12, 0.75), steppe);
+    foliage = mix(foliage, vec3<f32>(0.58, 0.92, 0.56), temperate_forest);
+    foliage = mix(foliage, vec3<f32>(0.40, 0.85, 0.49), rainforest);
+    foliage = mix(foliage, vec3<f32>(0.81, 0.90, 0.77), tundra);
+
+    return BiomeSurface(
+        array(
+            sand,
+            vegetated * (1.0 - exposed_soil),
+            vegetated * exposed_soil,
+            rock,
+            snow,
+        ),
+        foliage,
+        forest,
+    );
 }
 
 struct Projection {
@@ -130,8 +207,13 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let variation = regional * 0.6 + patches * 0.4;
     let tint = 1.0 + 0.32 * regional + 0.32 * patches + 0.26 * detail;
 
-    var weights = material_weights(height, slope, variation);
+    let biome = biome_surface(height, slope, normalize(position), variation);
+    var weights = biome.weights;
     var projections = triplanar_projections(position, dx, dy, surface_normal);
+    // Subtle canopy-scale color breakup in wooded biomes. This is surface
+    // shading, not tree geometry; actual forests still need vegetation meshes.
+    let canopy_patches = smoothstep(-0.18, 0.24, macro_noise(position / 320.0))
+        * (1.0 - smoothstep(180.0, 750.0, footprint));
     // Local copies allow runtime array indexing on the terrain pipeline's WGSL compiler.
     var periods = MATERIAL_PERIODS;
 
@@ -143,7 +225,12 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
                 let projection = projections[axis];
                 let projected_weight = weight * projection.weight;
                 let sample = sample_projection(projection, 1.0 / periods[layer], layer);
-                surface.color += sample.color * projected_weight;
+                var albedo = sample.color;
+                if layer == 1 || layer == 2 {
+                    let canopy_darkening = 1.0 - 0.16 * biome.forest_cover * canopy_patches;
+                    albedo *= biome.vegetation_tint * canopy_darkening;
+                }
+                surface.color += albedo * projected_weight;
                 surface.normal_offset += sample.normal_offset * projected_weight;
                 surface.roughness += sample.roughness * projected_weight;
             }
