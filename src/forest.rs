@@ -1033,8 +1033,11 @@ mod tests {
     #[test]
     fn lods_are_monotonic() {
         assert_eq!(select_lod(0.0),Some(0));
-        assert_eq!(select_lod(100.0),Some(1));
-        assert_eq!(select_lod(250.0),Some(2));
+        assert_eq!(select_lod(49.0),Some(0));
+        assert_eq!(select_lod(75.0),Some(1));
+        assert_eq!(select_lod(100.0),Some(2));
+        assert_eq!(select_lod(150.0),Some(2));
+        assert_eq!(select_lod(250.0),Some(3));
         assert_eq!(select_lod(350.0),Some(3));
         assert_eq!(select_lod(650.0),None);
         assert_eq!(select_lod(900.0),None);
