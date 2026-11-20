@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package moontrade.economy.v1;
+
+message SnapshotRequest {
+  uint32 section_mask = 1;
+}
+
+message SnapshotResponse {
+  SettlementSummary settlement = 1;
+  Population population = 2;
+  repeated Balance balances = 3;
+  repeated Building buildings = 4;
+  BuildBudget build_budget = 5;
+}
+
+message SettleRequest {}
+
+message SettleResponse {
+  SettlementSummary settlement = 1;
+  repeated Balance balances = 2;
+}
+
+message PlaceBuildingRequest {
+  string map_code = 1;
+  string building_type_code = 2;
+  int32 tile_x = 3;
+  int32 tile_y = 4;
+  int32 tile_z = 5;
+}
+
+message PlaceBuildingResponse {
+  Building building = 1;
+  BuildBudget build_budget = 2;
+}
+
+message SetWorkersRequest {
+  string building_id = 1;
+  int32 assigned_workers = 2;
+}
+
+message SetWorkersResponse {
+  Building building = 1;
+}
+
+message UpgradeBuildingRequest {
+  string building_id = 1;
+}
+
+message UpgradeBuildingResponse {
+  Building building = 1;
+  repeated Balance balances = 2;
+}
+
+message IncreasePopulationRequest {
+  uint32 amount = 1;
+}
+
+message IncreasePopulationResponse {
+  Population population = 1;
+  uint32 added_population = 2;
+  string mt_cost = 3;
+  string food_cost = 4;
+  string remaining_mt_balance = 5;
+  Balance food_balance = 6;
+}
+
+message SettlementSummary {
+  uint64 settled_hours = 1;
+  string previous_settled_at = 2;
+  string new_settled_at = 3;
+}
+
+message Population {
+  uint64 total_population = 1;
+}
+
+message Balance {
+  string asset_code = 1;
+  int32 tier = 2;
+  string amount = 3;
+}
+
+message Building {
+  string id = 1;
+  string building_type_code = 2;
+  string map_code = 3;
+  int32 tile_x = 4;
+  int32 tile_y = 5;
+  int32 tile_z = 6;
+  int32 footprint_width = 7;
+  int32 footprint_height = 8;
+  int32 footprint_depth = 9;
+  int32 level = 10;
+  int32 assigned_workers = 11;
+  uint32 flags = 12;
+}
+
+message BuildBudget {
+  uint32 total_cells = 1;
+  uint32 used_cells = 2;
+  uint32 free_cells = 3;
+}
+
+message ErrorResponse {
+  string code = 1;
+  string message = 2;
+}

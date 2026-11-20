@@ -1,0 +1,16 @@
+pub const SECTION_SETTLEMENT: u32 = 1 << 0;
+pub const SECTION_POPULATION: u32 = 1 << 1;
+pub const SECTION_BALANCES: u32 = 1 << 2;
+pub const SECTION_BUILDINGS: u32 = 1 << 3;
+pub const SECTION_BUILD_BUDGET: u32 = 1 << 4;
+pub const SECTION_ALL: u32 = SECTION_SETTLEMENT
+    | SECTION_POPULATION
+    | SECTION_BALANCES
+    | SECTION_BUILDINGS
+    | SECTION_BUILD_BUDGET;
+
+pub const BUILDING_ACTIVE: u32 = 1 << 0;
+pub const BUILDING_CONSTRUCTING: u32 = 1 << 1;
+pub const BUILDING_DEMOLISHED: u32 = 1 << 2;
+pub const BUILDING_HAS_WORKERS: u32 = 1 << 3;
+pub const BUILDING_UPGRADABLE: u32 = 1 << 4;
