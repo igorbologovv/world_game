@@ -547,7 +547,7 @@ fn select_species(direction: DVec3, height: f64, random: &mut Random) -> Option<
     let weather = noise3(dir * 5.8 + Vec3::new(17.3, -4.7, 11.8));
     let patches = noise3(dir * 17.0 + Vec3::new(-2.1, 9.4, 4.6));
     let moisture = (0.50 + 0.96 * weather + 0.32 * patches).clamp(0.0, 1.0);
-    let temp = (1.02 - 1.10 * latitude - (height.max(0.0) as f32) / 12_500.0
+    let temp = (1.07 - 0.78 * latitude - (height.max(0.0) as f32) / 16_000.0
         + 0.13 * noise3(dir * 4.1 + Vec3::new(3.2, 18.6, -8.4))).clamp(0.0, 1.0);
     let roll = random.unit();
     if height > 2_600.0 || latitude > 0.96 || temp < 0.07 { return None }
