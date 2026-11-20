@@ -2,9 +2,26 @@
 name = "world-client"
 version = "0.1.0"
 edition = "2021"
+default-run = "world-client"
 
 [dependencies]
 bevy = "0.14.0"
 bevy_terrain = { path = "../bevy_terrain", features = ["high_precision"] }
 image = { version = "0.25", features = ["tiff"] }
 noise = "0.9"
+
+# On Linux keep Bevy in a shared library. This makes editing world-client
+# cheaper because its small executable no longer relinks all of Bevy.
+# Windows and other targets keep the existing static linkage.
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { version = "0.14.0", features = ["dynamic_linking"] }
+
+# Smaller debugging symbols make incremental development faster and reduce
+# peak linker memory without removing backtraces/normal debugging entirely.
+[profile.dev]
+debug = 1
+incremental = true
+
+# Optimize engine dependencies once; keep the game's own crate quick to build.
+[profile.dev.package."*"]
+opt-level = 1

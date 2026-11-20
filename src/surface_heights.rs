@@ -97,8 +97,13 @@ pub fn terrain_aligned_direction(direction: DVec3) -> DVec3 {
     let (face, source) = surface_uv(direction);
     let size = f64::from(HEIGHT_MAP_SIZE);
     let baked = (source * (size - 1.0) + 0.5) / size + TEXEL_CENTER_OFFSET;
-    let uv = baked.clamp(DVec2::ZERO, DVec2::ONE) * 2.0 - 1.0;
-    let plane = uv / (1.0 + CUBE_CORRECTION - CUBE_CORRECTION * uv * uv).powf(0.5);
+    cube_direction(face, baked.clamp(DVec2::ZERO, DVec2::ONE))
+}
+
+pub fn cube_direction(face: usize, uv: DVec2) -> DVec3 {
+    let uv = uv * 2.0 - 1.0;
+    let denominator = 1.0 + CUBE_CORRECTION - CUBE_CORRECTION * uv * uv;
+    let plane = uv / DVec2::new(denominator.x.sqrt(), denominator.y.sqrt());
     let DVec2 { x: u, y: v } = plane;
     match face {
         0 => DVec3::new(-1.0, -v, u),
@@ -137,8 +142,8 @@ fn surface_uv(direction: DVec3) -> (usize, DVec2) {
     } else {
         (5, DVec2::new(z, x) / -y)
     };
-    let corrected =
-        plane * ((1.0 + CUBE_CORRECTION) / (1.0 + CUBE_CORRECTION * plane * plane)).powf(0.5);
+    let correction = (1.0 + CUBE_CORRECTION) / (1.0 + CUBE_CORRECTION * plane * plane);
+    let corrected = plane * DVec2::new(correction.x.sqrt(), correction.y.sqrt());
     let uv = (corrected * 0.5 + 0.5).clamp(DVec2::ZERO, DVec2::ONE);
     (face, uv)
 }
@@ -151,8 +156,11 @@ fn bilinear(uv: DVec2, width: u32, height: u32, sample: impl Fn(u32, u32) -> f64
     let y = pixel.y.floor() as u32;
     let right = (x + 1).min(last_x);
     let down = (y + 1).min(last_y);
-    let top = sample(x, y) + (sample(right, y) - sample(x, y)) * pixel.x.fract();
-    let bottom = sample(x, down) + (sample(right, down) - sample(x, down)) * pixel.x.fract();
+    let top_left = sample(x, y);
+    let bottom_left = sample(x, down);
+    let dx = pixel.x.fract();
+    let top = top_left + (sample(right, y) - top_left) * dx;
+    let bottom = bottom_left + (sample(right, down) - bottom_left) * dx;
     top + (bottom - top) * pixel.y.fract()
 }
 

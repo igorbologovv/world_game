@@ -39,6 +39,13 @@ fn macro_noise(position: vec3<f32>) -> f32 {
     return mix(near, far, w.z) - 0.5;
 }
 
+fn filtered_noise(position: vec3<f32>, strength: f32) -> f32 {
+    if strength > 0.0 {
+        return macro_noise(position) * strength;
+    }
+    return 0.0;
+}
+
 // A biome is climate, not simply a height band. Direction is in the planet's
 // local frame, so climate stays fixed when the high-precision origin shifts.
 struct BiomeSurface {
@@ -63,7 +70,7 @@ fn biome_surface(
         0.0, 1.0,
     );
     let temperature = clamp(
-        1.02 - 1.10 * latitude - max(height, 0.0) / 12500.0
+        1.07 - 0.78 * latitude - max(height, 0.0) / 16000.0
             + 0.13 * macro_noise(direction * 4.1 + vec3<f32>(3.2, 18.6, -8.4)),
         0.0, 1.0,
     );
@@ -75,7 +82,7 @@ fn biome_surface(
         2850.0, 4750.0,
         height + (0.52 - temperature) * 1400.0 + variation * 400.0,
     );
-    let polar_snow = smoothstep(0.76, 0.96, latitude);
+    let polar_snow = smoothstep(0.93, 0.994, latitude);
     let snow = clamp(max(mountain_snow, polar_snow) * (1.0 - 0.20 * cliff), 0.0, 1.0);
     let rock = (1.0 - snow) * cliff;
     let soil_available = (1.0 - snow) * (1.0 - cliff);
@@ -95,10 +102,10 @@ fn biome_surface(
     // Smooth, overlapping climate zones: tropical rainforest, temperate
     // forest, savanna, steppe, temperate grassland and polar tundra.
     let rainforest = smoothstep(0.68, 0.88, temperature)
-        * smoothstep(0.58, 0.82, moisture);
+        * smoothstep(0.47, 0.76, moisture);
     let temperate_forest = smoothstep(0.29, 0.49, temperature)
         * (1.0 - smoothstep(0.70, 0.90, temperature))
-        * smoothstep(0.53, 0.79, moisture);
+        * smoothstep(0.44, 0.73, moisture);
     let forest = clamp(max(rainforest, temperate_forest), 0.0, 1.0);
     let savanna = smoothstep(0.68, 0.86, temperature)
         * smoothstep(0.18, 0.37, moisture)
@@ -151,7 +158,11 @@ fn triplanar_projections(
     let sign = select(vec3<f32>(-1.0), vec3<f32>(1.0), normal >= vec3<f32>(0.0));
     let squared = normal * normal;
     let axis_weights = squared * squared;
-    let weights = axis_weights / dot(axis_weights, vec3<f32>(1.0));
+    let normalized = axis_weights / dot(axis_weights, vec3<f32>(1.0));
+    // Fade negligible projections to zero before sampling. Renormalizing
+    // keeps both the color and the normal blend continuous across slopes.
+    let contributing = normalized * smoothstep(vec3<f32>(0.005), vec3<f32>(0.02), normalized);
+    let weights = contributing / dot(contributing, vec3<f32>(1.0));
 
     // Flip the V axis on negative faces so each normal map has a right-handed basis.
     let x_uv = vec2<f32>(1.0, sign.x);
@@ -167,17 +178,48 @@ fn triplanar_projections(
     );
 }
 
-fn sample_projection(projection: Projection, scale: f32, layer: i32) -> SurfaceSample {
-    let uv = projection.uv * scale;
-    let dx = projection.dx * scale;
-    let dy = projection.dy * scale;
-    let color = textureSampleGrad(terrain_albedo, terrain_sampler, uv, layer, dx, dy).rgb;
-    let normal_roughness = textureSampleGrad(terrain_normal_roughness, terrain_sampler, uv, layer, dx, dy);
-    let normal = normal_roughness.xyz * 2.0 - 1.0;
+fn sample_layer(
+    layer: i32, scale: f32, projections: array<Projection, 3>,
+    albedo_detail: f32, normal_detail: f32,
+) -> SurfaceSample {
+    var color = vec3<f32>(0.0);
+    var roughness = 0.0;
+    var offset = vec3<f32>(0.0);
 
-    // Blend offsets so a flat detail normal preserves the height-derived normal on every axis.
-    let offset = (projection.tangent * normal.x + projection.bitangent * normal.y) / max(normal.z, 0.25);
-    return SurfaceSample(color, offset, normal_roughness.a);
+    if albedo_detail > 0.0 {
+        var axes = projections;
+        for (var axis = 0; axis < 3; axis++) {
+            let projection = axes[axis];
+            if projection.weight > 0.0 {
+                let uv = projection.uv * scale;
+                let dx = projection.dx * scale;
+                let dy = projection.dy * scale;
+                color += textureSampleGrad(terrain_albedo, terrain_sampler, uv, layer, dx, dy).rgb
+                    * projection.weight;
+                if normal_detail > 0.0 {
+                    let mapped = textureSampleGrad(terrain_normal_roughness, terrain_sampler, uv, layer, dx, dy);
+                    let normal = mapped.xyz * 2.0 - 1.0;
+                    // Flat detail normals preserve the height-derived normal.
+                    offset += (projection.tangent * normal.x + projection.bitangent * normal.y)
+                        * (projection.weight / max(normal.z, 0.25));
+                    roughness += mapped.a * projection.weight;
+                }
+            }
+        }
+    }
+    // The final mip of each array is a 1×1 average for every material.
+    if albedo_detail < 1.0 {
+        let mip = i32(textureNumLevels(terrain_albedo)) - 1;
+        let average = textureLoad(terrain_albedo, vec2<i32>(0), layer, mip).rgb;
+        color = mix(average, color, albedo_detail);
+    }
+    if normal_detail < 1.0 {
+        let mip = i32(textureNumLevels(terrain_normal_roughness)) - 1;
+        let average = textureLoad(terrain_normal_roughness, vec2<i32>(0), layer, mip).a;
+        roughness = mix(average, roughness, normal_detail);
+    }
+
+    return SurfaceSample(color, offset * normal_detail, roughness);
 }
 
 @fragment
@@ -196,24 +238,36 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let slope = length(cross(up, surface_normal));
 
     // Use planet-local coordinates so rebasing the floating origin leaves the textures anchored.
-    let position = compute_local_position(info.coordinate) * (config.scale + height);
+    let direction = compute_local_position(info.coordinate);
+    let position = direction * (config.scale + height);
     let dx = dpdx(position);
     let dy = dpdy(position);
-    let footprint = max(length(dx), length(dy));
+    let pixel_dx = length(dx);
+    let pixel_dy = length(dy);
+    let footprint = max(pixel_dx, pixel_dy);
+    // Fade normal detail first to reduce shimmer at grazing angles. Keep
+    // albedo detail while it still spans pixels along either screen axis.
+    let normal_detail = 1.0 - smoothstep(1.5, 9.0, footprint);
+    let albedo_detail = 1.0 - smoothstep(28.0, 90.0, min(pixel_dx, pixel_dy));
 
     let regional = macro_noise(position / 85000.0);
-    let patches = macro_noise(position / 2300.0) * (1.0 - smoothstep(500.0, 2300.0, footprint));
-    let detail = macro_noise(position / 190.0) * (1.0 - smoothstep(45.0, 190.0, footprint));
+    let patches = filtered_noise(position / 2300.0, 1.0 - smoothstep(500.0, 2300.0, footprint));
+    let detail = filtered_noise(position / 190.0, 1.0 - smoothstep(45.0, 190.0, footprint));
     let variation = regional * 0.6 + patches * 0.4;
     let tint = 1.0 + 0.32 * regional + 0.32 * patches + 0.26 * detail;
 
-    let biome = biome_surface(height, slope, normalize(position), variation);
+    let biome = biome_surface(height, slope, direction, variation);
     var weights = biome.weights;
-    var projections = triplanar_projections(position, dx, dy, surface_normal);
-    // Subtle canopy-scale color breakup in wooded biomes. This is surface
-    // shading, not tree geometry; actual forests still need vegetation meshes.
-    let canopy_patches = smoothstep(-0.18, 0.24, macro_noise(position / 320.0))
-        * (1.0 - smoothstep(180.0, 750.0, footprint));
+    var projections: array<Projection, 3>;
+    if albedo_detail > 0.0 {
+        projections = triplanar_projections(position, dx, dy, surface_normal);
+    }
+    let canopy_strength = biome.forest_cover * (1.0 - smoothstep(180.0, 750.0, footprint));
+    var vegetation_tint = biome.vegetation_tint;
+    if canopy_strength > 0.0 && weights[1] + weights[2] > 0.0 {
+        let canopy = smoothstep(-0.18, 0.24, macro_noise(position / 320.0));
+        vegetation_tint *= 1.0 - 0.16 * canopy_strength * canopy;
+    }
     // Local copies allow runtime array indexing on the terrain pipeline's WGSL compiler.
     var periods = MATERIAL_PERIODS;
 
@@ -221,24 +275,22 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     for (var layer = 0; layer < 5; layer++) {
         let weight = weights[layer];
         if weight > 0.0 {
-            for (var axis = 0; axis < 3; axis++) {
-                let projection = projections[axis];
-                let projected_weight = weight * projection.weight;
-                let sample = sample_projection(projection, 1.0 / periods[layer], layer);
-                var albedo = sample.color;
-                if layer == 1 || layer == 2 {
-                    let canopy_darkening = 1.0 - 0.16 * biome.forest_cover * canopy_patches;
-                    albedo *= biome.vegetation_tint * canopy_darkening;
-                }
-                surface.color += albedo * projected_weight;
-                surface.normal_offset += sample.normal_offset * projected_weight;
-                surface.roughness += sample.roughness * projected_weight;
+            let sample = sample_layer(layer, 1.0 / periods[layer], projections, albedo_detail, normal_detail);
+            var albedo = sample.color;
+            if layer == 1 || layer == 2 {
+                albedo *= vegetation_tint;
             }
+            surface.color += albedo * weight;
+            surface.normal_offset += sample.normal_offset * weight;
+            surface.roughness += sample.roughness * weight;
         }
     }
 
-    let tangent_offset = surface.normal_offset - surface_normal * dot(surface_normal, surface.normal_offset);
-    let shaded_normal = normalize(surface_normal + tangent_offset);
+    var shaded_normal = surface_normal;
+    if normal_detail > 0.0 {
+        let tangent_offset = surface.normal_offset - surface_normal * dot(surface_normal, surface.normal_offset);
+        shaded_normal = normalize(surface_normal + tangent_offset);
+    }
     let base_color = vec4<f32>(surface.color * tint, 1.0);
 
     var output: FragmentOutput;
