@@ -859,6 +859,31 @@ mod tests {
         assert_eq!(select_lod(900.0),None);
     }
     #[test]
+    fn spherical_horizon_rejects_the_far_side() {
+        let eye = DVec3::X * (RADIUS + 80.0);
+        let near = DVec3::X * (RADIUS + 20.0);
+        let far = -near;
+        assert!(within_horizon(eye, near, 10.0));
+        assert!(!within_horizon(eye, far, 10.0));
+    }
+
+    #[test]
+    fn camera_cone_rejects_trees_behind_the_view() {
+        let perspective = Projection::Perspective(PerspectiveProjection {
+            fov: std::f32::consts::FRAC_PI_3,
+            aspect_ratio: 16.0 / 9.0,
+            ..default()
+        });
+        let eye = DVec3::ZERO;
+        assert!(within_camera_cone(
+            eye, DVec3::NEG_Z, &perspective, DVec3::NEG_Z * 120.0, 20.0
+        ));
+        assert!(!within_camera_cone(
+            eye, DVec3::NEG_Z, &perspective, DVec3::Z * 120.0, 20.0
+        ));
+    }
+
+    #[test]
     fn models_have_reasonable_triangle_counts() {
         for species in Species::ALL {
             let (near,leaves)=generate_tree(species,0,0);
