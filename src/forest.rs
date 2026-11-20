@@ -267,12 +267,10 @@ fn stream_patches(
             let aligned = terrain_aligned_direction(direction);
             let tree_position = aligned * (RADIUS + ground - 0.28);
             let distance = camera_position.distance(tree_position);
-            if distance > VIEW_RANGE
-                || !within_horizon(camera_position, tree_position, 30.0)
-                || !within_camera_cone(camera_position, camera_forward, projection, tree_position, 25.0)
-            {
-                continue;
-            }
+            // Do not skip trees hidden by the current camera angle.
+            // Once a patch is loaded, rotating the camera must reveal its
+            // existing trees without requiring the patch to regenerate.
+            if distance > VIEW_RANGE + PATCH_PRELOAD_MARGIN { continue; }
             let selected_variant = (random.next_u32() as usize) % VARIANTS;
             let scale = random.range(0.83, 1.24);
             let yaw = random.range(0.0, std::f32::consts::TAU);
@@ -363,9 +361,18 @@ fn update_lods(
     models: Res<ForestModels>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     frames: ReferenceFrames,
-    mut trees: Query<(&mut TreeInstance, &mut Visibility)>,
-    mut trunks: Query<(&mut Handle<Mesh>, &mut Visibility), With<TrunkMesh>>,
-    mut canopies: Query<(&mut Handle<Mesh>, &mut Handle<StandardMaterial>), With<CanopyMesh>>,
+    mut trees: Query<
+        (&mut TreeInstance, &mut Visibility),
+        (Without<TrunkMesh>, Without<CanopyMesh>),
+    >,
+    mut trunks: Query<
+        (&mut Handle<Mesh>, &mut Visibility),
+        (With<TrunkMesh>, Without<CanopyMesh>),
+    >,
+    mut canopies: Query<
+        (&mut Handle<Mesh>, &mut Handle<StandardMaterial>),
+        (With<CanopyMesh>, Without<TrunkMesh>),
+    >,
 ) {
     let Ok((camera_entity, camera, projection)) = cameras.get_single() else { return };
     let Some(frame) = frames.parent_frame(camera_entity) else { return };
@@ -847,7 +854,8 @@ mod tests {
         assert_eq!(select_lod(0.0),Some(0));
         assert_eq!(select_lod(100.0),Some(1));
         assert_eq!(select_lod(250.0),Some(2));
-        assert_eq!(select_lod(650.0),Some(3));
+        assert_eq!(select_lod(350.0),Some(3));
+        assert_eq!(select_lod(650.0),None);
         assert_eq!(select_lod(900.0),None);
     }
     #[test]
