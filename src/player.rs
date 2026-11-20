@@ -329,6 +329,7 @@ pub fn walk(
     mut wheel: EventReader<MouseWheel>,
     mut motion: EventReader<MouseMotion>,
     mut map: Local<MapView>,
+    mut forest_view: ResMut<crate::forest::ForestView>,
     time: Res<Time>,
     frames: ReferenceFrames,
     terrains: Query<(Entity, &TileAtlas)>,
@@ -402,6 +403,7 @@ pub fn walk(
 
     let aspect = f64::from(window.width()) / f64::from(window.height().max(1.0));
     let first_person = map.first_person.is_some();
+    forest_view.first_person = first_person;
     let rotation_drag = mouse.pressed(MouseButton::Right) && drag != Vec2::ZERO;
     if let Some(pov) = &mut map.first_person {
         if rotation_drag {
