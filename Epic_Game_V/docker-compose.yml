@@ -1,0 +1,37 @@
+name: epic-game-v
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-epic_game}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-epic_game}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15433}:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  game:
+    build: .
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-epic_game}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-epic_game}
+      ECONOMY_SERVICE_ADDR: 0.0.0.0:3010
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?Set FIREBASE_PROJECT_ID in .env}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${GAME_PORT:-3011}:3010"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

@@ -10,7 +10,13 @@ use bevy::{
     pbr::{MaterialPlugin, NotShadowCaster},
     prelude::*,
     reflect::TypePath,
-    render::render_resource::*,
+    render::{
+        render_resource::*,
+        texture::{
+            ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
+            ImageSamplerDescriptor,
+        },
+    },
     transform::TransformSystem,
 };
 use bevy_terrain::prelude::*;
@@ -33,9 +39,37 @@ const LOD_COUNT: u32 = 5;
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 pub struct TerrainMaterial {
-    #[texture(0, dimension = "1d")]
+    #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
-    gradient: Handle<Image>,
+    albedo: Handle<Image>,
+    #[texture(2, dimension = "2d_array")]
+    normal_roughness: Handle<Image>,
+}
+
+impl TerrainMaterial {
+    fn load(asset_server: &AssetServer) -> Self {
+        // Each mipmapped array has the same layer order: sand, grass, dirt, rock, snow.
+        Self {
+            albedo: asset_server.load_with_settings(
+                "textures/terrain/albedo.ktx2",
+                |settings: &mut ImageLoaderSettings| {
+                    settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        address_mode_v: ImageAddressMode::Repeat,
+                        mag_filter: ImageFilterMode::Linear,
+                        min_filter: ImageFilterMode::Linear,
+                        mipmap_filter: ImageFilterMode::Linear,
+                        ..default()
+                    });
+                },
+            ),
+            // Linear data: tangent-space normal in RGB, perceptual roughness in alpha.
+            normal_roughness: asset_server.load_with_settings(
+                "textures/terrain/normal-roughness.ktx2",
+                |settings: &mut ImageLoaderSettings| settings.is_srgb = false,
+            ),
+        }
+    }
 }
 
 impl Material for TerrainMaterial {
@@ -84,7 +118,6 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
-    mut images: ResMut<LoadingImages>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
@@ -96,14 +129,7 @@ fn setup(
     // Terrain material
     //
 
-    let gradient =
-        asset_server.load("textures/gradient.png");
-
-    images.load_image(
-        &gradient,
-        TextureDimension::D1,
-        TextureFormat::Rgba8UnormSrgb,
-    );
+    let terrain_material = terrain_materials.add(TerrainMaterial::load(&asset_server));
 
     //
     // Planet
@@ -194,11 +220,7 @@ fn setup(
                         tile_atlas,
                         &frame,
                     ),
-                    terrain_materials.add(
-                        TerrainMaterial {
-                            gradient: gradient.clone(),
-                        },
-                    ),
+                    terrain_material,
                 ))
                 .id();
 

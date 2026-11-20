@@ -1,0 +1,16 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS users (
+    uid TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    email TEXT NOT NULL,
+    balance NUMERIC NOT NULL DEFAULT 0,
+    roi FLOAT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    rating INTEGER NOT NULL DEFAULT 1000,
+    account_type TEXT NOT NULL,
+    is_banned BOOLEAN NOT NULL DEFAULT false,
+    total_balance NUMERIC NOT NULL DEFAULT 0,
+    available NUMERIC NOT NULL DEFAULT 0,
+    locked    NUMERIC NOT NULL DEFAULT 0
+);
