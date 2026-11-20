@@ -247,6 +247,29 @@ fn stream_patches(
         .then_with(|| a.0.col.cmp(&b.0.col)));
 
     let mut active = forest.patches.values().map(|p| p.entities.len()).sum::<usize>();
+    // If the global budget is full, evict the farthest off-screen patches.
+    // Without this, travelling forward eventually shows empty terrain while
+    // cached trees behind the explorer consume every available slot.
+    if active >= MAX_ACTIVE_TREES {
+        let mut eviction: Vec<_> = forest.patches.keys().filter_map(|&key| {
+            let center = patch_center_direction(key);
+            let location = center * (RADIUS + heights.sample(center).unwrap_or(0.0).max(0.0));
+            let distance = eye.distance(location);
+            (!within_camera_cone(eye, forward, projection, location, PATCH_METERS)
+                && distance > VIEW_RANGE * 0.55)
+                .then_some((key, distance))
+        }).collect();
+        eviction.sort_by(|a,b| b.1.total_cmp(&a.1));
+        for (key, _) in eviction {
+            if active <= MAX_ACTIVE_TREES - MAX_NEW_TREES_PER_TICK * 3 { break }
+            if let Some(old) = forest.patches.remove(&key) {
+                active = active.saturating_sub(old.entities.len());
+                for entity in old.entities {
+                    commands.entity(entity).despawn_recursive();
+                }
+            }
+        }
+    }
     // Materialize worklist before mutating the HashMap (avoids E0502).
     let work: Vec<_> = wanted.into_iter()
         .filter(|(key,_)| forest.patches.get(key)
@@ -554,16 +577,23 @@ fn select_species(direction: DVec3, height: f64, random: &mut Random) -> Option<
     let moisture = (0.50 + 0.96 * weather + 0.32 * patches).clamp(0.0, 1.0);
     let temp = (1.07 - 0.78 * latitude - (height.max(0.0) as f32) / 16_000.0
         + 0.13 * noise3(dir * 4.1 + Vec3::new(3.2, 18.6, -8.4))).clamp(0.0, 1.0);
+    // Smooth, spatially coherent groves, not isolated dice-roll trees.
+    // The broad noise varies on a scale of a few hundred metres and makes
+    // forest clearings and densely packed stands.
+    let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
+    let density = (0.82 + grove * 0.90).clamp(0.25, 1.0);
     let roll = random.unit();
-    if height > 2_600.0 || latitude > 0.96 || temp < 0.07 { return None }
-    if temp > 0.68 && moisture > 0.59 && roll < 0.89 { return Some(Species::Jungle) }
-    if temp > 0.66 && (0.21..0.62).contains(&moisture) && roll < 0.24 {
+    if height > 2_600.0 || latitude > 0.96 || temp < 0.13 { return None }
+    if temp > 0.68 && moisture > 0.49 && roll < density * 0.98 {
+        return Some(Species::Jungle);
+    }
+    if temp > 0.66 && (0.19..0.61).contains(&moisture) && roll < density * 0.34 {
         return Some(Species::Acacia);
     }
-    if temp > 0.28 && moisture > 0.47 && roll < 0.78 {
-        return if random.unit() < 0.76 { Some(Species::Oak) } else { Some(Species::Pine) };
+    if temp > 0.29 && moisture > 0.41 && roll < density * 0.94 {
+        return if random.unit() < 0.77 { Some(Species::Oak) } else { Some(Species::Pine) };
     }
-    if temp <= 0.45 && moisture > 0.27 && roll < 0.76 {
+    if temp <= 0.46 && moisture > 0.27 && roll < density * 0.87 {
         return Some(Species::Pine);
     }
     None
