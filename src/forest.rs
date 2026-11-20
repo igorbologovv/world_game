@@ -94,12 +94,6 @@ struct PatchState {
     entities: Vec<Entity>,
     next_candidate: usize,
 }
-/// Updated by player control after the first/third-person camera is positioned.
-#[derive(Resource, Default)]
-pub struct ForestView {
-    pub first_person: bool,
-}
-
 #[derive(Resource, Default)]
 struct ForestWorld {
     patches: HashMap<PatchKey, PatchState>,
@@ -129,7 +123,6 @@ pub struct ProceduralForestPlugin;
 impl Plugin for ProceduralForestPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ForestWorld>()
-            .init_resource::<ForestView>()
             .add_systems(Startup, build_models)
             // Read the current camera position, not the previous frame's.
             .add_systems(Update, (stream_patches, update_lods).chain().after(player::walk));
@@ -209,7 +202,6 @@ fn stream_patches(
     mut forest: ResMut<ForestWorld>,
     models: Res<ForestModels>,
     heights: Res<SurfaceHeights>,
-    view_mode: Res<ForestView>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     reference_frames: ReferenceFrames,
     frame_entities: Query<Entity, With<ReferenceFrame>>,
@@ -222,7 +214,7 @@ fn stream_patches(
     // High-elevation jungle must still render from eye height.
     let local_ground = heights.sample(eye.normalize()).unwrap_or(0.0);
     let altitude = eye.length() - RADIUS - local_ground;
-    let view_range = forest_range(view_mode.first_person);
+    let view_range = forest_range(is_pov_projection(projection));
 
     if altitude > MAX_FOREST_ABOVE_GROUND {
         for (_, patch) in forest.patches.drain() {
@@ -416,7 +408,6 @@ fn update_lods(
     models: Res<ForestModels>,
     cameras: Query<(Entity, GridTransform, &Projection), With<DebugCameraController>>,
     frames: ReferenceFrames,
-    view_mode: Res<ForestView>,
     mut trees: Query<
         (&mut TreeInstance, &mut Visibility),
         (Without<TrunkMesh>, Without<CanopyMesh>),
@@ -437,7 +428,7 @@ fn update_lods(
     let Some(frame) = frames.parent_frame(camera_entity) else { return };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
-    let view_range = forest_range(view_mode.first_person);
+    let view_range = forest_range(is_pov_projection(projection));
 
     for (mut tree, mut visibility) in &mut trees {
         let in_view = eye.distance(tree.position) <= view_range
@@ -473,6 +464,13 @@ fn update_lods(
         }
         tree.current_lod = next;
     }
+}
+
+// The POV camera uses a 900m far plane; map mode uses the planetary far plane.
+// Read the current camera instead of adding another parameter to player::walk
+// (Bevy 0.14 accepts at most 16 ordinary system arguments).
+fn is_pov_projection(projection: &Projection) -> bool {
+    matches!(projection, Projection::Perspective(p) if p.far <= 1000.0)
 }
 
 fn forest_range(first_person: bool) -> f64 {
