@@ -1026,6 +1026,15 @@ mod tests {
     }
 
     #[test]
+    fn procedural_foliage_atlas_contains_cutout_and_opaque_leaves() {
+        let atlas = foliage_cluster_texture();
+        let pixels = atlas.data.chunks_exact(4).count();
+        let opaque = atlas.data.chunks_exact(4)
+            .filter(|pixel| pixel[3] == 255).count();
+        assert!(opaque > pixels / 4 && opaque < pixels * 3 / 4);
+    }
+
+    #[test]
     fn models_have_reasonable_triangle_counts() {
         for species in Species::ALL {
             let (near,leaves)=generate_tree(species,0,0);
