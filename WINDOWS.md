@@ -39,23 +39,27 @@ If PowerShell blocks the script, run it for the current process with:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-build.ps1
 ```
 
-## Local checkout and the missing `ocean` module
+## Updating your Windows checkout
 
-If you see `error[E0583]: file not found for module ocean` from `src/main.rs`, check that you are on an up-to-date branch:
+The Windows support branch now includes the `feature/river-water-shader` work: WASD movement, Shift sprint, procedural forest, and performance changes.
 
 ```powershell
 git fetch origin
-git switch master
+git switch feature/windows-support
 git pull --ff-only
-git switch -c feature/windows-support --track origin/feature/windows-support
+.\scripts\windows-build.ps1 -Run
 ```
 
-If `feature/windows-support` already exists locally, use `git switch feature/windows-support` and `git pull --ff-only` instead of creating it again. Preserve or commit local changes before switching branches.
+If the local branch does not exist yet, run `git switch --track origin/feature/windows-support` instead of `git switch feature/windows-support`.
 
-The current upstream `master` defines `OceanMaterial` directly in `src/main.rs` and does **not** declare `mod ocean;`. An older or locally modified `main.rs` can cause that error; adding a blank `src/ocean.rs` is not a fix.
+## Known upstream build blocker: missing `src/ocean.rs`
+
+The merged `feature/river-water-shader` version declares `mod ocean;` in `src/main.rs`, but the source branch does **not** contain `src/ocean.rs` or `src/ocean/mod.rs`. As a result, Rust reports `error[E0583]` until the actual optimized ocean module is provided. This is not a Windows-only problem and was already present in the river branch.
+
+Obtain the missing `src/ocean.rs` from the river branch's author, or commit a compatible implementation as a separate fix. Do not create an empty file: the code uses `ocean::OceanMaterial`, `ocean::load`, and `ocean::cull_patches`. The Windows launcher cannot fix missing application source code.
 
 ## Notes
 
 - Bevy shaders and terrain assets are loaded relative to the asset directory; launch from the repository root (the script does this).
 - Missing generated world data is a separate runtime/setup issue, not a Rust module-resolution error.
-- This guide and script have not been validated on a Windows machine by CI.
+- The Windows launcher built an earlier version successfully in a user test, but this merged revision has not been validated. The missing ocean module currently prevents compilation.
