@@ -135,9 +135,14 @@ fn build_models(
         perceptual_roughness: 0.94,
         ..default()
     });
+    // One small procedural alpha-cutout atlas for both leaflets and broad
+    // canopy clusters: substantial foliage volume without thousands of quads.
+    let foliage_texture = images.add(foliage_cluster_texture());
     let foliage_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        perceptual_roughness: 0.85,
+        base_color_texture: Some(foliage_texture),
+        alpha_mode: AlphaMode::Mask(0.38),
+        perceptual_roughness: 0.86,
         double_sided: true,
         cull_mode: None,
         ..default()
@@ -641,6 +646,42 @@ impl MeshBuilder {
         self.triangle(a, b, c);
         self.triangle(a, c, d);
     }
+    // Layered perpendicular cutout cards give each branch a leafy 3D crown.
+    // Far cheaper than representing every tiny leaf as an independent polygon.
+    fn foliage_lobe(&mut self, center: Vec3, extent: f32, color: [f32; 4], rng: &mut Random, lod: usize) {
+        let card_count = if lod == 2 { 1 } else { 2 };
+        let angle = rng.range(0.0, std::f32::consts::TAU);
+        for axis in 0..card_count {
+            let turn = angle + axis as f32 * std::f32::consts::FRAC_PI_2;
+            let across = Vec3::new(turn.cos(), 0.0, turn.sin());
+            let normal = Vec3::Y.cross(across).normalize();
+            let half_width = extent * if axis == 0 { 1.0 } else { 0.85 };
+            let half_height = extent * 0.73;
+            let tint = 0.88 + rng.range(0.0, 0.22);
+            let shaded = [
+                (color[0] * tint).min(1.0),
+                (color[1] * tint).min(1.0),
+                (color[2] * tint).min(1.0),
+                1.0,
+            ];
+            let positions = [
+                center - across * half_width - Vec3::Y * half_height,
+                center + across * half_width - Vec3::Y * half_height,
+                center + across * half_width + Vec3::Y * half_height,
+                center - across * half_width + Vec3::Y * half_height,
+            ];
+            let base = self.positions.len() as u32;
+            for (point, uv) in positions.into_iter().zip([
+                Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0),
+                Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0),
+            ]) {
+                self.vertex(point, normal, uv, shaded);
+            }
+            self.triangle(base, base + 1, base + 2);
+            self.triangle(base, base + 2, base + 3);
+        }
+    }
+
     fn crossed_cards(&mut self, height: f32, width: f32) {
         for rotation in [0.0_f32, std::f32::consts::FRAC_PI_2] {
             let axis = Vec3::new(rotation.cos(), 0.0, rotation.sin());
@@ -722,7 +763,7 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
     };
     let leaves_per_cluster = match species {
         Species::Pine => [8, 5, 3][lod],
-        _ => [23, 9, 4][lod],
+        _ => [13, 7, 3][lod],
     };
     for tier in 0..levels {
         let t = (tier as f32 + 1.0)/(levels as f32 + 1.0);
@@ -754,6 +795,26 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
             }
         }
     }
+    // Low undergrowth attached to jungle trees makes the ground-level view
+    // feel like a rainforest rather than bare poles below the canopy.
+    if matches!(species, Species::Jungle) {
+        let shrubs = [5, 3, 0][lod];
+        for i in 0..shrubs {
+            let angle = i as f32 * std::f32::consts::TAU / shrubs as f32 + rng.range(-0.24, 0.24);
+            let center = Vec3::new(
+                angle.cos() * rng.range(1.0, 3.1),
+                rng.range(1.25, 3.4),
+                angle.sin() * rng.range(1.0, 3.1),
+            );
+            leaves.foliage_lobe(center, rng.range(1.4, 2.5), [0.12, 0.37, 0.13, 1.0], &mut rng, lod);
+            for _ in 0..3 {
+                let leaf_dir = Vec3::new(
+                    rng.range(-1.0, 1.0), rng.range(0.0, 0.8), rng.range(-1.0, 1.0)
+                ).normalize();
+                leaves.leaf(center + leaf_dir * 0.6, leaf_dir, 1.6, 0.45, [0.15, 0.46, 0.16, 1.0]);
+            }
+        }
+    }
     (wood, leaves)
 }
 
@@ -767,6 +828,13 @@ fn leaf_cluster(
     rng: &mut Random,
     lod: usize,
 ) {
+    let lobe_size = if matches!(species, Species::Acacia) { radius * 0.85 }
+        else if matches!(species, Species::Pine) { radius * 0.72 }
+        else { radius * 1.18 };
+    leaves.foliage_lobe(
+        center, lobe_size.max(0.72),
+        [green[0], green[1], green[2], 1.0], rng, lod
+    );
     for _ in 0..count {
         let angle = rng.range(0.0,std::f32::consts::TAU);
         let vertical = rng.range(-0.85,0.90);
@@ -790,6 +858,43 @@ fn leaf_cluster(
         ];
         leaves.leaf(position,leaf_direction,length*size,width*size,color);
     }
+}
+
+fn foliage_cluster_texture() -> Image {
+    // Alpha-cutout "leaf cloud": irregular lobed silhouette with small holes.
+    // White RGB leaves the species-specific vertex tint in control.
+    const SIZE: usize = 96;
+    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let px = (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+            let py = (y as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+            let theta = py.atan2(px);
+            let radius = (px * px + py * py).sqrt();
+            let boundary = 0.79 + 0.11 * (theta * 7.0).sin()
+                + 0.075 * (theta * 13.0 + 0.9).cos()
+                + 0.035 * (theta * 23.0).sin();
+            let irregular = (px * 23.7).sin() * (py * 29.1).cos();
+            let perforation = (px * 41.0 + py * 17.0).sin()
+                * (py * 36.0 - px * 11.0).cos();
+            let solid = radius < boundary + 0.025 * irregular
+                && (radius < 0.53 || perforation > -0.81);
+            let index = (y * SIZE + x) * 4;
+            rgba[index] = 255;
+            rgba[index + 1] = 255;
+            rgba[index + 2] = 255;
+            rgba[index + 3] = if solid { 255 } else { 0 };
+        }
+    }
+    let mut image = Image::new_fill(
+        Extent3d { width: SIZE as u32, height: SIZE as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.data = rgba;
+    image
 }
 
 fn impostor_texture(species: Species) -> Image {
