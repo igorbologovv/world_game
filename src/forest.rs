@@ -570,7 +570,11 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         Species::Acacia => [3,3,2][lod],
         _ => [5,4,2][lod],
     };
-    let twigs = [3,2,1][lod];
+    let twigs = if matches!(species, Species::Pine) {
+        [2, 1, 1][lod]
+    } else {
+        [3, 2, 1][lod]
+    };
     let leaves_per_cluster = match species {
         Species::Pine => [8, 5, 3][lod],
         _ => [23, 9, 4][lod],
