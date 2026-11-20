@@ -24,7 +24,7 @@ try {
 
     if ($Run) {
         Write-Host 'Starting world-client...'
-        & cargo run --locked
+        & cargo run --locked --bin world-client
         if ($LASTEXITCODE -ne 0) {
             throw "cargo run failed with exit code $LASTEXITCODE"
         }
