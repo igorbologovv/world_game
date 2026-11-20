@@ -195,7 +195,7 @@ fn setup(
     commands.insert_resource(surface_heights::SurfaceHeights::load());
 
     commands.spawn(TextBundle::from_section(
-        "Click land to move     Scroll to zoom     Right-drag to turn     V: Toggle POV     Esc: Back or clear     T: Free camera",
+        "WASD: move     Shift: sprint     Right-drag: look     Scroll: zoom     V: first person     Click: travel     T: free camera",
         TextStyle { font_size: 17.0, color: Color::WHITE, ..default() },
     ).with_style(Style {
         position_type: PositionType::Absolute,
