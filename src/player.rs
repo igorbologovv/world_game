@@ -130,6 +130,11 @@ impl Default for Player {
 }
 
 impl Player {
+    /// Planet-local unit vector used for deterministic forest streaming.
+    pub fn surface_direction(&self) -> DVec3 {
+        self.up
+    }
+
     pub fn trip(&self) -> Option<(f64, bool, f64)> {
         self.destination.map(|target| {
             (
