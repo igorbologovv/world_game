@@ -63,7 +63,7 @@ fn biome_surface(
         0.0, 1.0,
     );
     let temperature = clamp(
-        1.02 - 1.10 * latitude - max(height, 0.0) / 12500.0
+        1.07 - 0.78 * latitude - max(height, 0.0) / 16000.0
             + 0.13 * macro_noise(direction * 4.1 + vec3<f32>(3.2, 18.6, -8.4)),
         0.0, 1.0,
     );
@@ -75,7 +75,7 @@ fn biome_surface(
         2850.0, 4750.0,
         height + (0.52 - temperature) * 1400.0 + variation * 400.0,
     );
-    let polar_snow = smoothstep(0.76, 0.96, latitude);
+    let polar_snow = smoothstep(0.93, 0.994, latitude);
     let snow = clamp(max(mountain_snow, polar_snow) * (1.0 - 0.20 * cliff), 0.0, 1.0);
     let rock = (1.0 - snow) * cliff;
     let soil_available = (1.0 - snow) * (1.0 - cliff);
@@ -95,10 +95,10 @@ fn biome_surface(
     // Smooth, overlapping climate zones: tropical rainforest, temperate
     // forest, savanna, steppe, temperate grassland and polar tundra.
     let rainforest = smoothstep(0.68, 0.88, temperature)
-        * smoothstep(0.58, 0.82, moisture);
+        * smoothstep(0.47, 0.76, moisture);
     let temperate_forest = smoothstep(0.29, 0.49, temperature)
         * (1.0 - smoothstep(0.70, 0.90, temperature))
-        * smoothstep(0.53, 0.79, moisture);
+        * smoothstep(0.44, 0.73, moisture);
     let forest = clamp(max(rainforest, temperate_forest), 0.0, 1.0);
     let savanna = smoothstep(0.68, 0.86, temperature)
         * smoothstep(0.18, 0.37, moisture)
