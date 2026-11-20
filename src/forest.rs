@@ -431,11 +431,12 @@ fn update_lods(
     let view_range = forest_range(is_pov_projection(projection));
 
     for (mut tree, mut visibility) in &mut trees {
-        let in_view = eye.distance(tree.position) <= view_range
+        let distance = eye.distance(tree.position);
+        let in_view = distance <= view_range
             && within_horizon(eye, tree.position, 25.0)
             && within_camera_cone(eye, forward, projection, tree.position, 24.0);
         let next = if in_view {
-            select_lod(eye.distance(tree.position))
+            Some(lod_with_hysteresis(distance, tree.current_lod))
         } else {
             None
         };
@@ -464,6 +465,24 @@ fn update_lods(
         }
         tree.current_lod = next;
     }
+}
+
+// A 12% dead band around LOD boundaries prevents flickering and mesh
+// uploads when the camera hovers near 50/100/170 metres.
+fn lod_with_hysteresis(distance: f64, previous: Option<usize>) -> usize {
+    let desired = select_lod(distance).unwrap_or(3);
+    let Some(previous) = previous else { return desired };
+    let mut current = previous.min(3);
+    if desired > current {
+        while current < desired && distance > LOD_DISTANCES[current] * 1.12 {
+            current += 1;
+        }
+    } else if desired < current {
+        while current > desired && distance < LOD_DISTANCES[current - 1] * 0.88 {
+            current -= 1;
+        }
+    }
+    current
 }
 
 // The POV camera uses a 900m far plane; map mode uses the planetary far plane.
@@ -1039,6 +1058,15 @@ mod tests {
         assert_eq!(select_lod(350.0),Some(3));
         assert_eq!(select_lod(650.0),None);
         assert_eq!(select_lod(900.0),None);
+    }
+    #[test]
+    fn lod_hysteresis_avoids_threshold_thrashing() {
+        assert_eq!(lod_with_hysteresis(51.0, Some(0)), 0);
+        assert_eq!(lod_with_hysteresis(57.0, Some(0)), 1);
+        assert_eq!(lod_with_hysteresis(48.0, Some(1)), 1);
+        assert_eq!(lod_with_hysteresis(42.0, Some(1)), 0);
+        assert_eq!(lod_with_hysteresis(110.0, Some(1)), 1);
+        assert_eq!(lod_with_hysteresis(115.0, Some(1)), 2);
     }
     #[test]
     fn forest_view_range_is_shorter_in_pov() {
