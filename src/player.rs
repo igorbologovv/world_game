@@ -520,10 +520,13 @@ pub fn walk(
         .look_to(player.facing.as_vec3(), player.up.as_vec3());
 
     let (position, rotation) = if let Some(pov) = &mut map.first_person {
+        // Clip distant terrain in first-person instead of drawing the entire planet.
         set_fov(&mut projection, POV_FOV);
+        set_far_plane(&mut projection, 900.0);
         pov.pose(&player)
     } else {
         set_fov(&mut projection, MAP_FOV);
+        set_far_plane(&mut projection, (RADIUS * 20.0) as f32);
         let camera_up =
             (player.up * (RADIUS + player.height) - player.forward * CAMERA_DISTANCE).normalize();
         let eye_height = map
@@ -549,6 +552,14 @@ pub fn walk(
     *camera.cell = cell;
     camera.transform.translation = translation;
     camera.transform.rotation = rotation;
+}
+
+fn set_far_plane(projection: &mut Mut<Projection>, far: f32) {
+    if let Projection::Perspective(perspective) = &mut **projection {
+        if (perspective.far - far).abs() > f32::EPSILON {
+            perspective.far = far;
+        }
+    }
 }
 
 fn set_fov(projection: &mut Mut<Projection>, fov: f32) {
