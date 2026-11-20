@@ -237,11 +237,15 @@ fn stream_patches(
         false
     });
 
-    for (key, _) in wanted
+    // Materialize the keys before mutating forest.patches below.
+    // Otherwise the filter closure holds an immutable borrow for the loop.
+    let new_patches: Vec<PatchKey> = wanted
         .into_iter()
         .filter(|(key, _)| !forest.patches.contains_key(key))
         .take(MAX_NEW_PATCHES_PER_TICK)
-    {
+        .map(|(key, _)| key)
+        .collect();
+    for key in new_patches {
         let mut spawned = Vec::new();
         let mut random = Random::new(patch_seed(key));
         let (min_latitude, longitude_step) = patch_bounds(key);
