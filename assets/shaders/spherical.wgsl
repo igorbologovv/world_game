@@ -4,7 +4,6 @@
 #import bevy_terrain::functions::{compute_local_position, lookup_tile}
 #import bevy_pbr::pbr_types::{PbrInput, pbr_input_new}
 #import bevy_pbr::pbr_functions::{calculate_view, apply_pbr_lighting}
-#import bevy_pbr::mesh_view_bindings::view
 
 @group(3) @binding(0)
 var terrain_albedo: texture_2d_array<f32>;
@@ -202,109 +201,38 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let dy = dpdy(position);
     let footprint = max(length(dx), length(dy));
 
-    // Three shading budgets: 0-50m full triplanar PBR, 50-135m
-    // triplanar albedo only, and distant terrain with a single planar
-    // projection. The far path avoids up to 30 texture fetches per pixel.
-    let eye_distance = distance(info.world_position.xyz, view.world_position);
     let regional = macro_noise(position / 85000.0);
-    var patches = 0.0;
-    var detail = 0.0;
-    if eye_distance < 650.0 {
-        patches = macro_noise(position / 2300.0)
-            * (1.0 - smoothstep(500.0, 2300.0, footprint));
-    }
-    if eye_distance < 72.0 {
-        detail = macro_noise(position / 190.0)
-            * (1.0 - smoothstep(45.0, 190.0, footprint));
-    }
+    let patches = macro_noise(position / 2300.0) * (1.0 - smoothstep(500.0, 2300.0, footprint));
+    let detail = macro_noise(position / 190.0) * (1.0 - smoothstep(45.0, 190.0, footprint));
     let variation = regional * 0.6 + patches * 0.4;
     let tint = 1.0 + 0.32 * regional + 0.32 * patches + 0.26 * detail;
 
     let biome = biome_surface(height, slope, normalize(position), variation);
-    let weights = biome.weights;
-    let projections = triplanar_projections(position, dx, dy, surface_normal);
-    var canopy_patches = 0.0;
-    if eye_distance < 160.0 {
-        canopy_patches = smoothstep(-0.18, 0.24, macro_noise(position / 320.0))
-            * (1.0 - smoothstep(180.0, 750.0, footprint));
-    }
+    var weights = biome.weights;
+    var projections = triplanar_projections(position, dx, dy, surface_normal);
+    // Subtle canopy-scale color breakup in wooded biomes. This is surface
+    // shading, not tree geometry; actual forests still need vegetation meshes.
+    let canopy_patches = smoothstep(-0.18, 0.24, macro_noise(position / 320.0))
+        * (1.0 - smoothstep(180.0, 750.0, footprint));
+    // Local copies allow runtime array indexing on the terrain pipeline's WGSL compiler.
     var periods = MATERIAL_PERIODS;
-    var surface = SurfaceSample(vec3<f32>(0.0), vec3<f32>(0.0), 0.84);
 
-    if eye_distance < 50.0 {
-        // Full normal-mapped shading only within the nearest 50 metres.
-        surface.roughness = 0.0;
-        for (var layer = 0; layer < 5; layer++) {
-            let weight = weights[layer];
-            if weight > 0.012 {
-                for (var axis = 0; axis < 3; axis++) {
-                    let projection = projections[axis];
-                    let projected_weight = weight * projection.weight;
-                    if projected_weight <= 0.012 {
-                        continue;
-                    }
-                    let sample = sample_projection(
-                        projection, 1.0 / periods[layer], layer
-                    );
-                    var albedo = sample.color;
-                    if layer == 1 || layer == 2 {
-                        albedo *= biome.vegetation_tint
-                            * (1.0 - 0.16 * biome.forest_cover * canopy_patches);
-                    }
-                    surface.color += albedo * projected_weight;
-                    surface.normal_offset += sample.normal_offset * projected_weight;
-                    surface.roughness += sample.roughness * projected_weight;
-                }
-            }
-        }
-    } else if eye_distance < 135.0 {
-        // Mid-distance: retain triplanar color but skip expensive normal maps.
-        for (var layer = 0; layer < 5; layer++) {
-            let weight = weights[layer];
-            if weight > 0.035 {
-                for (var axis = 0; axis < 3; axis++) {
-                    let projection = projections[axis];
-                    let contribution = weight * projection.weight;
-                    if contribution <= 0.035 {
-                        continue;
-                    }
-                    var albedo = textureSampleGrad(
-                        terrain_albedo, terrain_sampler,
-                        projection.uv / periods[layer], layer,
-                        projection.dx / periods[layer],
-                        projection.dy / periods[layer],
-                    ).rgb;
-                    if layer == 1 || layer == 2 {
-                        albedo *= biome.vegetation_tint;
-                    }
-                    surface.color += albedo * contribution;
-                }
-            }
-        }
-    } else {
-        // Far terrain: choose the dominant axis once; most distant pixels
-        // now fetch only 1-3 albedo samples, without tangent-space normals.
-        var axis = 0;
-        if projections[1].weight > projections[axis].weight {
-            axis = 1;
-        }
-        if projections[2].weight > projections[axis].weight {
-            axis = 2;
-        }
-        let projection = projections[axis];
-        for (var layer = 0; layer < 5; layer++) {
-            let weight = weights[layer];
-            if weight > 0.02 {
-                var albedo = textureSampleGrad(
-                    terrain_albedo, terrain_sampler,
-                    projection.uv / periods[layer], layer,
-                    projection.dx / periods[layer],
-                    projection.dy / periods[layer],
-                ).rgb;
+    var surface = SurfaceSample(vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
+    for (var layer = 0; layer < 5; layer++) {
+        let weight = weights[layer];
+        if weight > 0.0 {
+            for (var axis = 0; axis < 3; axis++) {
+                let projection = projections[axis];
+                let projected_weight = weight * projection.weight;
+                let sample = sample_projection(projection, 1.0 / periods[layer], layer);
+                var albedo = sample.color;
                 if layer == 1 || layer == 2 {
-                    albedo *= biome.vegetation_tint;
+                    let canopy_darkening = 1.0 - 0.16 * biome.forest_cover * canopy_patches;
+                    albedo *= biome.vegetation_tint * canopy_darkening;
                 }
-                surface.color += albedo * weight;
+                surface.color += albedo * projected_weight;
+                surface.normal_offset += sample.normal_offset * projected_weight;
+                surface.roughness += sample.roughness * projected_weight;
             }
         }
     }
