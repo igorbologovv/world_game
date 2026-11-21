@@ -26,6 +26,8 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
     let up = normalize(mesh.planet_position);
     let eye = normalize(view.world_position - mesh.world_position);
     let time = globals.time;
+    // The woodland pond uses calm glossy water. Subdue steep normals so
+    // large water surfaces do not develop the strong striped moire pattern.
     let waves = 1.0 - smoothstep(6.0, 34.0, footprint);
     let ripples = 1.0 - smoothstep(0.18, 2.0, footprint);
     let position = mesh.planet_position;
@@ -41,10 +43,10 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
             + wave_slope(position, time, vec3<f32>(0.60, 0.0, -0.80), 6.7, 0.048)
                 * (1.0 - smoothstep(2.8, 11.0, footprint))
         );
-        slope *= select(0.38, 1.0, sea);
+        slope *= select(0.20, 0.43, sea);
     }
     if ripples > 0.0 {
-        slope += ripples * (
+        slope += ripples * 0.32 * (
             wave_slope(position, time * 0.75, vec3<f32>(0.36, 0.48, -0.80), 2.5, 0.085)
             + wave_slope(position, time, vec3<f32>(-0.80, 0.60, 0.0), 0.72, 0.051)
         );
@@ -57,21 +59,23 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
         encoded_depth = mix(filtered, water_texel.y, smoothstep(50.0, 120.0, footprint));
     }
     let depth = max(encoded_depth * 96.0 - 16.0, 0.0);
-    let shallow = select(vec3<f32>(0.13, 0.33, 0.24), vec3<f32>(0.14, 0.44, 0.38), sea);
-    let deep = select(vec3<f32>(0.018, 0.085, 0.078), vec3<f32>(0.009, 0.056, 0.092), sea);
-    let transmission = exp(-depth * select(0.14, 0.090, sea));
+    // Woodland source pond reference: glossy, light aqua-green, not the
+    // old saturated deep-blue ocean. Water depth still darkens naturally.
+    let shallow = select(vec3<f32>(0.28, 0.57, 0.55), vec3<f32>(0.24, 0.53, 0.58), sea);
+    let deep = select(vec3<f32>(0.10, 0.28, 0.32), vec3<f32>(0.075, 0.22, 0.33), sea);
+    let transmission = exp(-depth * select(0.11, 0.075, sea));
     // Wave troughs screen each other at grazing angles. Limit the visible
     // slope there so distant swells make a soft reflection across the horizon.
     let exposed_slope = mix(0.34, 1.0, smoothstep(0.015, 0.24, dot(up, eye)));
     let normal = water_normal(up, slope * exposed_slope);
-    var color = water_light(mix(deep, shallow, transmission), up, normal, eye, 1.0 - ripples * 0.65);
+    var color = water_light(mix(deep, shallow, transmission), up, normal, eye, 0.12 + (1.0 - ripples) * 0.08);
     if waves > 0.0 && depth < 8.0 {
         let breakers = 0.5 + 0.5 * sin(dot(position, vec3<f32>(0.27, 0.18, -0.38)) - time * 2.2);
         let lace = 0.5 + 0.5 * sin(dot(position, vec3<f32>(0.86, -0.53, 0.37)) + breakers * 2.7 + time * 0.9);
         let foam = waves * (1.0 - smoothstep(0.45, 8.0, depth))
             * smoothstep(0.61, 0.93, breakers * 0.74 + lace * 0.26)
-            * select(0.12, 0.75, sea);
-        color = mix(color, vec3<f32>(0.66, 0.81, 0.76), foam);
+            * select(0.08, 0.24, sea);
+        color = mix(color, vec3<f32>(0.76, 0.90, 0.87), foam);
     }
     return vec4<f32>(color, 1.0);
 }
