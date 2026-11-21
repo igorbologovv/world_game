@@ -116,7 +116,7 @@ pub(super) fn stream(
     frames: ReferenceFrames,
     root: Res<PlanetRoot>,
 ) {
-    let Ok((camera_entity, camera)) = cameras.get_single() else {
+    let Ok((camera_entity, camera)) = cameras.single() else {
         return;
     };
     let Some(frame) = frames.parent_frame(camera_entity) else {
@@ -309,7 +309,7 @@ pub(super) fn atmosphere(
     mut cameras: Query<(Entity, GridTransform, &mut Camera, &mut FogSettings), With<WorldCamera>>,
     frames: ReferenceFrames,
 ) {
-    let Ok((entity, transform, mut camera, mut fog)) = cameras.get_single_mut() else {
+    let Ok((entity, transform, mut camera, mut fog)) = cameras.single_mut() else {
         return;
     };
     let Some(frame) = frames.parent_frame(entity) else {
