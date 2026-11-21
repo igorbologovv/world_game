@@ -88,19 +88,29 @@ fn toggle_canopy_debug(
     terrain: Option<Res<terrain_surface::TerrainSurface>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
-    if !keyboard.is_some_and(|input| input.just_pressed(KeyCode::F9)) {
+    let Some(keyboard) = keyboard else {
+        return;
+    };
+    let f9 = keyboard.just_pressed(KeyCode::F9);
+    let f10 = keyboard.just_pressed(KeyCode::F10);
+    if !f9 && !f10 {
         return;
     }
     let Some(terrain) = terrain else {
         return;
     };
     if let Some(material) = materials.get_mut(&terrain.material) {
-        material.terrain_debug_mode = (material.terrain_debug_mode + 1) % 3;
+        material.terrain_debug_mode = if f10 {
+            if material.terrain_debug_mode == 3 { 0 } else { 3 }
+        } else {
+            (material.terrain_debug_mode + 1) % 3
+        };
         info!(
-            "Planet forest diagnostic: {} (F9 to cycle)",
+            "Planet terrain diagnostic: {} (F9: coverage/color; F10: terrain mesh)",
             match material.terrain_debug_mode {
                 1 => "forest coverage (grayscale)",
                 2 => "canopy colors",
+                3 => "terrain mesh (magenta)",
                 _ => "normal terrain",
             }
         );
