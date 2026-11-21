@@ -2,13 +2,11 @@ use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     gltf::{Gltf, GltfMesh, GltfMaterial},
     prelude::*,
+    camera::primitives::MeshAabb,
+    image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     render::{
         mesh::VertexAttributeValues,
         render_resource::{Face, TextureDimension, TextureFormat, TextureViewDimension},
-        texture::{
-            ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
-            ImageSamplerDescriptor,
-        },
     },
 };
 
