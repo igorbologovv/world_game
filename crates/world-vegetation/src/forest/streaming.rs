@@ -6,9 +6,9 @@ use std::{
 
 use bevy::{
     math::DVec3,
-    pbr::NotShadowCaster,
+    light::NotShadowCaster,
     prelude::*,
-    render::primitives::Aabb,
+    camera::primitives::{Aabb, MeshAabb},
     tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
 };
 use world_core::{
