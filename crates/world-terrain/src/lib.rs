@@ -25,11 +25,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<TerrainMaterial> {
-            prepass_enabled: false,
-            shadows_enabled: false,
-            ..default()
-        })
+        app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
         .add_systems(Startup, setup)
         .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
         .add_systems(Update, terrain_surface::stream.after(WorldMovement))
@@ -55,8 +51,7 @@ struct TerrainMaterial {
 impl TerrainMaterial {
     fn load(asset_server: &AssetServer) -> Self {
         // Base layers use the order sand, grass, dirt, rock, snow.
-        let albedo = asset_server.load_with_settings(
-            "textures/terrain/albedo.ktx2",
+        let albedo = asset_server.load_builder().with_settings(
             |settings: &mut ImageLoaderSettings| {
                 settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                     address_mode_u: ImageAddressMode::Repeat,
@@ -67,11 +62,10 @@ impl TerrainMaterial {
                     ..default()
                 });
             },
-        );
-        let normal_roughness = asset_server.load_with_settings(
-            "textures/terrain/normal-roughness.ktx2",
-            |settings: &mut ImageLoaderSettings| settings.is_srgb = false,
-        );
+        ).load("textures/terrain/albedo.ktx2");
+        let normal_roughness = asset_server.load_builder()
+            .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
+            .load("textures/terrain/normal-roughness.ktx2");
         Self {
             // Valid array bindings let the base terrain render during detail loading.
             detail_albedo: albedo.clone(),
@@ -95,10 +89,9 @@ impl TerrainDetail {
         Self {
             material,
             albedo: assets.load("textures/terrain/detail-albedo.ktx2"),
-            normal_roughness: assets.load_with_settings(
-                "textures/terrain/detail-normal-roughness.ktx2",
-                |settings: &mut ImageLoaderSettings| settings.is_srgb = false,
-            ),
+            normal_roughness: assets.load_builder()
+                .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
+                .load("textures/terrain/detail-normal-roughness.ktx2"),
         }
     }
 }
@@ -116,7 +109,7 @@ fn load_detail(
     ) {
         (Some(albedo), Some(normal_roughness)) => {
             if valid_detail_pair(albedo, normal_roughness) {
-                if let Some(material) = materials.get_mut(&detail.material) {
+                if let Some(mut material) = materials.get_mut(&detail.material) {
                     material.detail_albedo = detail.albedo.clone();
                     material.detail_normal_roughness = detail.normal_roughness.clone();
                     material.detail_enabled = 1;
@@ -172,17 +165,17 @@ fn setup(
     let material = materials.add(TerrainMaterial::load(&assets));
     commands.insert_resource(TerrainDetail::request(material.clone(), &assets));
     commands.insert_resource(terrain_surface::TerrainSurface::new(material));
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
+    commands.spawn((
+        DirectionalLight {
             illuminance: 5000.0,
             ..default()
         },
-        transform: Transform::from_xyz(-1.0, 1.0, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
-    commands.insert_resource(AmbientLight {
+        Transform::from_xyz(-1.0, 1.0, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.82, 0.90, 1.0),
         brightness: 295.0,
+        ..default()
     });
 }
 
