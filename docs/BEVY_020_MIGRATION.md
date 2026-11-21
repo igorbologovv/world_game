@@ -23,6 +23,25 @@ CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo check -p world-water
 
 Для Arch Linux с системным Rust вместо rustup нужно обновить `rust` через системный менеджер пакетов (с учётом свободного места на Btrfs). Миграцию не следует тестировать на Rust 1.96.0.
 
+## Подтверждено компилятором (21 ноября 2026)
+
+При `cargo check -p world-water` первый сбой — `world-core`:
+- `SpatialBundle` и `set_parent()` заменены на `Transform + Visibility` и `set_parent_in_place()`.
+- `BigSpacePlugin<i32>` реализует `Plugins` из `bevy_app 0.14.2`, а приложение ожидает `bevy_app 0.20.1`.
+- `spawn_big_space` не доступен на типе `Commands` из Bevy 0.20, потому что расширение импортировано из сборки Bevy 0.14.
+
+**Следующее условие для продолжения:** выделить независимую копию `~/bevy_terrain` для миграции, обновить её зависимости на Bevy 0.20, портировать `big_space` и другие модули до успешного `cargo check`. Нельзя менять оригинал на месте, иначе сломается рабочая версия на 0.14.
+
+Локальная проверка источника зависимости:
+
+```sh
+git -C ~/bevy_terrain status --short
+git -C ~/bevy_terrain remote -v
+grep -nE '^bevy([[:space:]]|_)|^big_space|^version' ~/bevy_terrain/Cargo.toml
+cd ~/world-bevy20
+cargo tree -i bevy_app@0.14.2
+```
+
 ## Критические блокеры
 
 1. **Локальная зависимость `../bevy_terrain`.** Исходники этого отдельного проекта отсутствуют в репозитории. Плагин предоставляет `big_space::{GridTransform, ReferenceFrame, ReferenceFrames, BigSpacePlugin, GridCell}`, `DebugCameraController`, собственные системы floating origin и terrain. Его надо портировать и компилировать с Bevy 0.20 *раньше* перехода остальных крейтов. Просто изменить номер версии нельзя.
