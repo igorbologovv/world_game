@@ -15,7 +15,8 @@ use crate::planet::RADIUS;
 /// for the future hydrology/shoreline rebuild. It also prevents the existing
 /// river surfaces from being buried beneath generated hills.
 pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) -> f64 {
-    let coast = smoothstep(65.0, 350.0, base_height.abs());
+    // Keep legacy bathymetry and coastline geometry untouched until hydrology is rebuilt.
+    let coast = smoothstep(65.0, 350.0, base_height);
     let river = 1.0 - smoothstep(35.0, 170.0, river_coverage);
     let weight = coast * river;
     if weight <= 0.0 {
@@ -91,6 +92,7 @@ mod tests {
     fn coastline_and_channels_are_undisturbed() {
         let d = DVec3::new(0.23, 0.95, -0.14).normalize();
         assert_eq!(detail(d, 0.0, 0.0), 0.0);
+        assert_eq!(detail(d, -1_500.0, 0.0), 0.0);
         assert_eq!(detail(d, 250.0, 255.0), 0.0);
         assert!(detail(d, 1200.0, 0.0).abs() < 360.0);
     }
