@@ -83,7 +83,10 @@ fn fragment(in: ProxyOutput) -> @location(0) vec4<f32> {
     }
 
     let sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
-    let shade = 0.61 + 0.37 * abs(dot(normalize(in.normal), sun));
+    // The atlas already contains mild ambient/directional shading baked at
+    // portrait generation. Keep the existing proxy/dither pipeline intact,
+    // and avoid applying an additional heavy darkness in the middle LOD.
+    let shade = 0.90 + 0.18 * abs(dot(normalize(in.normal), sun));
     var pbr = pbr_input_new();
     pbr.material.flags |= STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
     pbr.frag_coord = in.position;
