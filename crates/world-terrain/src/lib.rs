@@ -16,7 +16,7 @@ use bevy::{
     pbr::MaterialPlugin,
     prelude::*,
     reflect::TypePath,
-    render::render_resource::{AsBindGroup, TextureFormat, TextureViewDimension},
+    render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat, TextureViewDimension},
     shader::ShaderRef,
 };
 use world_core::{
@@ -53,10 +53,15 @@ struct TerrainMaterial {
     detail_normal_roughness: Handle<Image>,
     #[uniform(5)]
     detail_enabled: u32,
+    // A per-tile R8 canopy coverage map, sampled in tile-local UV space.
+    // Each tile owns its image and material so streaming can release both.
+    #[texture(6)]
+    #[sampler(7)]
+    canopy_map: Handle<Image>,
 }
 
 impl TerrainMaterial {
-    fn load(asset_server: &AssetServer) -> Self {
+    fn load(asset_server: &AssetServer, canopy_map: Handle<Image>) -> Self {
         // Base layers use the order sand, grass, dirt, rock, snow.
         let albedo = asset_server
             .load_builder()
@@ -82,8 +87,33 @@ impl TerrainMaterial {
             albedo,
             normal_roughness,
             detail_enabled: 0,
+            canopy_map,
         }
     }
+}
+
+fn canopy_image(side: u32, pixels: Vec<u8>) -> Image {
+    debug_assert_eq!(pixels.len(), (side * side) as usize);
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0],
+        TextureFormat::R8Unorm,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    image.data = Some(pixels);
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
 }
 
 #[derive(Resource)]
@@ -119,7 +149,9 @@ fn load_detail(
     ) {
         (Some(albedo), Some(normal_roughness)) => {
             if valid_detail_pair(albedo, normal_roughness) {
-                if let Some(mut material) = materials.get_mut(&detail.material) {
+                // Existing chunk-specific materials also need the new PBR
+                // arrays. Future chunks clone the already-updated base.
+                for (_, material) in materials.iter_mut() {
                     material.detail_albedo = detail.albedo.clone();
                     material.detail_normal_roughness = detail.normal_roughness.clone();
                     material.detail_enabled = 1;
@@ -171,10 +203,12 @@ fn setup(
     mut commands: Commands,
     root: Res<PlanetRoot>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
     assets: Res<AssetServer>,
 ) {
-    let material = materials.add(TerrainMaterial::load(&assets));
+    let empty_canopy = images.add(canopy_image(1, vec![0]));
+    let material = materials.add(TerrainMaterial::load(&assets, empty_canopy));
     commands.insert_resource(TerrainDetail::request(material.clone(), &assets));
     commands.insert_resource(terrain_surface::TerrainSurface::new(material));
 
@@ -246,9 +280,12 @@ mod tests {
 
         let world = app.world_mut();
         let assets = world.resource::<AssetServer>().clone();
+        let empty_canopy = world
+            .resource_mut::<Assets<Image>>()
+            .add(canopy_image(1, vec![0]));
         let material = world
             .resource_mut::<Assets<TerrainMaterial>>()
-            .add(TerrainMaterial::load(&assets));
+            .add(TerrainMaterial::load(&assets, empty_canopy));
         let mut detail = TerrainDetail::request(material.clone(), &assets);
         if missing_albedo {
             detail.albedo = assets.load("textures/terrain/absent-detail.ktx2");
