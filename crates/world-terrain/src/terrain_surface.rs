@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{
     math::{DVec2, DVec3},
-    pbr::{FogFalloff, FogSettings, NotShadowCaster},
+    pbr::NotShadowCaster,
     prelude::*,
-    render::{mesh::Indices, render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology},
 };
 use world_core::{
     coordinates::cube_direction,
@@ -102,7 +103,7 @@ impl TerrainSurface {
 
     fn retire(&mut self, tile: Tile, commands: &mut Commands) {
         if let Some(chunk) = self.leaves.remove(&tile) {
-            commands.entity(chunk.entity).despawn_recursive();
+            commands.entity(chunk.entity).despawn();
         }
     }
 }
@@ -211,12 +212,9 @@ impl TileContext<'_> {
         let entity = commands
             .spawn((
                 cell,
-                MaterialMeshBundle::<TerrainMaterial> {
-                    mesh: meshes.add(mesh),
-                    material: self.material.clone(),
-                    transform: Transform::from_translation(translation),
-                    ..default()
-                },
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(self.material.clone()),
+                Transform::from_translation(translation),
                 bounds,
                 NotShadowCaster,
             ))
@@ -306,7 +304,7 @@ fn ground_normal(up: DVec3, height: f64, heights: &SurfaceHeights) -> DVec3 {
 }
 
 pub(super) fn atmosphere(
-    mut cameras: Query<(Entity, GridTransform, &mut Camera, &mut FogSettings), With<WorldCamera>>,
+    mut cameras: Query<(Entity, GridTransform, &mut Camera3d, &mut DistanceFog), With<WorldCamera>>,
     frames: ReferenceFrames,
 ) {
     let Ok((entity, transform, mut camera, mut fog)) = cameras.single_mut() else {
