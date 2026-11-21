@@ -6,13 +6,14 @@ use bevy::{
     math::DVec3,
     pbr::MaterialPipeline,
     prelude::*,
+    shader::ShaderRef,
     asset::RenderAssetUsages,
     reflect::TypePath,
     render::{
         mesh::MeshVertexBufferLayoutRef,
 
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderRef, ShaderType,
+            AsBindGroup, RenderPipelineDescriptor, ShaderType,
             SpecializedMeshPipelineError,
         },
     },
