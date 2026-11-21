@@ -193,6 +193,20 @@ mod tests {
     }
 
     #[test]
+    fn equatorial_patch_groups_do_not_overflow_at_mars_scale() {
+        let band = LAST_ROW / GROUP / 2;
+        let row = band * GROUP + 2;
+        let col = columns(row) / 2;
+        assert!(
+            i64::from(col) * i64::from(node_columns(band)) > i64::from(i32::MAX),
+            "this test must exercise the original i32 overflow"
+        );
+        let patch = PatchKey(row, col);
+        let parent = patch.parent();
+        assert!(parent.leaves().contains(&patch));
+    }
+
+    #[test]
     fn palm_coast_spawn_faces_a_dry_grove() {
         let heights = SurfaceHeights::load(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
