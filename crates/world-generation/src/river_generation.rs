@@ -31,7 +31,7 @@ pub(super) fn generate(
     output: &Path,
     surface_output: &Path,
     lake_output: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<bool>, Box<dyn Error>> {
     let drainage = super::hydrology::route(heights, ocean);
     let outlets = &drainage.outlets;
     let area = &drainage.accumulation;
@@ -40,7 +40,7 @@ pub(super) fn generate(
     // Flow topology is computed from the original terrain, before any carving.
     for &cell in land {
         let i = cell as usize;
-        if !drainage.lakes[i] && heights[i] > SEA_LEVEL && drainage.spill[i] > heights[i] {
+        if !drainage.lakes[i] && drainage.spill[i] > heights[i] {
             heights[i] = drainage.spill[i];
             encoded[i] = encode_height(heights[i]);
         }
@@ -253,6 +253,18 @@ pub(super) fn generate(
         if width <= 0.0 || from.distance_squared(to) <= 1.0e-20 { continue; }
         let elevation = drainage.spill[cell] + 0.10;
         append_surface(&mut lakes, from, to, elevation, elevation, width, width);
+        // Include the lake footprint in the shared river/wet-area mask so
+        // vegetation placement never plants ferns and trees underwater.
+        let atlas_x = (face as u32 % 3) * MASK_SIDE;
+        let atlas_y = (face as u32 / 3) * MASK_SIDE;
+        for oy in 0..2 {
+            for ox in 0..2 {
+                let px = (2 * x as u32 + ox).min(MASK_SIDE - 1);
+                let py = (2 * y as u32 + oy).min(MASK_SIDE - 1);
+                let pixel = atlas.get_pixel_mut(atlas_x + px, atlas_y + py);
+                pixel.0[3] = 255;
+            }
+        }
         lake_cells += 1;
     }
     let lake_bytes: Vec<_> = lakes.iter()
@@ -272,7 +284,7 @@ pub(super) fn generate(
         .flat_map(|position| position.to_array().into_iter().flat_map(f32::to_le_bytes))
         .collect();
     fs::write(surface_output, bytes)?;
-    Ok(())
+    Ok(drainage.lakes)
 }
 
 fn open_diagonal_channels(
