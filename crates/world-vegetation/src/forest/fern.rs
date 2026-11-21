@@ -15,11 +15,7 @@ use bevy::{
     shader::ShaderRef,
     camera::primitives::Aabb,
     reflect::TypePath,
-    render::{
-        primitives::Aabb,
-        render_asset::RenderAssetUsages,
-        render_resource::{AsBindGroup, ShaderRef},
-    },
+    render::render_resource::AsBindGroup,
 };
 use world_core::{
     planet::RADIUS,
