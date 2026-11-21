@@ -41,7 +41,13 @@ impl Site {
 impl PatchKey {
     pub fn parent(self) -> NodeKey {
         let band = self.0 / GROUP;
-        NodeKey(band, self.1 * node_columns(band) / columns(self.0))
+        // At Mars radius there are >100k longitude columns. Multiply
+        // in i64: i32 would silently overflow when grouping patches.
+        NodeKey(
+            band,
+            (i64::from(self.1) * i64::from(node_columns(band))
+                / i64::from(columns(self.0))) as i32,
+        )
     }
 
     /// Candidate patches whose canonical trees may shade the given surface tile.
@@ -113,7 +119,10 @@ impl NodeKey {
         (self.0 * GROUP..=(self.0 * GROUP + GROUP - 1).min(LAST_ROW))
             .flat_map(|row| {
                 let count = columns(row);
-                let edge = |col| (col * count + parents - 1) / parents;
+                let edge = |col: i32| {
+                    ((i64::from(col) * i64::from(count) + i64::from(parents) - 1)
+                        / i64::from(parents)) as i32
+                };
                 (edge(self.1)..edge(self.1 + 1)).map(move |col| PatchKey(row, col))
             })
             .collect()
@@ -194,7 +203,9 @@ mod tests {
         let look_at = terrain_aligned_direction(spawn.look_at);
         let ground = heights.sample(up).unwrap();
         assert!(ground > world_core::planet::WATER_SURFACE_ELEVATION);
-        assert!((ground - spawn.elevation).abs() < 0.02);
+        // The authored spawn is recorded against the legacy global height
+        // atlas. Procedural fine relief may change the true ground height.
+        assert!((heights.sample_base(up).unwrap() - spawn.elevation).abs() < 0.02);
         assert!(!heights.is_river(up));
 
         let (east, north) = super::super::tangent_basis(up);
