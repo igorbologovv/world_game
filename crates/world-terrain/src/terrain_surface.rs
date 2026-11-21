@@ -12,7 +12,7 @@ use bevy::{
 };
 use world_core::{
     coordinates::cube_direction,
-    forest::forest_density_bands,
+    forest::forest_canopy_region,
     planet::RADIUS,
     runtime::{GridTransform, PlanetRoot, ReferenceFrames, WorldCamera},
     SurfaceHeights,
@@ -383,15 +383,13 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
             positions.push((position - anchor).as_vec3().to_array());
             let planet = position.as_vec3();
             locations.push([planet.x, planet.y, planet.z, height as f32]);
-            let density = if (3.5..2_600.0).contains(&height) && up.y.abs() < 0.96 {
-                // Feather the edge of the baked river exclusion around the
-                // same threshold that rejects tree sites.
-                let dry = ((175.0 - heights.river_coverage(up)) / 50.0).clamp(0.0, 1.0) as f32;
-                forest_density_bands(up, height).map(|band| dry * band)
-            } else {
-                [0.0; 2]
-            };
-            canopy.push(density);
+            // UV0.x is a *continuous canopy region* (independent of tree
+            // positions, local groves and the streaming draw range). The
+            // shader uses it to paint entire forested valleys dark green.
+            // UV0.y is reserved for future landcover variants.
+            let dry = ((175.0 - heights.river_coverage(up)) / 50.0).clamp(0.0, 1.0) as f32;
+            let canopy_region = forest_canopy_region(up, height) * dry;
+            canopy.push([canopy_region, 0.0]);
         }
     }
 
