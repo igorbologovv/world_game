@@ -163,9 +163,20 @@ fn biome_surface(
         * (1.0 - smoothstep(0.72, 0.91, slope));
     let climate_limit = (1.0 - smoothstep(0.93, 0.96, latitude))
         * (1.0 - snow);
-    let cover = canopy_occupancy
-        * max(local_tree_limit, far_canopy_limit * 0.90)
-        * climate_limit;
+    // Dense forest must remain a dark canopy after the last tree impostor
+    // disappears. Tree-site noise makes small clearings, but it must NOT
+    // turn an entire humid forest biome into bright grass at long distance.
+    // This broad woodland floor applies only to humid forest species, never
+    // to desert/savanna, with the same tree-line and rocky-cliff exclusions.
+    let woodland_biome = max(rainforest, max(temperate_forest, boreal_forest));
+    let woodland_floor = woodland_biome
+        * smoothstep(3.5, 12.0, height)
+        * (1.0 - smoothstep(2250.0, 2650.0, height))
+        * (1.0 - smoothstep(0.55, 0.83, slope));
+    let cover = max(
+        canopy_occupancy * max(local_tree_limit, far_canopy_limit * 0.90),
+        woodland_floor * 0.96,
+    ) * climate_limit;
 
     // Forested lowlands are living soil, not a broad pale beach. Even coastal
     // groves may contain isolated sand patches, so only suppress beach sand
