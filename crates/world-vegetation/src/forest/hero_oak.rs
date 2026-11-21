@@ -150,7 +150,7 @@ impl OakPrimitives {
         let mut lods = Vec::with_capacity(4);
         for (level, leaves) in self.leaves.iter().enumerate() {
             let mesh = meshes.get_mut(leaves)?;
-            let foliage_bounds = mesh.compute_aabb()?;
+            let foliage_bounds = mesh.get_aabb()?;
             // The existing foliage shader uses a color and a second UV set.
             // Prepare the imported mesh once so every oak can share it.
             let Some(VertexAttributeValues::Float32x3(positions)) =
@@ -175,7 +175,7 @@ impl OakPrimitives {
             let wood = self.wood.get(level).and_then(|handle| {
                 Some(WoodLod {
                     mesh: handle.clone(),
-                    bounds: meshes.get(handle)?.compute_aabb()?,
+                    bounds: meshes.get(handle)?.get_aabb()?,
                 })
             });
             let material = if level == 3 {
