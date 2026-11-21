@@ -24,7 +24,7 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
 
     let position = mesh.planet_position;
     let up = normalize(position);
-    let eye = normalize(view.world_position - mesh.world_position);
+    let eye = normalize(view.world_position.xyz - mesh.world_position);
     let footprint = max(length(dpdx(position)), length(dpdy(position)));
     let detail = 1.0 - smoothstep(0.45, 3.5, footprint);
     let glancing = smoothstep(0.015, 0.20, dot(up, eye));
