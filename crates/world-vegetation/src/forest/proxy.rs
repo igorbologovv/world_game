@@ -10,7 +10,7 @@ use bevy::{
     reflect::TypePath,
     render::{
         mesh::MeshVertexBufferLayoutRef,
-        ,
+
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderRef, ShaderType,
             SpecializedMeshPipelineError,
