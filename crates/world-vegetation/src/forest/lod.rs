@@ -260,10 +260,11 @@ pub(super) fn spawn_tree(
     let (cell, translation) = frame.translation_to_grid(site.position);
     let mut tree = root.spawn(
         commands,
-        SpatialBundle::from_transform(
+        (
             Transform::from_translation(translation)
                 .with_rotation(site.rotation())
                 .with_scale(Vec3::splat(site.scale)),
+            Visibility::Inherited,
         ),
     );
     tree.insert(cell);
@@ -276,10 +277,9 @@ pub(super) fn spawn_tree(
                     NotShadowCaster,
                     NotShadowReceiver,
                     Aabb::default(),
-                    MaterialMeshBundle::<BarkMaterial> {
-                        visibility: Visibility::Hidden,
-                        ..default()
-                    },
+                    Mesh3d::default(),
+                    MeshMaterial3d::<BarkMaterial>::default(),
+                    Visibility::Hidden,
                 ))
                 .id();
             let leaves = children
@@ -288,10 +288,9 @@ pub(super) fn spawn_tree(
                     NotShadowCaster,
                     NotShadowReceiver,
                     Aabb::default(),
-                    MaterialMeshBundle::<FoliageMaterial> {
-                        visibility: Visibility::Hidden,
-                        ..default()
-                    },
+                    Mesh3d::default(),
+                    MeshMaterial3d::<FoliageMaterial>::default(),
+                    Visibility::Hidden,
                 ))
                 .id();
             *slot = (trunk, leaves);
@@ -308,8 +307,8 @@ pub(super) fn spawn_tree(
 }
 
 type RenderParts<'a, M> = (
-    &'a mut Handle<Mesh>,
-    &'a mut Handle<M>,
+    &'a mut Mesh3d,
+    &'a mut MeshMaterial3d<M>,
     &'a mut Aabb,
     &'a mut Visibility,
 );
@@ -415,8 +414,8 @@ pub(super) fn update_lods(
                                 high,
                             ))
                         });
-                    mesh.set_if_neq(wood.mesh.clone());
-                    material.set_if_neq(handle.clone());
+                    mesh.set_if_neq(Mesh3d(wood.mesh.clone()));
+                    material.set_if_neq(MeshMaterial3d(handle.clone()));
                     bounds.set_if_neq(wood.bounds);
                     visible.set_if_neq(Visibility::Inherited);
                 } else {
@@ -440,8 +439,8 @@ pub(super) fn update_lods(
                         })
                         .clone()
                 };
-                mesh.set_if_neq(model.foliage.clone());
-                material.set_if_neq(handle);
+                mesh.set_if_neq(Mesh3d(model.foliage.clone()));
+                material.set_if_neq(MeshMaterial3d(handle));
                 bounds.set_if_neq(model.foliage_bounds);
                 visible.set_if_neq(Visibility::Inherited);
             }
