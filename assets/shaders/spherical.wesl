@@ -391,66 +391,70 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
-    // Forest is a continuous *biome*, not a silhouette-density mask.
-    // The ground throughout the same wooded valley keeps one forest-floor
-    // palette even where individual trees have been streamed out or where
-    // local placement happens to be sparse. Climate drives this factor;
-    // tree density does not enter terrain shading.
+    // Dense distant forest canopy: from the air, individual trees merge
+    // into one continuous leaf-colored surface. Climate/biome establishes
+    // where woodland exists; the number or draw distance of tree entities
+    // never changes this ground coverage.
+    //
+    // At walking range the forest-floor PBR textures are retained. Between
+    // the near trees and the horizon we transition to a dark leaf-green
+    // canopy approximation, covering the entire wooded valley.
+    let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
     let vegetation = clamp(weights[1] + weights[2], 0.0, 1.0);
-    // The whole tree-compatible biome receives one continuous ground color.
-    // No fade based on distance to the camera, local density or spawned trees.
-    let forest_biome = smoothstep(0.12, 0.48, biome.forest_cover);
+    let forest_biome = smoothstep(0.018, 0.16, biome.forest_cover);
     let forest_ground = forest_biome * vegetation;
-
-    // Keep triplanar PBR texture and real lighting. Only very broad, muted
-    // color modulation is applied; fine changes come from PBR normals,
-    // sun direction and the actual geometry, not per-tree dark patches.
-    let forest_color_variation = clamp(
-        1.0 + 0.08 * regional + 0.045 * patches,
-        0.92, 1.08,
+    let canopy_distance = smoothstep(180.0, 1050.0, distance_to_eye);
+    let broad_variation = clamp(
+        1.0 + 0.09 * regional + 0.035 * patches,
+        0.90, 1.10,
     );
-    // Strong continuous forest-floor base albedo instead of a weak overlay
-    // on the pale grassy texture. Retain texture normals and physically based
-    // sunlight so hills are shaped by light, not tree-sized color blotches.
-    let forest_floor_color = biome.canopy_tint * (1.82 * forest_color_variation);
-    surface.color = mix(
-        surface.color,
-        forest_floor_color,
-        forest_ground * 0.96,
-    );
-    surface.roughness = mix(surface.roughness, 0.92, forest_ground * 0.78);
 
-    // Non-forest biomes keep their own broad meadow/soil colors. Preserve
-    // snow, beach sand and rock material weights as authored above.
+    // The near-ground material is darker under a wooded canopy, but does
+    // not lose its physical detail textures and normals.
+    let forest_floor_color = biome.canopy_tint * (1.16 * broad_variation);
+    let ground_blend = forest_ground * (1.0 - canopy_distance) * 0.70;
+    surface.color = mix(surface.color, forest_floor_color, ground_blend);
+
+    // A canopy is a *surface of leaves*, not bare forest soil. Beyond the
+    // detailed trees it must be dark and continuous, including spots where
+    // sparse tree candidates leave holes and beyond forest impostor range.
+    // Slight low-frequency variation changes lightness, not vegetation type.
+    let canopy_color = biome.canopy_tint * (1.10 * broad_variation);
+    let canopy_blend = forest_ground * canopy_distance * 0.995;
+    surface.color = mix(surface.color, canopy_color, canopy_blend);
+    surface.roughness = mix(surface.roughness, 0.93, canopy_blend);
+
+    // Keep the climate's actual non-forest terrain exposed: dry grasslands,
+    // bare soil and meadows must not inherit the forest canopy hue.
     let meadow = smoothstep(-0.19, 0.18, patches + 0.30 * regional);
-    let clearing_color = mix(
+    let meadow_color = mix(
         vec3<f32>(0.87, 0.84, 0.78),
         vec3<f32>(1.09, 1.05, 0.95),
         meadow,
     );
-    let clearing_strength = vegetation * (1.0 - forest_biome) * 0.22;
-    surface.color *= mix(vec3<f32>(1.0), clearing_color, clearing_strength);
+    let meadow_strength = vegetation * (1.0 - forest_biome) * 0.18;
+    surface.color *= mix(vec3<f32>(1.0), meadow_color, meadow_strength);
 
-    // Steep mineral outcrops are real rock, even inside a forest region.
-    // Reuse the rock mip already resident on GPU, without new textures.
-    let outcrop = smoothstep(0.27, 0.62, slope + patches * 0.12)
+    // Preserve rock, snow and sand, already excluded from vegetation by
+    // material weights. Steep outcrops stay mineral even in forest regions.
+    let outcrop = smoothstep(0.28, 0.64, slope + patches * 0.10)
         * smoothstep(140.0, 780.0, height)
         * (1.0 - weights[4]);
     let rock_average = textureLoad(
         terrain_albedo, vec2<i32>(0), 3,
         i32(textureNumLevels(terrain_albedo)) - 1,
     ).rgb;
-    surface.color = mix(surface.color, rock_average, outcrop * 0.26);
+    surface.color = mix(surface.color, rock_average, outcrop * 0.30);
 
     var shaded_normal = surface_normal;
     if normal_detail > 0.0 {
         let tangent_offset = (surface.normal_offset - surface_normal * dot(surface_normal, surface.normal_offset)) * 0.70;
         shaded_normal = normalize(surface_normal + tangent_offset);
     }
-    // Outside forests keep the existing large-scale tint. Inside them only
-    // subtle variation is allowed; PBR lighting supplies local brightness.
-    let forest_tint = 1.0 + 0.08 * regional + 0.045 * patches;
-    let biome_tint = mix(tint, forest_tint, forest_ground);
+    // Avoid bright biome tint washing the distant leaf color back to pale
+    // grass. The canopy hue is set above; sunlight and atmosphere still
+    // shape the final color.
+    let biome_tint = mix(tint, 1.0, canopy_blend);
     let base_color = vec4<f32>(surface.color * biome_tint, 1.0);
 
     var pbr_input: PbrInput = pbr_input_new();
