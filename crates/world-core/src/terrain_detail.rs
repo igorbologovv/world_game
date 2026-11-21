@@ -46,9 +46,16 @@ pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) ->
     // Moderate coastal hills restore local relief without moving the
     // waterline. Their envelope vanishes at sea level, so water remains
     // aligned with the existing baked shoreline until the hydrology upgrade.
-    let coastal_hills = smoothstep(1.5, 24.0, base_height)
-        * (1.0 - smoothstep(110.0, 300.0, base_height))
-        * value_noise(point / 2_200.0, 0x28EA_4B13).max(0.0) * 55.0;
+    // The Palm Coast starts around 8 m above the datum. On a Mars-radius
+    // world the baked heightmap varies too slowly for any visible slope there.
+    // Make coastal hills in *meters* and preserve a flat beach strip only
+    // immediately beside sea level.
+    let coastal_envelope = smoothstep(1.5, 10.0, base_height)
+        * (1.0 - smoothstep(130.0, 350.0, base_height));
+    let coastal_hills = coastal_envelope * (
+        value_noise(point / 1_300.0, 0x28EA_4B13).max(0.0) * 125.0
+        + value_noise(point / 360.0, 0xA13D_72C0).max(0.0) * 22.0
+    );
     (ridge + valleys + foothills + rolling + slopes + ground + micro)
         * inland * river
         + (coastal_hills + dunes) * river
