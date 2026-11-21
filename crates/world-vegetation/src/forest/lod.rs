@@ -343,6 +343,10 @@ pub(super) fn update_lods(
     stats.levels = [0; 3];
     stats.blends = 0;
     for mut tree in &mut trees {
+        // Newly loaded GLB variants must replace mesh handles already presented.
+        if models.is_changed() {
+            tree.presented = [None; 2];
+        }
         let distance = eye.distance(tree.site.position) as f32;
         let (impostor, readiness) = forest.coverage(tree.patch);
         let range = settings.impostor_range.clamp(200.0, 600.0);
@@ -366,7 +370,9 @@ pub(super) fn update_lods(
             view.pixels(tree.site, distance),
             tree.lod.desired.map(|lod| lod.level),
         );
-        let hero = tree.site.species == Species::Oak && models.hero_oak.is_some();
+        let hero = tree.site.species == Species::Oak
+            && tree.site.variant == 0
+            && models.hero_oak.is_some();
         tree.lod.update(ModelChoice { level, hero }, step);
         let active = tree.lod.current.unwrap();
         stats.levels[active.level] += 1;
