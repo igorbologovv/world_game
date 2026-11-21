@@ -153,7 +153,7 @@ pub(super) fn stream(
         .collect();
     for patch in retiring {
         if let Some(Some(old)) = cover.patches.remove(&patch) {
-            commands.entity(old.entity).despawn_recursive();
+            commands.entity(old.entity).despawn();
         }
     }
     let available = MAX_PATCHES
@@ -172,12 +172,9 @@ pub(super) fn stream(
             let id = commands
                 .spawn((
                     cell,
-                    MaterialMeshBundle::<FoliageMaterial> {
-                        mesh: meshes.add(mesh),
-                        material: material.0[0].clone(),
-                        transform: Transform::from_translation(translation).with_rotation(rotation),
-                        ..default()
-                    },
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(material.0[0].clone()),
+                    Transform::from_translation(translation).with_rotation(rotation),
                     bounds,
                     NotShadowCaster,
                     NotShadowReceiver,
