@@ -19,28 +19,42 @@ use camera::{camera_controller, DebugCameraController};
 use world_core::{
     planet::{ExplorerSpawn, RADIUS},
     runtime::{
-        CameraMotion, Explorer, PlanetRoot, ReferenceFrame, WorldCamera, WorldMovement, WorldReady,
+        CameraMotion, Explorer, PlanetRoot, ReferenceFrame, WorldMovement, WorldReady,
     },
 };
 
 /// Spawn and control the primary explorer and world camera.
 pub struct PlayerPlugin {
-    spawn: ExplorerSpawn,
+    initial: InitialSpawn,
 }
 
 impl PlayerPlugin {
     /// Use the given region's explorer placement and initial heading.
     pub fn new(spawn: ExplorerSpawn) -> Self {
-        Self { spawn }
+        Self {
+            initial: InitialSpawn {
+                spawn,
+                first_person: false,
+            },
+        }
+    }
+
+    /// Open the explorer camera in first person when the world starts.
+    pub fn with_first_person_view(mut self) -> Self {
+        self.initial.first_person = true;
+        self
     }
 }
 
-#[derive(Resource)]
-struct InitialSpawn(ExplorerSpawn);
+#[derive(Clone, Copy, Resource)]
+struct InitialSpawn {
+    spawn: ExplorerSpawn,
+    first_person: bool,
+}
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(InitialSpawn(self.spawn))
+        app.insert_resource(self.initial)
             .init_resource::<trip::TravelSpeed>()
             .add_systems(Startup, (spawn.after(WorldReady), trip::spawn))
             .add_systems(
@@ -73,9 +87,9 @@ fn spawn(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let grid = frames.get(root.entity()).expect("WorldReady creates the planet grid");
-    let player = player::Player::new(initial.0);
-    let map = player::MapView::default();
-    let (position, rotation) = player.camera_pose(map.altitude(1.0), &map);
+    let player = player::Player::new(initial.spawn);
+    let (map, (position, rotation), mode) = player::MapView::at_spawn(&player, initial.first_person);
+    commands.insert_resource(map);
     let (cell, translation) = grid.translation_to_grid(position);
     root.spawn(
         &mut commands,
@@ -96,7 +110,7 @@ fn spawn(
             cell,
             FloatingOrigin,
             DebugCameraController::default(),
-            WorldCamera::Map,
+            mode,
         ),
     );
     root.spawn(

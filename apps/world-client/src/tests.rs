@@ -70,7 +70,7 @@ fn client_plugins_share_the_planet_and_starting_camera() {
         .query::<(&WorldCamera, &ChildOf)>()
         .single(world)
         .unwrap();
-    assert_eq!((*camera, parent.parent()), (WorldCamera::Map, root));
+    assert_eq!((*camera, parent.parent()), (WorldCamera::FirstPerson, root));
     let parent = world
         .query_filtered::<&ChildOf, With<Explorer>>()
         .single(world)
@@ -81,6 +81,11 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     let ground = world.resource::<SurfaceHeights>().sample(spawn).unwrap();
     assert!(ground > WATER_SURFACE_ELEVATION);
     assert_explorer_at(world, root, spawn, ground);
+    let sun = world
+        .query_filtered::<&Transform, With<DirectionalLight>>()
+        .single(world)
+        .unwrap();
+    assert!(spawn.dot((sun.rotation * Vec3::Z).as_dvec3()) > 0.60);
 
     // The imported demonstration is an asset source, not a second terrain tile.
     assert_eq!(
@@ -90,6 +95,23 @@ fn client_plugins_share_the_planet_and_starting_camera() {
             .filter(|name| name.as_str() == "Low Poly Tree Scene Free")
             .count(),
         0,
+    );
+
+    for state in [ButtonState::Pressed, ButtonState::Released] {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state,
+            window,
+            text: None,
+            repeat: false,
+        });
+        app.update();
+    }
+    let world = app.world_mut();
+    assert_eq!(
+        *world.query::<&WorldCamera>().single(world).unwrap(),
+        WorldCamera::Map
     );
 
     // Aim a headless map view at the old starter region, then use the normal input path.

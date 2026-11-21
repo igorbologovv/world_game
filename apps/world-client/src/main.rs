@@ -16,13 +16,25 @@ fn main() {
         eprintln!("Expected an optional --spawn palm-coast or --spawn starter-river.");
         std::process::exit(2);
     };
+    let location = if region.id == PALM_COAST_REGION.id {
+        "Palm Coast"
+    } else {
+        "Starter River"
+    };
     let assets = WorldAssets::resolve(Path::new(WORKSPACE_ROOT));
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .build()
             .disable::<TransformPlugin>()
-            .set(asset_plugin(&assets)),
+            .set(asset_plugin(&assets))
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("Planetary World | {location}"),
+                    ..default()
+                }),
+                ..default()
+            }),
     );
     install_world(&mut app, assets, region);
     app.run();
@@ -46,9 +58,13 @@ fn asset_plugin(assets: &WorldAssets) -> AssetPlugin {
 }
 
 fn install_world(app: &mut App, assets: WorldAssets, region: Region) {
+    let mut player = PlayerPlugin::new(region.spawn);
+    if region.id == PALM_COAST_REGION.id {
+        player = player.with_first_person_view();
+    }
     app.add_plugins((
         WorldSpacePlugin::new(assets),
-        PlayerPlugin::new(region.spawn),
+        player,
         TerrainPlugin,
         WaterPlugin,
         ProceduralForestPlugin,

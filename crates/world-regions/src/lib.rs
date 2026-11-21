@@ -23,13 +23,13 @@ pub const STARTER_REGION: Region = Region {
     },
 };
 
-/// Dry coastal starting point facing a streamed coconut palm grove.
+/// Sunlit coastal starting point facing a streamed coconut palm grove.
 pub const PALM_COAST_REGION: Region = Region {
     id: RegionId("palm-coast"),
     spawn: ExplorerSpawn {
-        direction: DVec3::new(0.93614492280527, -0.19723134262937, -0.29108844187038),
-        look_at: DVec3::new(0.93620523761306, -0.19710425540831, -0.29098052437546),
-        elevation: 12.95490959,
+        direction: DVec3::new(-0.97684968336687, 0.21339114535822, 0.01512994344821),
+        look_at: DVec3::new(-0.97687041136832, 0.21331238468388, 0.01490053467382),
+        elevation: 8.14831769,
     },
 };
 

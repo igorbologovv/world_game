@@ -37,6 +37,7 @@ const THIRD_PERSON_PITCH_MAX: f64 = 0.50;
 const POV_FOV: f32 = std::f32::consts::FRAC_PI_3;
 const MAP_FOV: f32 = std::f32::consts::FRAC_PI_4;
 
+#[derive(Resource)]
 pub(super) struct MapView {
     zoom: f64,
     target_zoom: f64,
@@ -58,7 +59,23 @@ impl Default for MapView {
 }
 
 impl MapView {
-    pub(super) fn altitude(&self, aspect: f64) -> f64 {
+    pub(super) fn at_spawn(
+        player: &Player,
+        first_person: bool,
+    ) -> (Self, (DVec3, Quat), WorldCamera) {
+        let mut map = Self::default();
+        if first_person {
+            let mut view = FirstPersonView::new(player.facing);
+            let pose = view.pose(player);
+            map.first_person = Some(view);
+            (map, pose, WorldCamera::FirstPerson)
+        } else {
+            let pose = player.camera_pose(map.altitude(1.0), &map);
+            (map, pose, WorldCamera::Map)
+        }
+    }
+
+    fn altitude(&self, aspect: f64) -> f64 {
         let half_fov = std::f64::consts::FRAC_PI_8;
         let width = aspect.clamp(0.25, 1.0);
         let narrow_axis = (half_fov.tan() * width).atan();
@@ -89,6 +106,10 @@ struct FirstPersonView {
 }
 
 impl FirstPersonView {
+    fn new(heading: DVec3) -> Self {
+        Self { heading, pitch: -0.10 }
+    }
+
     fn look(&mut self, up: DVec3, drag: Vec2) {
         let heading = tangent(self.heading, up);
         self.heading = DQuat::from_axis_angle(up, -f64::from(drag.x) * LOOK_SENSITIVITY) * heading;
@@ -401,7 +422,7 @@ pub(super) fn walk(
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<MouseWheel>,
     mut motion: MessageReader<MouseMotion>,
-    mut map: Local<MapView>,
+    mut map: ResMut<MapView>,
     time: Res<Time>,
     frames: ReferenceFrames,
     surface: Res<SurfaceHeights>,
@@ -508,10 +529,7 @@ pub(super) fn walk(
     let switched_view = keys.just_pressed(KeyCode::KeyV) || (escape && map.first_person.is_some());
     if switched_view {
         map.first_person = if map.first_person.is_none() {
-            Some(FirstPersonView {
-                heading: player.facing,
-                pitch: -0.10,
-            })
+            Some(FirstPersonView::new(player.facing))
         } else {
             None
         };
@@ -694,7 +712,7 @@ pub(super) fn walk(
     camera.transform.rotation = rotation;
 }
 
-pub(super) const WALK_CONTROLS: &str = "F: fly     R: center on explorer     WASD: move     Shift: sprint\nRight-drag: look     Scroll: zoom     V: first person     Click: travel     T: free camera\nCtrl+Click: debug map teleport";
+pub(super) const WALK_CONTROLS: &str = "F: fly     R: center on explorer     WASD: move     Shift: sprint\nRight-drag: look     Scroll: zoom     V: switch view     Click: travel     T: free camera\nCtrl+Click: debug map teleport";
 const FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nF: land     R: center on explorer     Right-drag: look     Scroll: zoom     V: switch view\nCtrl+Click: debug map teleport";
 const WET_FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nFind dry ground to land     R: center on explorer     Right-drag: look     Scroll: zoom     V: switch view\nCtrl+Click: debug map teleport";
 const FREE_CONTROLS: &str = "Free camera     Arrow keys: move     Page Up / Down: rise / descend     Mouse: look\nR: return to explorer     F: toggle explorer flight     T: exit free camera";

@@ -7,8 +7,8 @@ cargo run --locked -p world-client
 cargo test --workspace
 ```
 
-The client starts at Palm Coast facing a coconut palm grove. To start at
-the original river region, run `cargo run --locked -p world-client -- --spawn starter-river`.
+The client starts in first person at Palm Coast, facing a sunlit coconut palm
+grove. Press **V** to open the map. To start at the original river region, run `cargo run --locked -p world-client -- --spawn starter-river`.
 
 Scroll out in the map view and right-drag to rotate the globe. Hold **Ctrl**
 and **left-click** a visible location to teleport the explorer there. The map
