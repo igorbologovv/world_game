@@ -6,6 +6,7 @@ mod terrain_surface;
 use bevy::{
     asset::LoadState,
     pbr::MaterialPlugin,
+    light::{atmosphere::ScatteringMedium, light_consts::lux, Atmosphere, SunDisk},
     prelude::*,
     reflect::TypePath,
     shader::ShaderRef,
@@ -15,7 +16,7 @@ use bevy::{
 
     },
 };
-use world_core::runtime::{CameraMotion, WorldMovement};
+use world_core::{planet::RADIUS, runtime::{CameraMotion, PlanetRoot, WorldMovement, WorldReady}};
 
 /// Register terrain materials, chunk streaming, lighting, and atmospheric fog.
 ///
@@ -26,7 +27,8 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
-        .add_systems(Startup, setup)
+        .insert_resource(ClearColor(Color::BLACK))
+        .add_systems(Startup, setup.after(WorldReady))
         .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
         .add_systems(Update, terrain_surface::stream.after(WorldMovement))
         .add_systems(PostUpdate, terrain_surface::atmosphere.after(CameraMotion));
@@ -159,24 +161,46 @@ impl Material for TerrainMaterial {
 
 fn setup(
     mut commands: Commands,
+    root: Res<PlanetRoot>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
+    mut mediums: ResMut<Assets<ScatteringMedium>>,
     assets: Res<AssetServer>,
 ) {
     let material = materials.add(TerrainMaterial::load(&assets));
     commands.insert_resource(TerrainDetail::request(material.clone(), &assets));
     commands.insert_resource(terrain_surface::TerrainSurface::new(material));
+
+    // One physically based atmosphere centered on the actual spherical planet,
+    // not on a ground-level flat plane. RADIUS is in meters, as required by
+    // Bevy's scattering equations. The planet root is transformed by big_space
+    // relative to the floating origin, so the atmosphere follows that origin.
+    // Keep the Earth medium's 60 km density profile to preserve scale heights.
+    let scattering = mediums.add(ScatteringMedium::earth(256, 256));
+    commands.entity(root.entity()).insert(Atmosphere {
+        inner_radius: RADIUS as f32,
+        outer_radius: RADIUS as f32 + 60_000.0,
+        ground_albedo: Vec3::splat(0.27),
+        medium: scattering,
+    });
+
+    // Sun direction in the planet reference frame: afternoon/daylight at the
+    // starter region, with an oblique angle to show terrain and tree relief.
+    let sun_direction = Vec3::new(-0.78, 0.60, -0.18).normalize();
     commands.spawn((
         DirectionalLight {
-            illuminance: 5000.0,
+            // Raw sunlight is attenuated by the atmosphere during rendering.
+            illuminance: lux::RAW_SUNLIGHT,
+            shadow_maps_enabled: true,
             ..default()
         },
-        Transform::from_xyz(-1.0, 1.0, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(sun_direction * 1_000.0)
+            .looking_at(Vec3::ZERO, Vec3::Y),
+        SunDisk::EARTH,
     ));
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.82, 0.90, 1.0),
-        brightness: 295.0,
-        ..default()
-    });
+
+    // The atmosphere's generated environment lighting supplies the blue sky
+    // fill. A large uniform ambient term would wash out shadow contrast.
+    commands.insert_resource(GlobalAmbientLight::NONE);
 }
 
 #[cfg(test)]
