@@ -158,7 +158,7 @@ pub(super) fn update(
                 format!("{:.0} m remaining", distance)
             };
             let status = if blocked {
-                "Route blocked".to_string()
+                "Route blocked. Press F to fly".to_string()
             } else if camera.single().enabled {
                 "Trip paused".to_string()
             } else {

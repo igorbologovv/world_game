@@ -46,6 +46,15 @@ entities are ready. Frustum culling uses conservative mesh bounds, and parent
 forest batches are also culled against the spherical horizon. A teleport into
 a cold region still requires streaming.
 
+Hero Oak trunk meshes share mipmapped albedo, normal, and roughness maps from
+the supplied Jolcham Oak Bark pack. Albedo is sRGB. The OpenGL normal and
+metallic-roughness maps are linear, with roughness in green and zero metallic
+in blue. The trunk uses four repeats across the circumference, with matched
+normals across each UV seam. The loader prepares tangents once and uses the
+bark embedded in the GLBs if the standalone maps are unavailable or incompatible.
+See the [terrain material baker](../world-terrain/README.md) for the source
+pack and rebuild command.
+
 ## Woodland Fern
 
 The four supplied GLBs are packaged in

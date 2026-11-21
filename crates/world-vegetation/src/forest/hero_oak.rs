@@ -2,7 +2,14 @@ use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     gltf::{Gltf, GltfMesh},
     prelude::*,
-    render::{mesh::VertexAttributeValues, render_resource::Face},
+    render::{
+        mesh::VertexAttributeValues,
+        render_resource::{Face, TextureDimension, TextureFormat, TextureViewDimension},
+        texture::{
+            ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
+            ImageSamplerDescriptor,
+        },
+    },
 };
 
 use super::{textures, FoliageMaterial, ForestModels, ModelLod, Wind, WoodLod};
@@ -17,7 +24,12 @@ pub(super) struct HeroOak {
 }
 
 #[derive(Resource)]
-pub(super) struct HeroOakAssets(Option<[Handle<Gltf>; 4]>);
+pub(super) struct HeroOakAssets(Option<OakFiles>);
+
+struct OakFiles {
+    lods: [Handle<Gltf>; 4],
+    bark: [Handle<Image>; 3],
+}
 
 impl HeroOakAssets {
     pub fn is_pending(&self) -> bool {
@@ -90,6 +102,7 @@ impl OakPrimitives {
         images: &mut Assets<Image>,
         materials: &mut Assets<StandardMaterial>,
         foliage_materials: &mut Assets<FoliageMaterial>,
+        bark_maps: Option<&[Handle<Image>; 3]>,
     ) -> Option<HeroOak> {
         for handle in self.leaves.iter().chain(self.wood.iter()) {
             meshes.get(handle)?;
@@ -98,18 +111,34 @@ impl OakPrimitives {
             images.get(handle)?;
         }
 
-        let bark = materials.add(StandardMaterial {
-            base_color_texture: Some(textures::import_mipmapped(
+        let mut bark = StandardMaterial {
+            double_sided: true,
+            cull_mode: None,
+            metallic: 0.0,
+            ..default()
+        };
+        if let Some([color, normal, roughness]) = bark_maps {
+            bark.base_color_texture = Some(color.clone());
+            bark.metallic_roughness_texture = Some(roughness.clone());
+            bark.perceptual_roughness = 1.0;
+            if self.wood.iter().all(|handle| {
+                meshes.get_mut(handle).is_some_and(|mesh| {
+                    mesh.contains_attribute(Mesh::ATTRIBUTE_TANGENT)
+                        || mesh.generate_tangents().is_ok()
+                })
+            }) {
+                bark.normal_map_texture = Some(normal.clone());
+            }
+        } else {
+            bark.base_color_texture = Some(textures::import_mipmapped(
                 images,
                 &self.bark_image,
                 None,
                 true,
-            )),
-            perceptual_roughness: 0.98,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        });
+            ));
+            bark.perceptual_roughness = 0.98;
+        }
+        let bark = materials.add(bark);
         let canopy = foliage_materials.add(foliage(
             textures::import_mipmapped(images, &self.leaf_image, Some(ALPHA_CUTOFF), false),
             false,
@@ -186,8 +215,26 @@ fn foliage(texture: Handle<Image>, impostor: bool) -> FoliageMaterial {
 }
 
 pub(super) fn request_assets(mut commands: Commands, assets: Res<AssetServer>) {
-    let files = std::array::from_fn(|lod| assets.load(format!("models/hero_oak/oak_lod{lod}.glb")));
-    commands.insert_resource(HeroOakAssets(Some(files)));
+    let lods = std::array::from_fn(|lod| assets.load(format!("models/hero_oak/oak_lod{lod}.glb")));
+    let bark = [
+        ("models/hero_oak/bark/albedo.ktx2", true),
+        ("models/hero_oak/bark/normal.ktx2", false),
+        ("models/hero_oak/bark/metallic-roughness.ktx2", false),
+    ]
+    .map(|(path, is_srgb)| {
+        assets.load_with_settings(path, move |settings: &mut ImageLoaderSettings| {
+            settings.is_srgb = is_srgb;
+            settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                address_mode_u: ImageAddressMode::Repeat,
+                address_mode_v: ImageAddressMode::Repeat,
+                mag_filter: ImageFilterMode::Linear,
+                min_filter: ImageFilterMode::Linear,
+                mipmap_filter: ImageFilterMode::Linear,
+                ..default()
+            });
+        })
+    });
+    commands.insert_resource(HeroOakAssets(Some(OakFiles { lods, bark })));
 }
 
 pub(super) fn finish_loading(
@@ -204,7 +251,7 @@ pub(super) fn finish_loading(
     let Some(files) = pending.0.as_ref() else {
         return;
     };
-    if files.iter().any(|file| {
+    if files.lods.iter().any(|file| {
         matches!(assets.load_state(file.id()), LoadState::Failed(_))
             || matches!(
                 assets.get_recursive_dependency_load_state(file.id()),
@@ -215,26 +262,70 @@ pub(super) fn finish_loading(
         pending.0 = None;
         return;
     }
-    if files
+    if !files
+        .lods
         .iter()
         .all(|file| assets.is_loaded_with_dependencies(file.id()))
     {
-        models.hero_oak =
-            OakPrimitives::resolve(files, &gltfs, &gltf_meshes, &materials).and_then(|parts| {
-                parts.build(
-                    &mut meshes,
-                    &mut images,
-                    &mut materials,
-                    &mut foliage_materials,
-                )
-            });
-        if models.hero_oak.is_none() {
-            warn!(
-                "Hero Oak meshes or textures are unavailable. Keeping the procedural oak meshes."
-            );
-        }
-        pending.0 = None;
+        return;
     }
+    let bark_maps = if let [Some(albedo), Some(normal), Some(roughness)] =
+        files.bark.each_ref().map(|handle| images.get(handle))
+    {
+        if valid_bark_maps(albedo, normal, roughness) {
+            Some(&files.bark)
+        } else {
+            warn!("Hero Oak bark maps have an incompatible layout. Using the bark embedded in the GLBs.");
+            None
+        }
+    } else if files
+        .bark
+        .iter()
+        .any(|image| matches!(assets.load_state(image.id()), LoadState::Failed(_)))
+    {
+        warn!("Hero Oak bark maps failed to load. Using the bark embedded in the GLBs.");
+        None
+    } else {
+        return;
+    };
+    models.hero_oak = OakPrimitives::resolve(&files.lods, &gltfs, &gltf_meshes, &materials)
+        .and_then(|parts| {
+            parts.build(
+                &mut meshes,
+                &mut images,
+                &mut materials,
+                &mut foliage_materials,
+                bark_maps,
+            )
+        });
+    if models.hero_oak.is_none() {
+        warn!("Hero Oak meshes or textures are unavailable. Keeping the procedural oak meshes.");
+    }
+    pending.0 = None;
+}
+
+fn valid_bark_maps(albedo: &Image, normal: &Image, roughness: &Image) -> bool {
+    [
+        (albedo, TextureFormat::Rgba8UnormSrgb),
+        (normal, TextureFormat::Rgba8Unorm),
+        (roughness, TextureFormat::Rgba8Unorm),
+    ]
+    .into_iter()
+    .all(|(image, format)| {
+        let descriptor = &image.texture_descriptor;
+        let size = descriptor.size;
+        let view = image
+            .texture_view_descriptor
+            .as_ref()
+            .and_then(|view| view.dimension);
+        descriptor.dimension == TextureDimension::D2
+            && matches!(view, None | Some(TextureViewDimension::D2))
+            && descriptor.format == format
+            && size.depth_or_array_layers == 1
+            && size == albedo.texture_descriptor.size
+            && descriptor.mip_level_count == albedo.texture_descriptor.mip_level_count
+            && descriptor.mip_level_count > 1
+    })
 }
 
 #[cfg(test)]
@@ -285,12 +376,26 @@ mod tests {
                 let meshes = world.resource::<Assets<Mesh>>();
                 let foliage_materials = world.resource::<Assets<FoliageMaterial>>();
                 let images = world.resource::<Assets<Image>>();
+                let materials = world.resource::<Assets<StandardMaterial>>();
+                let bark = materials.get(&oak.bark).unwrap();
+                assert_eq!(bark.metallic, 0.0);
+                for (texture, format) in [
+                    (&bark.base_color_texture, TextureFormat::Rgba8UnormSrgb),
+                    (&bark.normal_map_texture, TextureFormat::Rgba8Unorm),
+                    (&bark.metallic_roughness_texture, TextureFormat::Rgba8Unorm),
+                ] {
+                    let image = images.get(texture.as_ref().unwrap()).unwrap();
+                    assert_eq!(image.texture_descriptor.format, format);
+                    assert!(image.texture_descriptor.mip_level_count > 1);
+                }
                 for (level, (lod, count)) in
                     oak.lods.iter().zip([33_524, 4_384, 626, 8]).enumerate()
                 {
                     let leaves = meshes.get(&lod.foliage).unwrap();
                     let wood_indices = lod.wood.as_ref().map_or(0, |wood| {
-                        meshes.get(&wood.mesh).unwrap().indices().unwrap().len()
+                        let mesh = meshes.get(&wood.mesh).unwrap();
+                        assert_trunk_material_basis(mesh);
+                        mesh.indices().unwrap().len()
                     });
                     assert_eq!((leaves.indices().unwrap().len() + wood_indices) / 3, count);
                     assert_eq!(lod.wood.is_some(), level < 3);
@@ -316,5 +421,46 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn assert_trunk_material_basis(mesh: &Mesh) {
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("wood should have UV0");
+        };
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("wood should have positions");
+        };
+        let Some(VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+        else {
+            panic!("wood should have normals");
+        };
+        let Some(VertexAttributeValues::Float32x4(tangents)) =
+            mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+        else {
+            panic!("wood should have tangents");
+        };
+        assert!(tangents.iter().all(|&t| Vec4::from_array(t).is_finite()));
+
+        // The first ring of the main trunk has a duplicated seam vertex.
+        let seam = uvs.iter().position(|&uv| uv == [4.0, 1.0]).unwrap();
+        assert_eq!(uvs[0], [0.0, 1.0]);
+        assert!(Vec3::from_array(positions[0]).abs_diff_eq(Vec3::from_array(positions[seam]), 1e-5));
+        assert_eq!(normals[0], normals[seam]);
+        let center = positions[..seam]
+            .iter()
+            .map(|&p| Vec3::from_array(p))
+            .sum::<Vec3>()
+            / seam as f32;
+        for (&position, &normal) in positions[..seam].iter().zip(&normals[..seam]) {
+            assert!((Vec3::from_array(position) - center).dot(Vec3::from_array(normal)) > 0.0);
+        }
+        let mut indices = mesh.indices().unwrap().iter();
+        let [a, b, c] =
+            std::array::from_fn(|_| Vec3::from_array(positions[indices.next().unwrap()]));
+        assert!((b - a).cross(c - a).dot(a - center) > 0.0);
     }
 }

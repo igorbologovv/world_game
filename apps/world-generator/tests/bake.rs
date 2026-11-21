@@ -9,7 +9,7 @@ impl Drop for OutputDirectory {
 }
 
 #[test]
-fn generator_bakes_legacy_assets_in_its_working_directory() {
+fn generator_bakes_connected_water_in_its_working_directory() {
     let path = std::env::temp_dir().join(format!("world-generator-bake-{}", std::process::id()));
     fs::create_dir(&path).unwrap();
     let output_dir = OutputDirectory(path);
@@ -39,9 +39,30 @@ fn generator_bakes_legacy_assets_in_its_working_directory() {
     }
     check("world/ocean_atlas.png");
     check("world/river_atlas.png");
-    check("world/river_surface.bin");
+    let bytes = fs::read(assets.join("world/river_surface.bin")).expect("missing river output");
+    let rivers = bytes
+        .strip_prefix(b"WLWATER1")
+        .expect("missing baked river header");
+    assert!(!rivers.is_empty() && rivers.len() % (30 * 3 * 4) == 0);
+    let radius = |point: &[u8]| -> f64 {
+        point
+            .chunks_exact(4)
+            .map(|value| f64::from(f32::from_le_bytes(value.try_into().unwrap())).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    for reach in rivers.chunks_exact(30 * 12) {
+        let start = radius(&reach[6 * 12..7 * 12]);
+        let end = (radius(&reach[12..24]) + radius(&reach[5 * 12..6 * 12])) * 0.5;
+        assert!((90_000.0..110_000.0).contains(&start));
+        assert!((90_000.0..110_000.0).contains(&end));
+        assert!(start + 0.02 >= end, "uphill river reach");
+    }
     let lake_mesh = assets.join("world/lake_surface.bin");
     let bytes = fs::read(&lake_mesh).expect("missing inland-lake surface output");
-    // One lake rectangle uses the same 30-vertex unindexed record as a reach.
-    assert_eq!(bytes.len() % (30 * 3 * 4), 0, "invalid lake surface records");
+    let vertices = bytes
+        .strip_prefix(b"WLWATER1")
+        .expect("missing baked lake header");
+    // One lake tile consists of two outward-facing triangles.
+    assert!(!vertices.is_empty() && vertices.len() % (6 * 3 * 4) == 0);
 }

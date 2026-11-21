@@ -155,6 +155,24 @@ impl ForestModels {
     }
 }
 
+/// Reserve space for an authored scene among the procedurally placed trees.
+///
+/// Insert before the forest starts streaming. All generated tree LODs honor it.
+#[derive(Resource)]
+pub struct ForestClearing {
+    /// Terrain-aligned unit radial direction at the clearing center.
+    pub direction: DVec3,
+    /// Radius on the reference sphere in meters.
+    pub radius: f64,
+}
+
+impl ForestClearing {
+    fn contains(&self, tree: DVec3) -> bool {
+        let radial = tree.normalize();
+        radial.distance_squared(self.direction) * RADIUS.powi(2) < self.radius.powi(2)
+    }
+}
+
 /// Stream deterministic foliage around the world camera.
 ///
 /// Install with the shared world space plugin. Tune ranges through [`VegetationSettings`].

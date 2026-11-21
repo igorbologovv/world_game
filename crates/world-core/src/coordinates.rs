@@ -15,9 +15,13 @@ const TEXEL_CENTER_OFFSET: f64 =
 /// Align a generated source direction with the baked terrain height samples.
 pub fn terrain_aligned_direction(direction: DVec3) -> DVec3 {
     let (face, source) = surface_uv(direction);
+    cube_direction(face, terrain_baked_uv(source))
+}
+
+/// Convert normalized source height UVs to the baked tile's texel centers.
+pub fn terrain_baked_uv(source: DVec2) -> DVec2 {
     let size = f64::from(HEIGHT_MAP_SIZE);
-    let baked = (source * (size - 1.0) + 0.5) / size + TEXEL_CENTER_OFFSET;
-    cube_direction(face, baked.clamp(DVec2::ZERO, DVec2::ONE))
+    ((source * (size - 1.0) + 0.5) / size + TEXEL_CENTER_OFFSET).clamp(DVec2::ZERO, DVec2::ONE)
 }
 
 /// Convert a legacy cube face index (0–5) and normalized face UV to a unit direction.

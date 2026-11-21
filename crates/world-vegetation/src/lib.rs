@@ -3,4 +3,4 @@
 
 mod forest;
 
-pub use forest::{FernSettings, ProceduralForestPlugin, VegetationSettings};
+pub use forest::{FernSettings, ForestClearing, ProceduralForestPlugin, VegetationSettings};

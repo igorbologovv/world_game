@@ -23,7 +23,7 @@ use super::{
     lod::{coverage, fade_step, quantize, spawn_tree, VegetationSettings, View},
     placement::{NodeKey, PatchKey, Site, PATCH_METERS},
     proxy::{ProxyMaterial, ProxyMesh, ProxyUniform, CHILD_SLOTS},
-    within_horizon, ForestModels,
+    within_horizon, ForestClearing, ForestModels,
 };
 
 const MAX_NODES: usize = 112;
@@ -225,7 +225,12 @@ impl ForestStream {
         }
     }
 
-    fn allocate_sites(&mut self, heights: &SurfaceHeights, eye: DVec3) {
+    fn allocate_sites(
+        &mut self,
+        heights: &SurfaceHeights,
+        eye: DVec3,
+        clearing: Option<&ForestClearing>,
+    ) {
         // Sampling stays on the main thread so all tiers use the existing authoritative
         // terrain and river queries. Mesh assembly consumes only immutable owned sites.
         let mut budget = PLACEMENTS_PER_FRAME;
@@ -245,7 +250,11 @@ impl ForestStream {
                     .then(a.key.cmp(&b.key))
             });
             for leaf in leaves.into_iter().take(budget) {
-                leaf.sites = Some(leaf.key.sites(heights).into());
+                let mut sites = leaf.key.sites(heights);
+                if let Some(clearing) = clearing {
+                    sites.retain(|site| !clearing.contains(site.position));
+                }
+                leaf.sites = Some(sites.into());
                 budget -= 1;
             }
         }
@@ -494,6 +503,7 @@ pub(super) fn stream(
     time: Res<Time>,
     root: Res<PlanetRoot>,
     heights: Res<SurfaceHeights>,
+    clearing: Option<Res<ForestClearing>>,
     cameras: Query<(Entity, GridTransform, &Camera, &Projection), With<WorldCamera>>,
     frames: ReferenceFrames,
     mut forest: ResMut<ForestStream>,
@@ -547,7 +557,7 @@ pub(super) fn stream(
         forest_range + preload,
         &heights,
     );
-    forest.allocate_sites(&heights, eye);
+    forest.allocate_sites(&heights, eye, clearing.as_deref());
     forest.request_meshes(eye, range, preload);
     let retired = forest.retiring.len().saturating_sub(RETIREMENTS_PER_FRAME);
     for tree in forest.retiring.drain(retired..) {

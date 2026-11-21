@@ -24,6 +24,8 @@ pub const OCEAN_ATLAS_PATH: &str = "world/ocean_atlas.png";
 pub const RIVER_SURFACE_PATH: &str = "world/river_surface.bin";
 /// Generated inland lake meshes at their individual spill elevations.
 pub const LAKE_SURFACE_PATH: &str = "world/lake_surface.bin";
+/// Inland-water mesh magic for vertices already aligned to the baked terrain.
+pub const BAKED_WATER_MESH_HEADER: &[u8; 8] = b"WLWATER1";
 /// Number of unindexed vertices per reach in the legacy river mesh.
 pub const RIVER_REACH_VERTICES: usize = 30;
 

@@ -16,6 +16,7 @@ use world_core::{
 /// Spawn and control the primary explorer and world camera.
 ///
 /// Install with Bevy's default client plugins and the shared world space plugin.
+/// Press F to take off or land on dry ground, and R to center the camera on the explorer.
 pub struct PlayerPlugin {
     spawn: ExplorerSpawn,
 }
@@ -42,6 +43,7 @@ impl Plugin for PlayerPlugin {
                     player::walk.in_set(WorldMovement),
                     player::animate,
                     trip::update,
+                    player::update_controls,
                 )
                     .chain(),
             )
@@ -100,16 +102,22 @@ fn spawn(
         ),
     );
 
-    commands.spawn(
+    commands.spawn((
+        player::Controls,
         TextBundle::from_section(
-            "WASD: move     Shift: sprint     Right-drag: look     Scroll: zoom     V: first person     Click: travel     T: free camera",
-            TextStyle { font_size: 17.0, color: Color::WHITE, ..default() },
+            player::WALK_CONTROLS,
+            TextStyle {
+                font_size: 17.0,
+                color: Color::WHITE,
+                ..default()
+            },
         )
         .with_style(Style {
             position_type: PositionType::Absolute,
             left: Val::Px(18.0),
+            right: Val::Px(18.0),
             bottom: Val::Px(16.0),
             ..default()
         }),
-    );
+    ));
 }

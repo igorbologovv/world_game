@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use bevy::{
     diagnostic::DiagnosticsPlugin,
     gizmos::GizmoPlugin,
@@ -6,13 +8,14 @@ use bevy::{
         keyboard::{Key, KeyboardInput},
         ButtonState, InputPlugin,
     },
-    render::{render_resource::Shader, texture::ImagePlugin},
-    scene::ScenePlugin,
+    render::{primitives::Aabb, render_resource::Shader, texture::ImagePlugin},
+    scene::{SceneInstance, ScenePlugin, SceneSpawner},
     window::PrimaryWindow,
 };
 use world_core::{
     coordinates::terrain_aligned_direction,
-    runtime::{Explorer, PlanetRoot, ReferenceFrame, WorldCamera},
+    planet::{RADIUS, WATER_SURFACE_ELEVATION},
+    runtime::{Explorer, GridTransform, PlanetRoot, ReferenceFrame, WorldCamera},
     SurfaceHeights,
 };
 
@@ -34,6 +37,13 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     .init_asset::<Mesh>()
     .init_asset::<StandardMaterial>()
     .init_asset::<Shader>()
+    // GLB scene cloning also runs in this headless app.
+    .register_type::<Parent>()
+    .register_type::<Children>()
+    .register_type::<Aabb>()
+    .register_type::<Visibility>()
+    .register_type::<InheritedVisibility>()
+    .register_type::<ViewVisibility>()
     .add_plugins(GizmoPlugin);
     install_world(&mut app, assets);
     let window = app
@@ -57,7 +67,44 @@ fn client_plugins_share_the_planet_and_starting_camera() {
 
     let spawn = terrain_aligned_direction(STARTER_REGION.spawn.direction);
     let ground = world.resource::<SurfaceHeights>().sample(spawn).unwrap();
-    assert!((ground - STARTER_REGION.spawn.elevation).abs() < 10.0);
+    assert!(ground > WATER_SURFACE_ELEVATION);
+    let (cell, transform) = {
+        let mut explorers = world.query_filtered::<GridTransform, With<Explorer>>();
+        let explorer = explorers.single_mut(world);
+        (*explorer.cell, *explorer.transform)
+    };
+    let position = world
+        .get::<ReferenceFrame>(root)
+        .unwrap()
+        .grid_position_double(&cell, &transform);
+    assert!(position.normalize().abs_diff_eq(spawn, 1e-6));
+    assert!((position.length() - RADIUS - ground - 0.38).abs() < 0.02);
+
+    let wait_started = Instant::now();
+    loop {
+        let world = app.world_mut();
+        let mut scenes = world.query::<(&Name, &SceneInstance, &Parent)>();
+        let spawner = world.resource::<SceneSpawner>();
+        if let Some((_, instance, parent)) = scenes.iter(world).find(|(name, instance, _)| {
+            name.as_str() == "Low Poly Tree Scene Free" && spawner.instance_is_ready(***instance)
+        }) {
+            assert_eq!(parent.get(), root);
+            assert_eq!(
+                spawner
+                    .iter_instance_entities(**instance)
+                    .filter(|entity| world.get::<Handle<Mesh>>(*entity).is_some())
+                    .count(),
+                6
+            );
+            break;
+        }
+        assert!(
+            wait_started.elapsed() < Duration::from_secs(10),
+            "starter scene failed to load"
+        );
+        app.update();
+        std::thread::sleep(Duration::from_millis(4));
+    }
 
     for (key_code, logical_key, expected) in [
         (

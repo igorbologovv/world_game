@@ -9,9 +9,17 @@ var terrain_albedo: texture_2d_array<f32>;
 var terrain_sampler: sampler;
 @group(2) @binding(2)
 var terrain_normal_roughness: texture_2d_array<f32>;
+@group(2) @binding(3)
+var detail_albedo: texture_2d_array<f32>;
+@group(2) @binding(4)
+var detail_normal_roughness: texture_2d_array<f32>;
+@group(2) @binding(5)
+var<uniform> detail_enabled: u32;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
+// Gravelly sand, rocky terrain, lichen rock, Ice003.
+const DETAIL_PERIODS = array(3.6, 5.4, 3.8, 4.6);
 
 fn noise_hash(cell: vec3<f32>) -> f32 {
     var h = fract(cell * vec3<f32>(0.1031, 0.1030, 0.0973));
@@ -200,8 +208,9 @@ fn triplanar_projections(
 }
 
 fn sample_layer(
+    albedo: texture_2d_array<f32>, normal_roughness: texture_2d_array<f32>,
     layer: i32, scale: f32, projections: array<Projection, 3>,
-    albedo_detail: f32, normal_detail: f32,
+    albedo_detail: f32, normal_detail: f32, normal_y_sign: f32,
 ) -> SurfaceSample {
     var color = vec3<f32>(0.0);
     var roughness = 0.0;
@@ -215,13 +224,13 @@ fn sample_layer(
                 let uv = projection.uv * scale;
                 let dx = projection.dx * scale;
                 let dy = projection.dy * scale;
-                color += textureSampleGrad(terrain_albedo, terrain_sampler, uv, layer, dx, dy).rgb
+                color += textureSampleGrad(albedo, terrain_sampler, uv, layer, dx, dy).rgb
                     * projection.weight;
                 if normal_detail > 0.0 {
-                    let mapped = textureSampleGrad(terrain_normal_roughness, terrain_sampler, uv, layer, dx, dy);
+                    let mapped = textureSampleGrad(normal_roughness, terrain_sampler, uv, layer, dx, dy);
                     let normal = mapped.xyz * 2.0 - 1.0;
                     // Flat detail normals preserve the height-derived normal.
-                    offset += (projection.tangent * normal.x + projection.bitangent * normal.y)
+                    offset += (projection.tangent * normal.x + projection.bitangent * (normal.y * normal_y_sign))
                         * (projection.weight / max(normal.z, 0.25));
                     roughness += mapped.a * projection.weight;
                 }
@@ -230,17 +239,59 @@ fn sample_layer(
     }
     // The final mip of each array is a 1×1 average for every material.
     if albedo_detail < 1.0 {
-        let mip = i32(textureNumLevels(terrain_albedo)) - 1;
-        let average = textureLoad(terrain_albedo, vec2<i32>(0), layer, mip).rgb;
+        let mip = i32(textureNumLevels(albedo)) - 1;
+        let average = textureLoad(albedo, vec2<i32>(0), layer, mip).rgb;
         color = mix(average, color, albedo_detail);
     }
     if normal_detail < 1.0 {
-        let mip = i32(textureNumLevels(terrain_normal_roughness)) - 1;
-        let average = textureLoad(terrain_normal_roughness, vec2<i32>(0), layer, mip).a;
+        let mip = i32(textureNumLevels(normal_roughness)) - 1;
+        let average = textureLoad(normal_roughness, vec2<i32>(0), layer, mip).a;
         roughness = mix(average, roughness, normal_detail);
     }
 
     return SurfaceSample(color, offset * normal_detail, roughness);
+}
+
+fn surface_detail(
+    base: SurfaceSample, biome: array<f32, 5>, projections: array<Projection, 3>,
+    position: vec3<f32>, slope: f32, strength: f32,
+) -> SurfaceSample {
+    let variation = macro_noise(position / 19.0 + vec3<f32>(3.2, -8.4, 12.7));
+    let outcrop = smoothstep(0.13, 0.49, slope + 0.28 * variation);
+    let meadow = smoothstep(-0.16, 0.24, variation + 0.30 * slope);
+    let glaze = smoothstep(0.02, 0.28, variation + 0.31 * slope);
+    let soil = biome[2];
+    var coverage = array(
+        biome[0] + soil * 0.29 * (1.0 - outcrop),
+        (biome[1] * 0.36 + soil * 0.68) * meadow * (1.0 - outcrop * 0.75),
+        biome[3] * 0.83 + soil * 0.78 * outcrop,
+        biome[4] * 0.66 * glaze,
+    );
+    var periods = DETAIL_PERIODS;
+    var result = base;
+    let last_mip = i32(textureNumLevels(detail_albedo)) - 1;
+    for (var layer = 0; layer < 4; layer++) {
+        let weight = coverage[layer] * smoothstep(0.012, 0.065, coverage[layer]) * strength;
+        if weight > 0.0 {
+            // The OpenGL maps point +Y up the image. Projection.bitangent
+            // follows increasing texture V, which runs down the image.
+            let finish = sample_layer(detail_albedo, detail_normal_roughness,
+                layer, 1.0 / periods[layer], projections, 1.0, 1.0, -1.0);
+            let average = textureLoad(detail_albedo, vec2<i32>(0), layer, last_mip).rgb;
+            // Apply the photo's local contrast around the biome color so the
+            // detail fade keeps the same ground palette at different distances.
+            let contrast = clamp(finish.color / max(average, vec3<f32>(0.02)),
+                vec3<f32>(0.42), vec3<f32>(1.85));
+            var color = base.color * mix(vec3<f32>(1.0), contrast, 0.86);
+            if layer == 3 {
+                color *= vec3<f32>(0.88, 0.96, 1.0);
+            }
+            result.color += (color - base.color) * weight;
+            result.normal_offset += (finish.normal_offset * 0.62 - base.normal_offset) * weight;
+            result.roughness += (finish.roughness - base.roughness) * weight;
+        }
+    }
+    return result;
 }
 
 @fragment
@@ -292,7 +343,8 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
             dominant_layer = layer;
         }
         if weight > 0.0 {
-            let sample = sample_layer(layer, 1.0 / periods[layer], projections, albedo_detail, normal_detail);
+            let sample = sample_layer(terrain_albedo, terrain_normal_roughness,
+                layer, 1.0 / periods[layer], projections, albedo_detail, normal_detail, 1.0);
             var albedo = sample.color;
             if layer == 1 || layer == 2 {
                 albedo *= biome.vegetation_tint;
@@ -340,6 +392,11 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface.normal_offset += (dominant.tangent * bump.x + dominant.bitangent * bump.y)
             * (strength * 0.26 / max(bump.z, 0.35));
         occlusion = mix(1.0, 0.79, strength * (1.0 - smoothstep(0.5, 1.02, dot(grain_tint, vec3<f32>(0.21, 0.72, 0.07)))));
+    }
+
+    let fine_detail = 1.0 - smoothstep(0.15, 0.95, footprint);
+    if detail_enabled != 0u && fine_detail > 0.0 {
+        surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
     var shaded_normal = surface_normal;

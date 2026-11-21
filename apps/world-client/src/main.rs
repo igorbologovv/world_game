@@ -1,7 +1,9 @@
+mod starter_scene;
+
 use std::path::Path;
 
 use bevy::{asset::AssetPlugin, prelude::*};
-use world_core::runtime::{WorldAssets, WorldSpacePlugin};
+use world_core::runtime::{WorldAssets, WorldReady, WorldSpacePlugin};
 use world_diagnostics::FrameStatsPlugin;
 use world_player::PlayerPlugin;
 use world_regions::STARTER_REGION;
@@ -39,7 +41,8 @@ fn install_world(app: &mut App, assets: WorldAssets) {
         WaterPlugin,
         ProceduralForestPlugin,
         FrameStatsPlugin,
-    ));
+    ))
+    .add_systems(Startup, starter_scene::spawn.after(WorldReady));
 }
 
 #[cfg(test)]

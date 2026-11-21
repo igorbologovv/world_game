@@ -12,7 +12,9 @@ use bevy::{
 
 use world_core::{
     coordinates::terrain_aligned_direction,
-    planet::{LAKE_SURFACE_PATH, RIVER_REACH_VERTICES, RIVER_SURFACE_PATH},
+    planet::{
+        BAKED_WATER_MESH_HEADER, LAKE_SURFACE_PATH, RIVER_REACH_VERTICES, RIVER_SURFACE_PATH,
+    },
     runtime::{Explorer, WorldCamera},
 };
 
@@ -43,27 +45,47 @@ pub(super) struct RiverMapLines;
 pub(super) struct RiverCenterlines(Vec<[Vec3; 2]>);
 
 pub(super) fn load(assets: &Path) -> Option<(Mesh, RiverCenterlines)> {
-    load_mesh(assets.join(RIVER_SURFACE_PATH))
+    let positions = load_positions(&assets.join(RIVER_SURFACE_PATH), RIVER_REACH_VERTICES)?;
+    Some(river_mesh(positions))
 }
 
-/// Lake surfaces share the river water material but have zero flow velocity.
+/// Use flat lake tiles with a zero flow vector and no river-map centerlines.
 pub(super) fn load_lakes(assets: &Path) -> Option<Mesh> {
-    load_mesh(assets.join(LAKE_SURFACE_PATH)).map(|(mesh, _)| mesh)
+    let positions = load_positions(&assets.join(LAKE_SURFACE_PATH), 6)?;
+    let count = positions.len();
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; count]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0, 0.0, 0.0, 1.0]; count]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    Some(mesh)
 }
 
-fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
-    let bytes = match fs::read(&path) {
+fn load_positions(path: &Path, record_vertices: usize) -> Option<Vec<[f32; 3]>> {
+    let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            warn!("Could not load river surface {}: {error}", path.display());
+            warn!(
+                "Could not load inland water surface {}: {error}",
+                path.display()
+            );
             return None;
         }
+    };
+    let (bytes, baked) = match bytes.strip_prefix(BAKED_WATER_MESH_HEADER) {
+        Some(vertices) => (vertices, true),
+        None => (bytes.as_slice(), false),
     };
     if bytes.is_empty() {
         return None;
     }
-    if bytes.len() % (12 * RIVER_REACH_VERTICES) != 0 {
-        warn!("Invalid river surface geometry in {}", path.display());
+    if bytes.len() % (12 * record_vertices) != 0 {
+        warn!(
+            "Invalid inland water surface geometry in {}",
+            path.display()
+        );
         return None;
     }
     let mut positions = Vec::with_capacity(bytes.len() / 12);
@@ -72,13 +94,21 @@ fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
             |offset| f32::from_le_bytes(vertex[offset..offset + 4].try_into().unwrap());
         let position = Vec3::new(coordinate(0), coordinate(4), coordinate(8));
         if !position.is_finite() || position.length_squared() == 0.0 {
-            warn!("Invalid river surface vertex in {}", path.display());
+            warn!("Invalid inland water surface vertex in {}", path.display());
             return None;
         }
-        let position = position.as_dvec3();
-        let normal = terrain_aligned_direction(position.normalize());
-        positions.push((normal * position.length()).as_vec3().to_array());
+        let aligned = if baked {
+            position
+        } else {
+            let position = position.as_dvec3();
+            (terrain_aligned_direction(position.normalize()) * position.length()).as_vec3()
+        };
+        positions.push(aligned.to_array());
     }
+    Some(positions)
+}
+
+fn river_mesh(positions: Vec<[f32; 3]>) -> (Mesh, RiverCenterlines) {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -123,17 +153,17 @@ fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, flow_velocities);
-    Some((mesh, RiverCenterlines(centerlines)))
+    (mesh, RiverCenterlines(centerlines))
 }
 
 pub(super) fn draw_map(
     rivers: Option<Res<RiverCenterlines>>,
     water: Query<&GlobalTransform, With<RiverWater>>,
     player: Query<&GlobalTransform, With<Explorer>>,
-    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    camera: Query<(&GlobalTransform, &WorldCamera)>,
     mut gizmos: Gizmos<RiverMapLines>,
 ) {
-    let (Some(rivers), Ok(water), Ok(player), Ok(camera)) = (
+    let (Some(rivers), Ok(water), Ok(player), Ok((camera, mode))) = (
         rivers,
         water.get_single(),
         player.get_single(),
@@ -141,6 +171,9 @@ pub(super) fn draw_map(
     ) else {
         return;
     };
+    if *mode != WorldCamera::Map {
+        return;
+    }
     let distance = camera.translation().distance(player.translation());
     let opacity = ((distance - 500.0) / 700.0).clamp(0.0, 1.0);
     if opacity == 0.0 {

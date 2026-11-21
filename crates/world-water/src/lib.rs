@@ -81,7 +81,8 @@ fn spawn(
             (
                 MaterialMeshBundle {
                     mesh: meshes.add(lakes),
-                    material: river_materials.add(river_surface::RiverMaterial { brightness: 0.93 }),
+                    material: river_materials
+                        .add(river_surface::RiverMaterial { brightness: 0.93 }),
                     ..default()
                 },
                 NotShadowCaster,

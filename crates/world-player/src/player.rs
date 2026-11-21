@@ -17,6 +17,7 @@ use crate::trip::{TravelSpeed, TripPanelInput};
 const MIN_SLOPE_PACE: f64 = 0.15;
 const CAMERA_DISTANCE: f64 = 30.0;
 const CAMERA_HEIGHT: f64 = 55.0;
+const CAMERA_FOCUS_AHEAD: f64 = 37.0;
 const GLOBE_RADIUS_MULTIPLIER: f64 = 3.2;
 const GLOBE_DRAG_ZOOM: f64 = 0.82;
 const POV_EYE_HEIGHT: f64 = 2.2;
@@ -25,6 +26,12 @@ const MAX_LOOK_PITCH: f64 = 1.48;
 const LOOK_SENSITIVITY: f64 = 0.003;
 const WALK_SPEED: f64 = 5.5;
 const SPRINT_MULTIPLIER: f64 = 2.2;
+const FLIGHT_SPEED: f64 = 32.0;
+const FLIGHT_CLIMB_SPEED: f64 = 14.0;
+const TAKEOFF_CLEARANCE: f64 = 16.0;
+const FLIGHT_GROUND_CLEARANCE: f64 = 2.0;
+const FLIGHT_WATER_CLEARANCE: f64 = 10.0;
+const FLIGHT_CEILING: f64 = MAX_HEIGHT + 3_000.0;
 const THIRD_PERSON_PITCH_MIN: f64 = -1.05;
 const THIRD_PERSON_PITCH_MAX: f64 = 0.50;
 const POV_FOV: f32 = std::f32::consts::FRAC_PI_3;
@@ -40,10 +47,9 @@ pub(super) struct MapView {
 
 impl Default for MapView {
     fn default() -> Self {
-        let zoom = 0.24;
         Self {
-            zoom,
-            target_zoom: zoom,
+            zoom: 0.0,
+            target_zoom: 0.0,
             globe_center: None,
             first_person: None,
             camera_pitch: -0.27,
@@ -54,10 +60,13 @@ impl Default for MapView {
 impl MapView {
     pub(super) fn altitude(&self, aspect: f64) -> f64 {
         let half_fov = std::f64::consts::FRAC_PI_8;
-        let narrow_axis = (half_fov.tan() * aspect.clamp(0.25, 1.0)).atan();
+        let width = aspect.clamp(0.25, 1.0);
+        let narrow_axis = (half_fov.tan() * width).atan();
         let fit_distance = (RADIUS + MAX_HEIGHT) * 1.1 / narrow_axis.sin();
         let max_altitude = fit_distance.max(RADIUS * GLOBE_RADIUS_MULTIPLIER) - RADIUS;
-        CAMERA_HEIGHT * (max_altitude / CAMERA_HEIGHT).powf(self.zoom)
+        // Pull back sooner in narrow windows to keep nearby landmarks in view.
+        let local_height = CAMERA_HEIGHT * (1.4 / aspect.max(0.25)).max(1.0);
+        local_height * (max_altitude / local_height).powf(self.zoom)
     }
 
     fn globe_blend(&self) -> f64 {
@@ -99,6 +108,10 @@ impl FirstPersonView {
     }
 }
 
+struct Flight {
+    can_land: bool,
+}
+
 #[derive(Component)]
 pub(super) struct Player {
     up: DVec3,
@@ -109,6 +122,7 @@ pub(super) struct Player {
     terrain_pace: f64,
     height: f64,
     grounded: bool,
+    flight: Option<Flight>,
     walk_phase: f32,
     moving: bool,
 }
@@ -126,9 +140,56 @@ impl Player {
             terrain_pace: 1.0,
             height: spawn.elevation,
             grounded: false,
+            flight: None,
             walk_phase: 0.0,
             moving: false,
         }
+    }
+
+    fn toggle_flight(&mut self, ground: f64, wet: bool) {
+        let can_land = ground > WATER_SURFACE_ELEVATION && !wet;
+        if self.flight.is_some() {
+            if can_land {
+                self.height = ground;
+                self.grounded = true;
+                self.flight = None;
+            }
+        } else {
+            self.destination = None;
+            self.route_blocked = false;
+            self.height = self
+                .height
+                .max(ground.max(WATER_SURFACE_ELEVATION) + TAKEOFF_CLEARANCE);
+            self.grounded = false;
+            self.flight = Some(Flight { can_land });
+        }
+    }
+
+    fn fly(
+        &mut self,
+        direction: DVec3,
+        distance: f64,
+        climb: f64,
+        ground_at: impl Fn(DVec3) -> f64,
+        wet_at: impl Fn(DVec3) -> bool,
+    ) {
+        let Some(flight) = &mut self.flight else {
+            return;
+        };
+        if direction != DVec3::ZERO && distance > 0.0 {
+            self.up = (self.up + direction * (distance / (RADIUS + self.height))).normalize();
+            self.forward = tangent(self.forward, self.up);
+            self.facing = tangent(direction, self.up);
+        }
+        let ground = ground_at(self.up);
+        flight.can_land = ground > WATER_SURFACE_ELEVATION && !wet_at(self.up);
+        let clearance = if flight.can_land {
+            FLIGHT_GROUND_CLEARANCE
+        } else {
+            FLIGHT_WATER_CLEARANCE
+        };
+        let floor = ground.max(WATER_SURFACE_ELEVATION) + clearance;
+        self.height = (self.height + climb).clamp(floor, FLIGHT_CEILING);
     }
 
     pub(super) fn trip(&self) -> Option<(f64, bool, f64)> {
@@ -252,7 +313,8 @@ impl Player {
         let camera_back = self.forward * pitch.cos() + self.up * pitch.sin();
         let position = radial * (RADIUS + self.height * (1.0 - globe) + eye_height)
             - camera_back * (CAMERA_DISTANCE * (1.0 - globe));
-        let focus = (self.up * (RADIUS + self.height + 1.5) + self.forward * 58.0) * (1.0 - globe);
+        let focus = (self.up * (RADIUS + self.height + 1.5) + self.forward * CAMERA_FOCUS_AHEAD)
+            * (1.0 - globe);
         let north = (DVec3::Y - radial * radial.y)
             .try_normalize()
             .unwrap_or(DVec3::Z);
@@ -339,7 +401,7 @@ pub(super) fn walk(
         (
             Entity,
             GridTransform,
-            &DebugCameraController,
+            &mut DebugCameraController,
             &Camera,
             &GlobalTransform,
             &mut Projection,
@@ -356,7 +418,7 @@ pub(super) fn walk(
         ),
     >,
 ) {
-    let Ok((camera_entity, mut camera, debug, view, camera_global, mut projection, mut mode)) =
+    let Ok((camera_entity, mut camera, mut debug, view, camera_global, mut projection, mut mode)) =
         cameras.get_single_mut()
     else {
         return;
@@ -378,10 +440,23 @@ pub(super) fn walk(
     let Ok(mut window) = windows.get_single_mut() else {
         return;
     };
-    window.cursor.visible = !debug.enabled;
+    let toggle_free_camera = keys.just_pressed(KeyCode::KeyT);
+    let toggle_flight = keys.just_pressed(KeyCode::KeyF);
+    let recenter = keys.just_pressed(KeyCode::KeyR);
+    if !toggle_free_camera && (toggle_flight || recenter) {
+        if debug.enabled {
+            debug.enabled = false;
+            debug.translation_velocity = DVec3::ZERO;
+            debug.rotation_velocity = Vec2::ZERO;
+        }
+        if recenter {
+            *map = MapView::default();
+        }
+    }
+    window.cursor.visible = !(debug.enabled || toggle_free_camera);
     player.moving = false;
-    if debug.enabled || keys.just_pressed(KeyCode::KeyT) {
-        if player.grounded {
+    if debug.enabled || toggle_free_camera {
+        if player.grounded || player.flight.is_some() {
             *visibility = Visibility::Inherited;
         }
         *marker_visibility = Visibility::Hidden;
@@ -397,6 +472,21 @@ pub(super) fn walk(
             );
         }
         return;
+    }
+
+    let Some(frame) = frames.parent_frame(camera_entity) else {
+        return;
+    };
+    let ground_at = |up: DVec3| surface.sample(up).unwrap_or(0.0);
+    let wet_at = |up| surface.is_river(up);
+    let ground = ground_at(player.up);
+    if toggle_flight {
+        let taking_off = player.flight.is_none();
+        let wet = wet_at(player.up);
+        player.toggle_flight(ground, wet);
+        if taking_off && map.first_person.is_none() {
+            *map = MapView::default();
+        }
     }
 
     let escape = keys.just_pressed(KeyCode::Escape);
@@ -446,25 +536,23 @@ pub(super) fn walk(
         }
     }
 
-    let Some(frame) = frames.parent_frame(camera_entity) else {
-        return;
-    };
-    let ground_at = |up: DVec3| surface.sample(up).unwrap_or(0.0);
-    let ground = ground_at(player.up);
-    if ground > WATER_SURFACE_ELEVATION {
+    if player.flight.is_none() && ground > WATER_SURFACE_ELEVATION {
         if !player.grounded {
             info!("Explorer spawned at {ground:.1} m above sea level");
         }
         player.height = ground;
         player.grounded = true;
     }
-    *visibility = if player.grounded && !first_person {
+    *visibility = if (player.grounded || player.flight.is_some()) && !first_person {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
 
-    if !switched_view
+    if player.flight.is_none()
+        && !switched_view
+        && !toggle_flight
+        && !recenter
         && mouse.just_pressed(MouseButton::Left)
         && trip_panel
             .iter()
@@ -492,28 +580,41 @@ pub(super) fn walk(
         (keys.pressed(KeyCode::KeyW) as i32 - keys.pressed(KeyCode::KeyS) as i32) as f64;
     let axis_right =
         (keys.pressed(KeyCode::KeyD) as i32 - keys.pressed(KeyCode::KeyA) as i32) as f64;
-    if axis_forward != 0.0 || axis_right != 0.0 {
-        let forward = if let Some(pov) = &map.first_person {
-            tangent(pov.heading, player.up)
-        } else {
-            tangent(player.forward, player.up)
-        };
-        let right = forward.cross(player.up).normalize();
-        let movement = (forward * axis_forward + right * axis_right).normalize();
-        let sprint = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-        let move_speed = WALK_SPEED * if sprint { SPRINT_MULTIPLIER } else { 1.0 };
+    let forward = tangent(
+        map.first_person
+            .as_ref()
+            .map_or(player.forward, |pov| pov.heading),
+        player.up,
+    );
+    let right = forward.cross(player.up);
+    let movement = (forward * axis_forward + right * axis_right).normalize_or_zero();
+    let sprint = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let speed_multiplier = if sprint { SPRINT_MULTIPLIER } else { 1.0 };
+    let dt = time.delta_seconds_f64().min(0.05);
+    if player.flight.is_some() {
+        let rise = (keys.pressed(KeyCode::Space) as i32
+            - keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) as i32)
+            as f64;
+        player.fly(
+            movement,
+            FLIGHT_SPEED * speed_multiplier * dt,
+            rise * FLIGHT_CLIMB_SPEED * dt,
+            ground_at,
+            wet_at,
+        );
+    } else if movement != DVec3::ZERO {
         player.walk_direction(
             movement,
-            move_speed * time.delta_seconds_f64().min(0.05),
+            WALK_SPEED * speed_multiplier * dt,
             ground_at,
-            |up| surface.is_river(up),
+            wet_at,
         );
     } else {
         player.advance(
             speed.meters_per_second() * time.delta_seconds_f64(),
             ground,
             ground_at,
-            |up| surface.is_river(up),
+            wet_at,
         );
     }
 
@@ -528,7 +629,8 @@ pub(super) fn walk(
     let (position, rotation) = if let Some(pov) = &mut map.first_person {
         mode.set_if_neq(WorldCamera::FirstPerson);
         set_fov(&mut projection, POV_FOV);
-        set_clip_planes(&mut projection, 0.05, POV_FAR_PLANE);
+        let far = POV_FAR_PLANE.max(((player.height - ground) * 3.0) as f32);
+        set_clip_planes(&mut projection, 0.05, far);
         pov.pose(&player)
     } else {
         mode.set_if_neq(WorldCamera::Map);
@@ -563,6 +665,40 @@ pub(super) fn walk(
     *camera.cell = cell;
     camera.transform.translation = translation;
     camera.transform.rotation = rotation;
+}
+
+pub(super) const WALK_CONTROLS: &str = "F: fly     R: center on explorer     WASD: move     Shift: sprint\nRight-drag: look     Scroll: zoom     V: first person     Click: travel     T: free camera";
+const FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nF: land     R: center on explorer     Right-drag: look     V: switch view";
+const WET_FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nFind dry ground to land     R: center on explorer     Right-drag: look     V: switch view";
+const FREE_CONTROLS: &str = "Free camera     Arrow keys: move     Page Up / Down: rise / descend     Mouse: look\nR: return to explorer     F: toggle explorer flight     T: exit free camera";
+
+#[derive(Component)]
+pub(super) struct Controls;
+
+pub(super) fn update_controls(
+    player: Query<&Player>,
+    camera: Query<&WorldCamera>,
+    mut label: Query<&mut Text, With<Controls>>,
+) {
+    let (Ok(player), Ok(camera), Ok(mut label)) = (
+        player.get_single(),
+        camera.get_single(),
+        label.get_single_mut(),
+    ) else {
+        return;
+    };
+    let text = if *camera == WorldCamera::Free {
+        FREE_CONTROLS
+    } else {
+        match &player.flight {
+            Some(Flight { can_land: true }) => FLIGHT_CONTROLS,
+            Some(_) => WET_FLIGHT_CONTROLS,
+            None => WALK_CONTROLS,
+        }
+    };
+    if label.sections[0].value != text {
+        label.sections[0].value = text.into();
+    }
 }
 
 fn map_near_plane(eye_height: f64) -> f32 {
@@ -727,6 +863,54 @@ mod tests {
         player.walk_direction(direction, 3.0, |_| SPAWN_ELEVATION, |_| true);
         assert!(player.up.abs_diff_eq(blocked_at, 1e-12));
         assert!(!player.moving);
+    }
+
+    #[test]
+    fn explorer_can_cross_a_river_in_flight_and_land_on_the_far_bank() {
+        let mut player = Player::new(world_regions::STARTER_REGION.spawn);
+        let start = player.up;
+        let direction = player.forward;
+        let ground_at = |_| SPAWN_ELEVATION;
+        let river_at = |up: DVec3| (5.0..25.0).contains(&(up.dot(direction) * RADIUS));
+        player.grounded = true;
+
+        player.walk_direction(direction, 30.0, ground_at, river_at);
+        assert!(start.angle_between(player.up) * RADIUS < 5.0);
+        player.toggle_flight(SPAWN_ELEVATION, false);
+        assert_eq!(player.height, SPAWN_ELEVATION + TAKEOFF_CLEARANCE);
+
+        player.fly(direction, 12.0, 0.0, ground_at, river_at);
+        assert!(river_at(player.up));
+        assert!(!player.flight.as_ref().unwrap().can_land);
+        let airborne = player.height;
+        player.toggle_flight(SPAWN_ELEVATION, true);
+        assert_eq!(player.height, airborne);
+        assert!(player.flight.is_some());
+
+        player.fly(direction, 25.0, 0.0, ground_at, river_at);
+        assert!(player.up.dot(direction) * RADIUS > 25.0);
+        assert!(player.flight.as_ref().unwrap().can_land);
+        player.toggle_flight(SPAWN_ELEVATION, false);
+        assert_eq!(player.height, SPAWN_ELEVATION);
+        assert!(player.grounded);
+        assert!(player.flight.is_none());
+    }
+
+    #[test]
+    fn flight_descent_respects_water_and_terrain_clearance() {
+        let mut player = Player::new(world_regions::STARTER_REGION.spawn);
+        let start = player.up;
+        player.toggle_flight(SPAWN_ELEVATION, false);
+        player.fly(DVec3::ZERO, 0.0, 15.0, |_| SPAWN_ELEVATION, |_| false);
+        assert_eq!(player.height, SPAWN_ELEVATION + TAKEOFF_CLEARANCE + 15.0);
+        player.fly(DVec3::ZERO, 0.0, -600.0, |_| -10.0, |_| false);
+        assert_eq!(
+            player.height,
+            WATER_SURFACE_ELEVATION + FLIGHT_WATER_CLEARANCE
+        );
+        player.fly(DVec3::ZERO, 0.0, -3.0, |_| SPAWN_ELEVATION, |_| false);
+        assert_eq!(player.height, SPAWN_ELEVATION + FLIGHT_GROUND_CLEARANCE);
+        assert_eq!(player.up, start);
     }
 
     #[test]

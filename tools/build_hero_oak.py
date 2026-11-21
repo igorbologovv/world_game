@@ -134,6 +134,13 @@ class MeshData:
     vertices:list=field(default_factory=list)
     triangles:list=field(default_factory=list)
     uvs:list=field(default_factory=list)
+    uv_seams:list=field(default_factory=list)
+
+    def smooth_seam_normals(self, normals):
+        for first, last in self.uv_seams:
+            normal = normalize(vadd(normals[first], normals[last]))
+            normals[first] = normals[last] = normal
+        return normals
 
     def vertex(self,p,uv=(0.0,0.0)):
         idx=len(self.vertices);self.vertices.append(p);self.uvs.append(uv);return idx
@@ -143,7 +150,7 @@ class MeshData:
         ids=[self.vertex(p,uv) for p,uv in zip((a,b,c,d),uvs)]
         self.triangles.extend([(ids[0],ids[1],ids[2]),(ids[0],ids[2],ids[3])])
 
-    def cylinder_path(self,positions,radii,sides=7,uv_repeat=3.0):
+    def cylinder_path(self,positions,radii,sides=7,uv_repeat=3.0,u_repeats=1):
         if len(positions)<2:return
         old=len(self.vertices)
         total=0.0
@@ -152,18 +159,20 @@ class MeshData:
             ref=(1,0,0) if abs(tangent[0]) < .80 else (0,1,0)
             side=normalize(cross(tangent,ref));other=normalize(cross(side,tangent))
             if j:total+=norm(vsub(p,positions[j-1]))
+            first = len(self.vertices)
             for k in range(sides+1):
                 a=TAU*k/sides
                 d=vadd(vmul(side,math.cos(a)),vmul(other,math.sin(a)))
                 # Flared uneven bark gives organic variation at close range.
                 uneven=1+0.065*math.sin(a*3+j*1.7)+0.035*math.sin(a*5-j*1.4)
-                self.vertex(vadd(p,vmul(d,r*uneven)),(k/sides,total/uv_repeat))
+                self.vertex(vadd(p,vmul(d,r*uneven)),(u_repeats*k/sides,total/uv_repeat))
+            self.uv_seams.append((first, first+sides))
         stride=sides+1
         for j in range(len(positions)-1):
             row=old+j*stride
             for k in range(sides):
                 a=row+k;b=a+stride
-                self.triangles.extend([(a,a+1,b),(a+1,b+1,b)])
+                self.triangles.extend([(a,b,a+1),(a+1,b,b+1)])
 
     def leaf_card(self,center,half_width,half_height,axis,flip=False):
         sideways=normalize((math.cos(axis),math.sin(axis),0.0))
@@ -196,7 +205,9 @@ def build_geometry(lod:int,seed:int):
         radius=0.67*(1-t)**.84+0.095
         if t<.16: radius*=1+2.2*(.16-t)**.8
         rads.append(radius)
-    wood.cylinder_path(path,rads,sides)
+    # The main trunk takes four repeats around its wider circumference.
+    # Integer repeats keep the texture aligned across the duplicated seam.
+    wood.cylinder_path(path,rads,sides,u_repeats=4)
 
     # Root buttresses bend along terrain and make the trunk feel anchored.
     if lod<=1:
@@ -291,6 +302,9 @@ def blender_mesh(name,data,material):
             i=mesh.loops[loop_id].vertex_index
             uv_layer.data[loop_id].uv=data.uvs[i]
         face.use_smooth=True
+    if data.uv_seams:
+        normals = [vertex.normal.copy() for vertex in mesh.vertices]
+        mesh.normals_split_custom_set_from_vertices(data.smooth_seam_normals(normals))
     mesh.materials.append(material)
     obj=bpy.data.objects.new(name,mesh)
     bpy.context.collection.objects.link(obj)
@@ -364,8 +378,11 @@ def export_trimesh(output:Path,seed:int):
         coords=np.stack([coords[:,0],coords[:,2],-coords[:,1]],axis=1)
         faces=np.asarray(data.triangles,dtype=np.int64)
         uvs=np.asarray(data.uvs,dtype=np.float32)
-        return trimesh.Trimesh(vertices=coords,faces=faces,process=False,
-                        visual=TextureVisuals(uv=uvs,material=material))
+        result = trimesh.Trimesh(vertices=coords,faces=faces,process=False,
+                                 visual=TextureVisuals(uv=uvs,material=material))
+        if data.uv_seams:
+            result.vertex_normals = data.smooth_seam_normals(result.vertex_normals.copy())
+        return result
     for lod in range(4):
         wood,foliage=build_geometry(lod,seed)
         scene=trimesh.Scene()

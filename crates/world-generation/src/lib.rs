@@ -3,6 +3,9 @@
 
 mod hydrology;
 mod river_generation;
+mod settings;
+
+pub use settings::HydrologySettings;
 
 use image::{ImageBuffer, Luma};
 use noise::{NoiseFn, Perlin};
@@ -10,8 +13,8 @@ use std::{collections::VecDeque, error::Error, fs, path::Path};
 use world_core::{
     coordinates::source_direction as sphere_direction,
     planet::{
-        encode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, LAKE_SURFACE_PATH, RIVER_ATLAS_PATH, RIVER_SURFACE_PATH,
-        SEA_LEVEL,
+        encode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, LAKE_SURFACE_PATH, RIVER_ATLAS_PATH,
+        RIVER_SURFACE_PATH, SEA_LEVEL,
     },
 };
 
@@ -77,6 +80,15 @@ impl SideInfo {
 /// Files at the generated paths are overwritten. Seeds, cube topology, and
 /// on-disk asset formats are part of the existing world definition.
 pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
+    generate_world_with_hydrology(assets, HydrologySettings::default())
+}
+
+/// Bake the existing planet with explicit river and lake settings.
+pub fn generate_world_with_hydrology(
+    assets: &Path,
+    settings: HydrologySettings,
+) -> Result<(), Box<dyn Error>> {
+    settings.validate()?;
     let height_output = assets.join(HEIGHT_SOURCE_PATH);
     let ocean_output = assets.join("world/ocean");
     let basin_output = assets.join("world/basins");
@@ -211,10 +223,11 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
         &river_output,
         &river_surface,
         &lake_surface,
+        &settings,
     )?;
     save_heightmaps(&encoded, &height_output)?;
 
-    save_masks(&ocean_mask, &elevated_lakes, &heights, &ocean_output, &basin_output)?;
+    save_masks(&ocean_mask, &elevated_lakes, &ocean_output, &basin_output)?;
 
     println!();
     println!("WORLD SUMMARY");
@@ -231,7 +244,7 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
     );
 
     println!(
-        "inland lakes:   {:>6.2}%",
+        "raw inland land below sea level: {:>6.2}%",
         basin_count as f64 / total_pixels as f64 * 100.0
     );
 
@@ -347,7 +360,6 @@ fn save_heightmaps(encoded: &[u16], output: &Path) -> Result<(), Box<dyn Error>>
 fn save_masks(
     ocean_mask: &[bool],
     elevated_lakes: &[bool],
-    heights: &[f64],
     ocean_output: &Path,
     basin_output: &Path,
 ) -> Result<(), Box<dyn Error>> {
@@ -367,9 +379,8 @@ fn save_masks(
                 if ocean_mask[i] {
                     ocean.put_pixel(x, y, Luma([255]));
                     atlas.put_pixel(atlas_x + x, atlas_y + y, Luma([255]));
-                } else if heights[i] < SEA_LEVEL && !elevated_lakes[i] {
+                } else if elevated_lakes[i] {
                     lakes.put_pixel(x, y, Luma([255]));
-                    atlas.put_pixel(atlas_x + x, atlas_y + y, Luma([192]));
                 }
             }
         }
