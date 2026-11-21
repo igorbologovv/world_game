@@ -154,6 +154,68 @@ pub(super) fn generate(
         sections += 1;
         mouths += usize::from(ocean[next] || drainage.lakes[next]);
     }
+    // A lake must have an outlet: the regular river loop skips its flooded
+    // interior, so bridge the shoreline to the first downstream dry cell.
+    // The receiving reach was already built (downstream-first traversal).
+    let mut lake_outlets = 0usize;
+    for &cell in land {
+        let cell = cell as usize;
+        if !drainage.lakes[cell] || area[cell] < RIVER_AREA || outlets[cell] == NO_OUTLET {
+            continue;
+        }
+        let next = outlets[cell] as usize;
+        if drainage.lakes[next] {
+            continue;
+        }
+        let (face, x, y) = decode_index(cell);
+        let (next_face, nx, ny) = decode_index(next);
+        let from = grid_uv(x, y);
+        let to = grid_uv(nx, ny);
+        let from_direction = sphere_direction(face, from[0], from[1]);
+        let to_direction = sphere_direction(next_face, to[0], to[1]);
+        let upstream = DVec3::from_array(from_direction);
+        let downstream = DVec3::from_array(to_direction);
+        let flow = area[cell] / RIVER_AREA;
+        let width = channel_width(flow);
+        let downstream_level = if water_levels[next] > 0.0 {
+            f64::from(water_levels[next])
+        } else {
+            heights[next].max(SEA_LEVEL)
+        };
+        let upstream_level = (drainage.spill[cell] + 0.10).max(downstream_level + 0.01);
+        let projected_to = if face == next_face {
+            to
+        } else {
+            projected_uv(face, to_direction)
+        };
+        let pixels = (projected_to[0] - from[0]).hypot(projected_to[1] - from[1])
+            * f64::from(MASK_SIDE - 1);
+        let meter_width = if pixels > 0.0 {
+            RADIUS * upstream.angle_between(downstream) / pixels * f64::from(width)
+        } else {
+            30.0
+        };
+        append_surface(
+            &mut surface,
+            upstream,
+            downstream,
+            upstream_level,
+            downstream_level,
+            meter_width,
+            meter_width,
+        );
+        if face == next_face {
+            draw_section(&mut atlas, face, from, to, width);
+        } else {
+            let projected_from = projected_uv(next_face, from_direction);
+            draw_section(&mut atlas, face, from, projected_to, width);
+            draw_section(&mut atlas, next_face, projected_from, to, width);
+            seams += 1;
+        }
+        lake_outlets += 1;
+        sections += 1;
+    }
+    println!("  {lake_outlets} lake-to-downstream connections");
     let mut banks = 0;
     for (cell, cut) in bank_cuts.into_iter().enumerate() {
         if cut == 0.0
