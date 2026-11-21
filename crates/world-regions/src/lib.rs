@@ -23,6 +23,16 @@ pub const STARTER_REGION: Region = Region {
     },
 };
 
+/// Dry coastal starting point facing a streamed coconut palm grove.
+pub const PALM_COAST_REGION: Region = Region {
+    id: RegionId("palm-coast"),
+    spawn: ExplorerSpawn {
+        direction: DVec3::new(0.93614492280527, -0.19723134262937, -0.29108844187038),
+        look_at: DVec3::new(0.93620523761306, -0.19710425540831, -0.29098052437546),
+        elevation: 12.95490959,
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use world_core::{coordinates::terrain_aligned_direction, planet::WATER_SURFACE_ELEVATION};
@@ -30,12 +40,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starter_has_a_distinct_heading_above_water() {
-        let spawn = STARTER_REGION.spawn;
-        let up = terrain_aligned_direction(spawn.direction);
-        let look_at = terrain_aligned_direction(spawn.look_at);
-        assert!(up.is_normalized() && look_at.is_normalized());
-        assert!(up.cross(look_at).length() > 0.0);
-        assert!(spawn.elevation > WATER_SURFACE_ELEVATION);
+    fn regions_have_distinct_headings_above_water() {
+        for region in [STARTER_REGION, PALM_COAST_REGION] {
+            let spawn = region.spawn;
+            let up = terrain_aligned_direction(spawn.direction);
+            let look_at = terrain_aligned_direction(spawn.look_at);
+            assert!(up.is_normalized() && look_at.is_normalized());
+            assert!(up.cross(look_at).length() > 0.0);
+            assert!(spawn.elevation > WATER_SURFACE_ELEVATION);
+        }
     }
 }

@@ -184,6 +184,37 @@ mod tests {
     }
 
     #[test]
+    fn palm_coast_spawn_faces_a_dry_grove() {
+        let heights = SurfaceHeights::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets"
+        )));
+        let spawn = world_regions::PALM_COAST_REGION.spawn;
+        let up = terrain_aligned_direction(spawn.direction);
+        let look_at = terrain_aligned_direction(spawn.look_at);
+        let ground = heights.sample(up).unwrap();
+        assert!(ground > world_core::planet::WATER_SURFACE_ELEVATION);
+        assert!((ground - spawn.elevation).abs() < 0.02);
+        assert!(!heights.is_river(up));
+
+        let (east, north) = super::super::tangent_basis(up);
+        assert!(super::super::near_sea(up, east, north, |dir| heights.sample(dir)));
+        let palms: Vec<_> = PatchKey::shade_neighborhood(up)
+            .flat_map(|patch| patch.sites(&heights))
+            .filter(|site| site.species == Species::Palm)
+            .map(|site| site.position.normalize())
+            .filter(|radial| radial.distance(up) * RADIUS < 75.0)
+            .collect();
+        assert!(palms.len() >= 3);
+        assert!(palms
+            .iter()
+            .any(|radial| radial.distance(look_at) * RADIUS < 1.0));
+        assert!(palms
+            .iter()
+            .all(|radial| radial.distance(up) * RADIUS > 5.0));
+    }
+
+    #[test]
     fn sites_survive_rebuilding_with_the_same_biome_and_pose() {
         let heights = SurfaceHeights::load(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),

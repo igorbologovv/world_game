@@ -146,6 +146,25 @@ impl Player {
         }
     }
 
+    fn teleport(&mut self, up: DVec3, ground: f64, wet: bool) {
+        let heading = DQuat::from_rotation_arc(self.up, up) * self.forward;
+        self.up = up;
+        self.forward = tangent(heading, up);
+        self.facing = self.forward;
+        self.destination = None;
+        self.route_blocked = false;
+        self.terrain_pace = 1.0;
+        self.walk_phase = 0.0;
+        self.moving = false;
+        self.grounded = ground > WATER_SURFACE_ELEVATION && !wet;
+        self.flight = (!self.grounded).then_some(Flight { can_land: false });
+        self.height = if self.grounded {
+            ground
+        } else {
+            ground.max(WATER_SURFACE_ELEVATION) + FLIGHT_WATER_CLEARANCE
+        };
+    }
+
     fn toggle_flight(&mut self, ground: f64, wet: bool) {
         let can_land = ground > WATER_SURFACE_ELEVATION && !wet;
         if self.flight.is_some() {
@@ -475,7 +494,7 @@ pub(super) fn walk(
     };
     let ground_at = |up: DVec3| surface.sample(up).unwrap_or(0.0);
     let wet_at = |up| surface.is_river(up);
-    let ground = ground_at(player.up);
+    let mut ground = ground_at(player.up);
     if toggle_flight {
         let taking_off = player.flight.is_none();
         let wet = wet_at(player.up);
@@ -539,20 +558,15 @@ pub(super) fn walk(
         player.height = ground;
         player.grounded = true;
     }
-    *visibility = if (player.grounded || player.flight.is_some()) && !first_person {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-
-    if player.flight.is_none()
+    let debug_teleport =
+        !first_person && keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let mut teleported = false;
+    if (debug_teleport || player.flight.is_none())
         && !switched_view
         && !toggle_flight
         && !recenter
         && mouse.just_pressed(MouseButton::Left)
-        && trip_panel
-            .iter()
-            .all(|hovered| !hovered.get())
+        && trip_panel.iter().all(|hovered| !hovered.get())
     {
         let ray = window
             .cursor_position()
@@ -560,15 +574,28 @@ pub(super) fn walk(
         if let Some(ray) = ray {
             let origin = frame.grid_position_double(&camera.cell, &camera.transform)
                 + (ray.origin - camera_global.translation()).as_dvec3();
-            if let Some(target) = pick_land(origin, ray.direction.as_dvec3(), ground_at)
-                .filter(|target| !surface.is_river(*target))
+            if let Some((target, elevation)) =
+                pick_surface(origin, ray.direction.as_dvec3(), ground_at)
             {
-                player.destination = Some(target);
-                player.route_blocked = false;
-                player.terrain_pace = 1.0;
+                let wet = wet_at(target);
+                if debug_teleport {
+                    player.teleport(target, elevation, wet);
+                    *map = MapView::default();
+                    ground = elevation;
+                    teleported = true;
+                } else if elevation > WATER_SURFACE_ELEVATION && !wet {
+                    player.destination = Some(target);
+                    player.route_blocked = false;
+                    player.terrain_pace = 1.0;
+                }
             }
         }
     }
+    *visibility = if (player.grounded || player.flight.is_some()) && !first_person {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
 
     // Conventional camera-relative WASD movement. Keyboard input overrides
     // click-to-move immediately, and diagonals are normalized.
@@ -586,7 +613,11 @@ pub(super) fn walk(
     let movement = (forward * axis_forward + right * axis_right).normalize_or_zero();
     let sprint = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let speed_multiplier = if sprint { SPRINT_MULTIPLIER } else { 1.0 };
-    let dt = time.delta_secs_f64().min(0.05);
+    let dt = if teleported {
+        0.0
+    } else {
+        time.delta_secs_f64().min(0.05)
+    };
     if player.flight.is_some() {
         let rise = (keys.pressed(KeyCode::Space) as i32
             - keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) as i32)
@@ -663,9 +694,9 @@ pub(super) fn walk(
     camera.transform.rotation = rotation;
 }
 
-pub(super) const WALK_CONTROLS: &str = "F: fly     R: center on explorer     WASD: move     Shift: sprint\nRight-drag: look     Scroll: zoom     V: first person     Click: travel     T: free camera";
-const FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nF: land     R: center on explorer     Right-drag: look     V: switch view";
-const WET_FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nFind dry ground to land     R: center on explorer     Right-drag: look     V: switch view";
+pub(super) const WALK_CONTROLS: &str = "F: fly     R: center on explorer     WASD: move     Shift: sprint\nRight-drag: look     Scroll: zoom     V: first person     Click: travel     T: free camera\nCtrl+Click: debug map teleport";
+const FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nF: land     R: center on explorer     Right-drag: look     Scroll: zoom     V: switch view\nCtrl+Click: debug map teleport";
+const WET_FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nFind dry ground to land     R: center on explorer     Right-drag: look     Scroll: zoom     V: switch view\nCtrl+Click: debug map teleport";
 const FREE_CONTROLS: &str = "Free camera     Arrow keys: move     Page Up / Down: rise / descend     Mouse: look\nR: return to explorer     F: toggle explorer flight     T: exit free camera";
 
 #[derive(Component)]
@@ -737,7 +768,12 @@ pub(super) fn animate(player: Query<&Player>, mut boots: Query<(&Boot, &mut Tran
     }
 }
 
-fn pick_land(origin: DVec3, direction: DVec3, height: impl Fn(DVec3) -> f64) -> Option<DVec3> {
+fn pick_surface(
+    origin: DVec3,
+    direction: DVec3,
+    height: impl Fn(DVec3) -> f64,
+) -> Option<(DVec3, f64)> {
+    let direction = direction.normalize();
     let closest = -origin.dot(direction);
     let impact = (origin + direction * closest).length_squared();
     let outer = RADIUS + MAX_HEIGHT;
@@ -777,7 +813,7 @@ fn pick_land(origin: DVec3, direction: DVec3, height: impl Fn(DVec3) -> f64) -> 
                 }
             }
             let hit = (origin + direction * high).normalize();
-            return (height(hit) > WATER_SURFACE_ELEVATION).then_some(hit);
+            return Some((hit, height(hit)));
         }
         previous = distance;
     }
@@ -820,8 +856,9 @@ mod tests {
     #[test]
     fn picks_the_visible_hemisphere_from_globe_view() {
         let origin = DVec3::X * (RADIUS * GLOBE_RADIUS_MULTIPLIER);
-        let target = pick_land(origin, -DVec3::X, |_| 1_000.0).unwrap();
+        let (target, ground) = pick_surface(origin, -DVec3::X, |_| 1_000.0).unwrap();
         assert!(target.abs_diff_eq(DVec3::X, 1e-9));
+        assert_eq!(ground, 1_000.0);
     }
 
     #[test]
@@ -940,14 +977,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_water_in_front_of_land_and_rays_that_miss() {
+    fn picks_visible_water_before_hidden_land_and_rejects_misses() {
         let origin = DVec3::X * (RADIUS * GLOBE_RADIUS_MULTIPLIER);
-        assert!(pick_land(origin, -DVec3::X, |up| if up.x > 0.0 {
-            -100.0
-        } else {
-            2_000.0
+        let (up, waterbed) = pick_surface(origin, -DVec3::X, |up| {
+            if up.x > 0.0 {
+                -100.0
+            } else {
+                2_000.0
+            }
         })
-        .is_none());
-        assert!(pick_land(origin, DVec3::Y, |_| 1_000.0).is_none());
+        .unwrap();
+        assert_eq!(up, DVec3::X);
+        assert_eq!(waterbed, -100.0);
+        assert!(pick_surface(origin, DVec3::Y, |_| 1_000.0).is_none());
+    }
+
+    #[test]
+    fn debug_teleport_clears_travel_and_switches_between_flight_and_ground() {
+        let mut player = Player::new(world_regions::STARTER_REGION.spawn);
+        let opposite = -player.up;
+        player.destination = Some(DVec3::Y);
+        player.route_blocked = true;
+        player.teleport(opposite, -50.0, false);
+        assert_eq!(player.up, opposite);
+        assert!(player.forward.is_finite());
+        assert!(player.forward.dot(opposite).abs() < 1e-10);
+        assert_eq!(
+            player.height,
+            WATER_SURFACE_ELEVATION + FLIGHT_WATER_CLEARANCE
+        );
+        assert!(!player.grounded);
+        assert!(!player.flight.as_ref().unwrap().can_land);
+        assert!(player.trip().is_none());
+        assert!(!player.route_blocked);
+
+        player.teleport(DVec3::Z, 30.0, true);
+        assert_eq!(player.height, 30.0 + FLIGHT_WATER_CLEARANCE);
+        assert!(!player.grounded);
+
+        player.teleport(DVec3::Y, 14.0, false);
+        assert_eq!(player.up, DVec3::Y);
+        assert_eq!(player.height, 14.0);
+        assert!(player.grounded);
+        assert!(player.flight.is_none());
     }
 }

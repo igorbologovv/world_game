@@ -1,11 +1,12 @@
 use bevy::{
-    camera::primitives::Aabb,
+    camera::{primitives::Aabb, CameraProjection, RenderTargetInfo},
     diagnostic::DiagnosticsPlugin,
     gizmos::GizmoPlugin,
     gltf::GltfPlugin,
     image::{CompressedImageFormats, ImageLoader, ImagePlugin},
     input::{
         keyboard::{Key, KeyboardInput},
+        mouse::MouseButtonInput,
         ButtonState, InputPlugin,
     },
     light::atmosphere::ScatteringMedium,
@@ -51,7 +52,8 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     .register_type::<InheritedVisibility>()
     .register_type::<ViewVisibility>()
     .add_plugins(GizmoPlugin);
-    install_world(&mut app, assets);
+    let region = spawn_region(std::iter::empty()).unwrap();
+    install_world(&mut app, assets, region);
     let window = app
         .world_mut()
         .spawn((Window::default(), PrimaryWindow))
@@ -75,20 +77,10 @@ fn client_plugins_share_the_planet_and_starting_camera() {
         .unwrap();
     assert_eq!(parent.parent(), root);
 
-    let spawn = terrain_aligned_direction(STARTER_REGION.spawn.direction);
+    let spawn = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
     let ground = world.resource::<SurfaceHeights>().sample(spawn).unwrap();
     assert!(ground > WATER_SURFACE_ELEVATION);
-    let (cell, transform) = {
-        let mut explorers = world.query_filtered::<GridTransform, With<Explorer>>();
-        let explorer = explorers.single_mut(world).unwrap();
-        (*explorer.cell, *explorer.transform)
-    };
-    let position = world
-        .get::<ReferenceFrame>(root)
-        .unwrap()
-        .grid_position_double(&cell, &transform);
-    assert!(position.normalize().abs_diff_eq(spawn, 1e-6));
-    assert!((position.length() - RADIUS - ground - 0.38).abs() < 0.02);
+    assert_explorer_at(world, root, spawn, ground);
 
     // The imported demonstration is an asset source, not a second terrain tile.
     assert_eq!(
@@ -99,6 +91,47 @@ fn client_plugins_share_the_planet_and_starting_camera() {
             .count(),
         0,
     );
+
+    // Aim a headless map view at the old starter region, then use the normal input path.
+    let target = terrain_aligned_direction(STARTER_REGION.spawn.direction);
+    let target_ground = world.resource::<SurfaceHeights>().sample(target).unwrap();
+    let size = UVec2::new(800, 600);
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(Some(size.as_vec2() * 0.5));
+    let (cell, translation) = world
+        .get::<ReferenceFrame>(root)
+        .unwrap()
+        .translation_to_grid(target * (RADIUS * 3.2));
+    let pose = Transform::from_translation(translation).looking_to(-target.as_vec3(), Vec3::Y);
+    let mut cameras = world
+        .query_filtered::<(GridTransform, &mut GlobalTransform, &mut Camera), With<WorldCamera>>();
+    let (mut grid, mut global, mut camera) = cameras.single_mut(world).unwrap();
+    *grid.cell = cell;
+    *grid.transform = pose;
+    *global = GlobalTransform::from(pose);
+    camera.computed.target_info = Some(RenderTargetInfo {
+        physical_size: size,
+        scale_factor: 1.0,
+    });
+    camera.computed.clip_from_view = PerspectiveProjection::default().get_clip_from_view();
+
+    world.write_message(KeyboardInput {
+        key_code: KeyCode::ControlLeft,
+        logical_key: Key::Control,
+        state: ButtonState::Pressed,
+        window,
+        text: None,
+        repeat: false,
+    });
+    world.write_message(MouseButtonInput {
+        button: MouseButton::Left,
+        state: ButtonState::Pressed,
+        window,
+    });
+    app.update();
+    assert_explorer_at(app.world_mut(), root, target, target_ground);
 
     for (key_code, logical_key, expected) in [
         (
@@ -124,4 +157,33 @@ fn client_plugins_share_the_planet_and_starting_camera() {
             expected
         );
     }
+}
+
+fn assert_explorer_at(world: &mut World, root: Entity, up: bevy::math::DVec3, ground: f64) {
+    let (cell, transform) = {
+        let mut explorers = world.query_filtered::<GridTransform, With<Explorer>>();
+        let explorer = explorers.single_mut(world).unwrap();
+        (*explorer.cell, *explorer.transform)
+    };
+    let position = world
+        .get::<ReferenceFrame>(root)
+        .unwrap()
+        .grid_position_double(&cell, &transform);
+    assert!(position.normalize().abs_diff_eq(up, 1e-6));
+    assert!((position.length() - RADIUS - ground - 0.38).abs() < 0.02);
+}
+
+#[test]
+fn spawn_argument_selects_a_known_region() {
+    let parse = |args: &[&str]| spawn_region(args.iter().map(|arg| (*arg).to_owned()));
+    assert_eq!(parse(&[]).unwrap().id, PALM_COAST_REGION.id);
+    assert_eq!(
+        parse(&["--spawn", "palm-coast"]).unwrap().id,
+        PALM_COAST_REGION.id
+    );
+    assert_eq!(
+        parse(&["--spawn", "starter-river"]).unwrap().id,
+        STARTER_REGION.id
+    );
+    assert!(parse(&["--spawn", "unknown"]).is_none());
 }
