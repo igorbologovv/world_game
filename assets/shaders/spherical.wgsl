@@ -368,16 +368,8 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     let tint = 1.0 + 0.32 * regional + 0.32 * patches + 0.26 * detail;
 
     let biome = biome_surface(height, slope, direction, variation);
-    // F9: 0 = PBR scene, 1 = planetary forest-coverage map,
-    // 2 = distant canopy color map. Test from well beyond the 2 km LOD.
-    if terrain_debug_mode == 1u {
-        return FragmentOutput(vec4<f32>(vec3<f32>(biome.forest_cover), 1.0));
-    }
-    if terrain_debug_mode == 2u {
-        return FragmentOutput(vec4<f32>(
-            biome.canopy_tint * biome.forest_cover, 1.0
-        ));
-    }
+    // F9 diagnostics are composited after terrain PBR lighting, and
+    // never replace the actual grass/soil/rock directly under the camera.
     var weights = biome.weights;
     if ground_cover > 0.0 && weights[1] > 0.0 {
         // Soil shows between stands of grass. The plant streamer uses this
@@ -415,13 +407,12 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
 
     var occlusion = 1.0;
     let forest_distance = distance(input.world_position.xyz, view.world_position);
-    // Begin replacing 3D trees while the batched forest is still resident;
-    // retain its color at any altitude after the tree streamer cuts off.
-    // Tree placement does NOT depend on the grass/dirt blending weights.
-    // The canopy map must not vanish when distant mip-mapped terrain
-    // becomes sandy or rocky. Height, snow and slope were already applied
-    // to the climate-based biome.forest_cover.
-    let forest_amount = smoothstep(160.0, 920.0, forest_distance)
+    // Ground texture stays visible in the near and middle forest. Only
+    // transition to the canopy representation as the 3D forest approaches
+    // its 2 km cutoff. At any distance past that cutoff, a tree-covered
+    // biome remains forest-colored instead of becoming bare grass.
+    // This is a separate forest canopy layer, not a replacement for soil.
+    let forest_amount = smoothstep(600.0, 1600.0, forest_distance)
         * biome.forest_cover;
     if forest_amount > 0.015 {
         let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
@@ -482,5 +473,18 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     pbr_input.N = shaded_normal;
     pbr_input.V = calculate_view(input.world_position, pbr_input.is_orthographic);
     let lit = apply_pbr_lighting(pbr_input);
-    return FragmentOutput(main_pass_post_lighting_processing(pbr_input, lit));
+    var final_color = main_pass_post_lighting_processing(pbr_input, lit);
+
+    if terrain_debug_mode != 0u {
+        // Preserve detailed terrain within 650 m even while inspecting
+        // the planet-wide map. Fade the diagnostic in gradually rather
+        // than painting the nearby soil a flat green or gray.
+        var diagnostic = biome.canopy_tint * biome.forest_cover;
+        if terrain_debug_mode == 1u {
+            diagnostic = vec3<f32>(biome.forest_cover);
+        }
+        let diagnostic_blend = smoothstep(650.0, 1450.0, forest_distance);
+        final_color = mix(final_color, vec4<f32>(diagnostic, 1.0), diagnostic_blend);
+    }
+    return FragmentOutput(final_color);
 }
