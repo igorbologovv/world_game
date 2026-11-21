@@ -8,6 +8,21 @@
 - Экранная статистика FPS и F8-диагностика леса переведены с `TextBundle` / `Style` на `Text`, `TextFont`, `TextColor`, `Node`.
 - В нескольких игровых крейтах заменены устаревшие вызовы `get_single[_mut]`, `delta_seconds`, `elapsed_seconds` на новые API. Эти изменения требуют проверки компилятором.
 
+## Требования к Rust
+
+Bevy 0.20.1 и `wesl` требуют **rustc не ниже 1.97.1**. В ветке добавлен `rust-toolchain.toml` с `channel = "1.97.1"`. В отличие от простого `bevy = "0.20.0"`, Cargo может разрешить патч-релиз 0.20.1.
+
+На машине разработчика с rustup:
+
+```sh
+rustup toolchain install 1.97.1
+cd ~/world-bevy20
+rustc --version
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo check -p world-water
+```
+
+Для Arch Linux с системным Rust вместо rustup нужно обновить `rust` через системный менеджер пакетов (с учётом свободного места на Btrfs). Миграцию не следует тестировать на Rust 1.96.0.
+
 ## Критические блокеры
 
 1. **Локальная зависимость `../bevy_terrain`.** Исходники этого отдельного проекта отсутствуют в репозитории. Плагин предоставляет `big_space::{GridTransform, ReferenceFrame, ReferenceFrames, BigSpacePlugin, GridCell}`, `DebugCameraController`, собственные системы floating origin и terrain. Его надо портировать и компилировать с Bevy 0.20 *раньше* перехода остальных крейтов. Просто изменить номер версии нельзя.
