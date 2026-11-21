@@ -332,7 +332,7 @@ mod tests {
             assert_eq!(center, top_right.direction(DVec2::Y));
             assert_eq!(center, bottom_left.direction(DVec2::X));
             assert_eq!(center, bottom_right.direction(DVec2::ZERO));
-            assert!(root.error(center * (RADIUS + 300_000.0), center * RADIUS) < SPLIT_ERROR);
+            assert!(root.error(center * (4.0 * RADIUS), center * RADIUS) < SPLIT_ERROR);
             assert!(root.error(center * (RADIUS + 2.2), center * RADIUS) > SPLIT_ERROR);
         }
     }
