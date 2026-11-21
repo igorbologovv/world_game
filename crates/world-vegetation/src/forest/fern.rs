@@ -425,7 +425,7 @@ fn stream(
     let FernAssets::Ready(models) = &*models else {
         return;
     };
-    let Ok((id, grid, camera)) = cameras.get_single() else {
+    let Ok((id, grid, camera)) = cameras.single() else {
         return;
     };
     if !camera.is_active {
@@ -443,7 +443,7 @@ fn stream(
         eye,
         reach,
         &heights,
-        time.elapsed_seconds_f64(),
+        time.elapsed_secs_f64(),
     );
     world.metrics.waiting = world.prepare(
         &mut commands,
@@ -461,7 +461,7 @@ fn stream(
     }
 
     let h = settings.hysteresis.clamp(0.0, 0.25);
-    let step = time.delta_seconds().min(0.075) / settings.transition_seconds.clamp(0.10, 2.0);
+    let step = time.delta_secs().min(0.075) / settings.transition_seconds.clamp(0.10, 2.0);
     let mut nearest = Vec::new();
     let mut lod0_count = 0;
     for (&key, chunk) in &world.chunks {
