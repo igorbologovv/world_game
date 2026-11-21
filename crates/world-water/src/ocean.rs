@@ -3,15 +3,18 @@ use std::path::Path;
 use bevy::{
     math::{DVec2, DVec3},
     prelude::*,
+    asset::RenderAssetUsages,
+    image::ImageSampler,
+    mesh::{Indices, PrimitiveTopology},
+    shader::ShaderRef,
     reflect::TypePath,
     render::alpha::AlphaMode,
     render::{
-        mesh::Indices,
-        render_asset::RenderAssetUsages,
+
         render_resource::{
-            AsBindGroup, Extent3d, PrimitiveTopology, ShaderRef, TextureDimension, TextureFormat,
+            AsBindGroup, Extent3d, TextureDimension, TextureFormat,
         },
-        texture::ImageSampler,
+
     },
 };
 use world_core::{
