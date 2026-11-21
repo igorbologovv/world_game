@@ -6,9 +6,11 @@ mod river_surface;
 
 use bevy::{
     gizmos::config::GizmoConfig,
-    pbr::{MaterialPlugin, NotShadowCaster},
+    pbr::MaterialPlugin,
+    light::NotShadowCaster,
+    gizmos::config::GizmoLineConfig,
     prelude::*,
-    transform::TransformSystem,
+    transform::TransformSystems,
 };
 use world_core::{
     runtime::{CameraMotion, PlanetRoot, WorldAssets, WorldReady},
@@ -29,7 +31,7 @@ impl Plugin for WaterPlugin {
         .insert_gizmo_config(
             river_surface::RiverMapLines,
             GizmoConfig {
-                line_width: 2.25,
+                line: GizmoLineConfig { width: 2.25, ..default() },
                 ..default()
             },
         )
@@ -38,11 +40,11 @@ impl Plugin for WaterPlugin {
             PostUpdate,
             ocean::cull_patches
                 .after(CameraMotion)
-                .before(TransformSystem::TransformPropagate),
+                .before(TransformSystems::Propagate),
         )
         .add_systems(
             PostUpdate,
-            river_surface::draw_map.after(TransformSystem::TransformPropagate),
+            river_surface::draw_map.after(TransformSystems::Propagate),
         );
     }
 }
