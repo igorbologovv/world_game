@@ -388,6 +388,26 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
         }
     }
 
+    // Normals for every surface vertex must exist before the skirt copies
+    // them. The previous cleanup accidentally removed this pass entirely.
+    for y in 0..=GRID {
+        for x in 0..=GRID {
+            let index = y * stride + x;
+            let normal = if spacing >= 8.0 && x > 0 && x < GRID && y > 0 && y < GRID {
+                // Reuse adjacent height samples on coarse tiles.
+                let position = |i| Vec3::from_array(positions[i]);
+                let dx = position(index + 1) - position(index - 1);
+                let dy = position(index + stride) - position(index - stride);
+                dy.cross(dx).normalize()
+            } else {
+                // Stable normals along tile borders and on detailed tiles.
+                let up = tile.direction(DVec2::new(x as f64, y as f64) / GRID as f64);
+                ground_normal(up, f64::from(locations[index][3]), normal_step, heights).as_vec3()
+            };
+            normals.push(normal.to_array());
+        }
+    }
+
     for y in 0..GRID {
         for x in 0..GRID {
             let a = (y * stride + x) as u16;
