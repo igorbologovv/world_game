@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{
     math::{DVec2, DVec3},
-    pbr::{NotShadowCaster, NotShadowReceiver},
+    light::{NotShadowCaster, NotShadowReceiver},
+    camera::primitives::MeshAabb,
     prelude::*,
 };
 use world_core::{
