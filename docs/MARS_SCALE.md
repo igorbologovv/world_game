@@ -16,7 +16,7 @@ Codex review. It does not regenerate or rewrite the checked-in world assets.
   and baked channel shapes are kept intact until the hydrology phase.
 - Rendering retains a bounded six-face quadtree, but permits depth 18
   (~1 m near-field grid spacing at the equator), a maximum of 960 resident
-  chunks, and only 6 splits / 8 merges per frame. Detail meshes are generated
+  chunks, and only 4 splits / 8 merges per frame. Detail meshes are generated
   **only for requested tiles**. Far tiles are lower LOD and the far side of the
   planet does not receive fine refinement.
 - Retired terrain entities now also release their `Assets<Mesh>` handles,
