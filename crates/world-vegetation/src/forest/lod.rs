@@ -200,7 +200,7 @@ pub(super) fn smoothstep(start: f32, end: f32, value: f32) -> f32 {
 }
 
 pub(super) fn fade_step(time: &Time, settings: &VegetationSettings) -> f32 {
-    time.delta_seconds().min(0.075) / settings.transition_seconds.clamp(0.10, 2.0)
+    time.delta_secs().min(0.075) / settings.transition_seconds.clamp(0.10, 2.0)
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
@@ -330,7 +330,7 @@ pub(super) fn update_lods(
     mut trunks: Query<RenderParts<BarkMaterial>, With<Trunk>>,
     mut leaves: Query<RenderParts<FoliageMaterial>, (With<Leaves>, Without<Trunk>)>,
 ) {
-    let Ok((entity, grid, camera, projection)) = cameras.get_single() else {
+    let Ok((entity, grid, camera, projection)) = cameras.single() else {
         return;
     };
     let Some(frame) = frames.parent_frame(entity) else {
