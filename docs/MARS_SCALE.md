@@ -101,3 +101,19 @@ above are **required verification**, not claimed to have passed here.
   varies at visible distances, and tree populations are significantly lower.
   The full Cargo test suite and live client still must run outside this
   GitHub authoring environment.
+
+## Local mountain terrain (latest)
+
+- A separate 94-km-scale highland mask controls mountain belts independently
+  from the original 1024² continental heightmap.
+- 9-km ridged spurs, 2.8-km rocky crags and ~1-km ravines add relief up to
+  roughly 1.8 km in eligible zones, on top of broad mountain terrain.
+- Mountain amplitude rises across 55–240 m *baked* elevation to avoid adding
+  steep mountains across sea-level coastlines and existing water meshes.
+  Palm Coast, at about 8 m baked elevation, remains coastal; mountain
+  topography appears in higher ground elsewhere on the planet.
+- No global fine-resolution heightmap is stored; these layers are sampled
+  deterministically at the queried physical coordinates. All terrain geometry,
+  ground collision and vegetation queries share the result.
+- A local-region continuity/relief regression test has been added.
+  **Cargo and gameplay validation remain outstanding**.
