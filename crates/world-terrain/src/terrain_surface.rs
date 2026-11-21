@@ -528,8 +528,16 @@ fn build_canopy(tile: Tile, heights: &SurfaceHeights) -> (u32, Vec<u8>) {
                 (f64::from(y) + 0.5) / f64::from(side),
             );
             let direction = tile.direction(uv);
-            let height = heights.sample_base(direction).unwrap_or(0.0);
-            let forest = forest_canopy_region(direction, height);
+            let base_height = heights.sample_base(direction).unwrap_or(0.0);
+            // A source coastline just above the datum may acquire several
+            // meters of procedural local relief. Keep its canopy coverage
+            // eligible without making each mask texel resample the expensive
+            // full procedural height function.
+            let forest = if base_height > 1.5 {
+                forest_canopy_region(direction, base_height.max(10.0))
+            } else {
+                0.0
+            };
             coverage.push((forest * 255.0).round() as u8);
         }
     }
