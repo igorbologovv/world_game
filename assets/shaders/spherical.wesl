@@ -150,12 +150,22 @@ fn biome_surface(
     // A stand becomes an opaque-looking crown canopy as its trees overlap.
     // Sparse savanna keeps bare ground visible instead of becoming a forest.
     let canopy_occupancy = smoothstep(0.075, 0.76, selection_probability);
-    let tree_limit = smoothstep(3.5, 11.0, height)
+    // On nearby ground, tree geometry has strict height/slope limits.
+    // Those limits were also zeroing the far-canopy color on whole green
+    // hillsides, leaving a bright grass stripe immediately after the
+    // forest impostors ended. Distant canopy uses a broader terrain-scale
+    // limit but still excludes bare cliffs, snow and high mountains.
+    let local_tree_limit = smoothstep(3.5, 11.0, height)
         * (1.0 - smoothstep(2200.0, 2600.0, height))
-        * (1.0 - smoothstep(0.40, 0.62, slope))
-        * (1.0 - smoothstep(0.93, 0.96, latitude))
+        * (1.0 - smoothstep(0.40, 0.62, slope));
+    let far_canopy_limit = smoothstep(3.5, 11.0, height)
+        * (1.0 - smoothstep(3100.0, 3800.0, height))
+        * (1.0 - smoothstep(0.72, 0.91, slope));
+    let climate_limit = (1.0 - smoothstep(0.93, 0.96, latitude))
         * (1.0 - snow);
-    let cover = canopy_occupancy * tree_limit;
+    let cover = canopy_occupancy
+        * max(local_tree_limit, far_canopy_limit * 0.90)
+        * climate_limit;
 
     // Forested lowlands are living soil, not a broad pale beach. Even coastal
     // groves may contain isolated sand patches, so only suppress beach sand
