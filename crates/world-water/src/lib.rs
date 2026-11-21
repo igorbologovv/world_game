@@ -6,14 +6,12 @@ mod river_surface;
 
 use bevy::{
     gizmos::config::GizmoConfig,
-    pbr::{MaterialPlugin, NotShadowCaster},
+    pbr::NotShadowCaster,
     prelude::*,
+    render::alpha::AlphaMode,
     transform::TransformSystem,
 };
-use world_core::{
-    runtime::{CameraMotion, PlanetRoot, WorldAssets, WorldReady},
-    SurfaceHeights,
-};
+use world_core::runtime::{CameraMotion, PlanetRoot, WorldAssets, WorldReady};
 
 /// Load generated river and water data and register their render systems.
 ///
@@ -22,11 +20,7 @@ pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
-            MaterialPlugin::<ocean::OceanMaterial>::default(),
-            MaterialPlugin::<river_surface::RiverMaterial>::default(),
-        ))
-        .insert_gizmo_config(
+        app.insert_gizmo_config(
             river_surface::RiverMapLines,
             GizmoConfig {
                 line_width: 2.25,
@@ -51,11 +45,9 @@ fn spawn(
     mut commands: Commands,
     root: Res<PlanetRoot>,
     assets: Res<WorldAssets>,
-    heights: Res<SurfaceHeights>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut river_materials: ResMut<Assets<river_surface::RiverMaterial>>,
-    mut ocean_materials: ResMut<Assets<ocean::OceanMaterial>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if let Some((surface, centerlines)) = river_surface::load(assets.directory()) {
         commands.insert_resource(centerlines);
@@ -64,7 +56,7 @@ fn spawn(
             (
                 MaterialMeshBundle {
                     mesh: meshes.add(surface),
-                    material: river_materials.add(river_surface::RiverMaterial { brightness: 1.0 }),
+                    material: materials.add(pond_material()),
                     ..default()
                 },
                 NotShadowCaster,
@@ -81,8 +73,7 @@ fn spawn(
             (
                 MaterialMeshBundle {
                     mesh: meshes.add(lakes),
-                    material: river_materials
-                        .add(river_surface::RiverMaterial { brightness: 0.93 }),
+                    material: materials.add(pond_material()),
                     ..default()
                 },
                 NotShadowCaster,
@@ -90,8 +81,8 @@ fn spawn(
         );
     }
 
-    if let Some((material, patches)) = ocean::load(&mut images, &heights, assets.directory()) {
-        let material = ocean_materials.add(material);
+    if let Some((material, patches)) = ocean::load(&mut images, assets.directory()) {
+        let material = materials.add(material);
         for (mesh, bounds) in patches {
             root.spawn(
                 &mut commands,
@@ -106,5 +97,33 @@ fn spawn(
                 ),
             );
         }
+    }
+}
+
+/// The actual `material_3` from the source woodland glTF: a translucent
+/// warm-white PBR surface, not a hand-picked blue custom water shader.
+fn pond_material() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::linear_rgba(1.0, 0.937488, 0.892829, 0.60),
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.50,
+        metallic: 0.0,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    }
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    #[test]
+    fn pond_material_uses_source_scene_pbr_parameters() {
+        let material = pond_material();
+        assert!(matches!(material.alpha_mode, AlphaMode::Blend));
+        assert!((material.perceptual_roughness - 0.5).abs() < 1e-6);
+        assert_eq!(material.metallic, 0.0);
+        assert_eq!(material.base_color, Color::linear_rgba(1.0, 0.937488, 0.892829, 0.60));
     }
 }
