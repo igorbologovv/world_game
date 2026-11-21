@@ -90,7 +90,7 @@ struct Chunk {
 
 #[derive(Resource)]
 pub(super) struct TerrainSurface {
-    material: Handle<TerrainMaterial>,
+    pub(super) material: Handle<TerrainMaterial>,
     leaves: HashMap<Tile, Chunk>,
 }
 
