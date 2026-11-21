@@ -433,7 +433,7 @@ pub(super) fn walk(
         })
         .sum::<f64>();
     let drag: Vec2 = motion.read().map(|event| event.delta).sum();
-    let Ok((mut window, mut cursor_options)) = windows.single_mut() else {
+    let Ok((window, mut cursor_options)) = windows.single_mut() else {
         return;
     };
     let toggle_free_camera = keys.just_pressed(KeyCode::KeyT);
@@ -725,7 +725,7 @@ fn set_fov(projection: &mut Mut<Projection>, fov: f32) {
 }
 
 pub(super) fn animate(player: Query<&Player>, mut boots: Query<(&Boot, &mut Transform)>) {
-    let player = player.single();
+    let Ok(player) = player.single() else { return; };
     for (boot, mut transform) in &mut boots {
         let swing = if player.moving {
             player.walk_phase.sin() * boot.0
