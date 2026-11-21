@@ -43,10 +43,10 @@ pub(super) struct ProxyMaterial {
 
 impl Material for ProxyMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/vegetation_proxy.wgsl".into()
+        "shaders/vegetation_proxy.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "shaders/vegetation_proxy.wgsl".into()
+        "shaders/vegetation_proxy.wesl".into()
     }
     fn specialize(
         _: &MaterialPipeline,
