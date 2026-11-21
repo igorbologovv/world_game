@@ -3,12 +3,12 @@ mod palm_guide;
 use std::path::Path;
 
 use bevy::{asset::AssetPlugin, prelude::*};
-use world_core::runtime::{WorldAssets, WorldSpacePlugin};
+use world_core::{coordinates::terrain_aligned_direction, runtime::{WorldAssets, WorldSpacePlugin}};
 use world_diagnostics::FrameStatsPlugin;
 use world_player::PlayerPlugin;
 use world_regions::{Region, PALM_COAST_REGION, STARTER_REGION};
 use world_terrain::TerrainPlugin;
-use world_vegetation::ProceduralForestPlugin;
+use world_vegetation::{ForestClearing, ProceduralForestPlugin};
 use world_water::WaterPlugin;
 
 const PALM_MESH: &str = "models/vegetation/coconut_palm/tree_lod0.glb";
@@ -89,6 +89,15 @@ fn asset_plugin(assets: &WorldAssets) -> AssetPlugin {
 }
 
 fn install_world(app: &mut App, assets: WorldAssets, region: Region) {
+    // The authored coastal spawn must open into a traversable clearing
+    // rather than a dense wall of procedurally planted palms.
+    // Clearing uses physical meters and does not affect the rest of Mars.
+    if region.id == PALM_COAST_REGION.id {
+        app.insert_resource(ForestClearing {
+            direction: terrain_aligned_direction(region.spawn.direction),
+            radius: 240.0,
+        });
+    }
     let mut player = PlayerPlugin::new(region.spawn);
     if region.id == PALM_COAST_REGION.id {
         player = player.with_first_person_view();
