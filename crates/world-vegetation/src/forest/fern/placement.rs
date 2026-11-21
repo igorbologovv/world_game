@@ -15,7 +15,8 @@ use crate::forest::{noise3, tangent_basis, Random};
 
 pub(super) const MAX_PLANTS: usize = 16;
 pub(super) const PATCH_ALLOWANCE: f64 = 40.0;
-const CELLS: f64 = 4096.0;
+// Keep the original physical scale of the fern patches on Mars.
+const CELLS: f64 = 2.0 * RADIUS / 48.0;
 const SHADE_REACH: f64 = 14.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -149,7 +150,9 @@ pub(super) fn nearby_trunks(
 
 fn dampness(position: DVec3) -> f32 {
     let weather = noise3(position.normalize().as_vec3() * 5.8 + Vec3::new(17.3, -4.7, 11.8));
-    let pockets = noise3(position.as_vec3() * 0.075 + Vec3::new(-5.1, 2.7, 7.2));
+    let pockets =
+        super::super::forest_field(position * 0.075 + DVec3::new(-5.1, 2.7, 7.2), 0x8FA2_763A)
+            as f32;
     (0.58 + 0.94 * weather + 0.27 * pockets).clamp(0.0, 1.0)
 }
 
@@ -198,7 +201,7 @@ fn habitat(heights: &SurfaceHeights, up: DVec3, trees: &[DVec3]) -> Option<(f64,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forest::placement::PatchKey;
+    use crate::forest::placement::NodeKey;
     use std::path::Path;
     use world_core::coordinates::terrain_aligned_direction;
 
@@ -209,12 +212,15 @@ mod tests {
             "/../../assets"
         )));
         let up = terrain_aligned_direction(world_regions::STARTER_REGION.spawn.direction);
-        let trees: Vec<_> = PatchKey::shade_neighborhood(up)
+        let trees: Vec<_> = NodeKey::around(up, 1_900.0)
+            .into_iter()
+            .flat_map(NodeKey::leaves)
             .flat_map(|patch| patch.sites(&heights))
             .map(|tree| tree.position)
             .collect();
-        let (patch, trunks, plants) = Patch::around(up, 150.0)
-            .into_iter()
+        let (patch, trunks, plants) = trees
+            .iter()
+            .flat_map(|tree| Patch::around(tree.normalize(), 55.0))
             .find_map(|patch| {
                 let up = patch.center();
                 let anchor = up * (RADIUS + heights.sample(up)?);

@@ -185,7 +185,7 @@ impl ForestModels {
 /// Reserve space for an authored scene among the procedurally placed trees.
 ///
 /// Insert before the forest starts streaming. All generated tree LODs honor it.
-#[derive(Resource)]
+#[derive(Clone, Copy, Resource)]
 pub struct ForestClearing {
     /// Terrain-aligned unit radial direction at the clearing center.
     pub direction: DVec3,
@@ -199,6 +199,10 @@ impl ForestClearing {
         radial.distance_squared(self.direction) * RADIUS.powi(2) < self.radius.powi(2)
     }
 }
+
+/// The root of a resident, individually streamed coconut palm.
+#[derive(Component)]
+pub struct CoconutPalm;
 
 /// Stream deterministic foliage around the world camera.
 ///
@@ -1029,11 +1033,9 @@ mod tests {
         let mut forested = 0;
         for x in 0..30 {
             for z in 0..30 {
-                let direction = DVec3::new(
-                    0.30 + f64::from(x) * 0.04,
-                    0.27,
-                    0.18 + f64::from(z) * 0.04,
-                ).normalize();
+                let direction =
+                    DVec3::new(0.30 + f64::from(x) * 0.04, 0.27, 0.18 + f64::from(z) * 0.04)
+                        .normalize();
                 let density = forest_density(direction, 400.0);
                 assert!((0.0..=1.0).contains(&density));
                 open += usize::from(density < 0.08);
@@ -1046,8 +1048,7 @@ mod tests {
 
     #[test]
     fn climate_eligible_land_has_scattered_trees_between_groves() {
-        let up = DVec3::new(-0.97684968336687, 0.21339114535822, 0.01512994344821)
-            .normalize();
+        let up = DVec3::new(-0.97684968336687, 0.21339114535822, 0.01512994344821).normalize();
         let east = up.cross(DVec3::Y).normalize();
         let north = east.cross(up).normalize();
         let mut low = 0.0_f32;

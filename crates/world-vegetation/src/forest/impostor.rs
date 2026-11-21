@@ -65,6 +65,10 @@ pub(super) fn bake(oak: Option<&Image>, authored: &Portraits) -> Image {
     textures::mipmapped(pixels, width, SIDE, TILES, Some(0.46), false)
 }
 
+fn centered_inset(uv: Vec2) -> Vec2 {
+    Vec2::splat(INSET) + uv * (1.0 - 2.0 * INSET)
+}
+
 fn exported_oak(image: &Image) -> Option<Vec<[u8; 4]>> {
     if image.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb {
         return None;
@@ -72,11 +76,13 @@ fn exported_oak(image: &Image) -> Option<Vec<[u8; 4]>> {
     let mut pixels = Vec::with_capacity(SIDE * SIDE);
     for y in 0..SIDE {
         for x in 0..SIDE {
-            pixels.push(sample(
-                image,
-                Vec2::new(x as f32, y as f32) / (SIDE - 1) as f32,
-                false,
-            ));
+            let uv =
+                (Vec2::new(x as f32, y as f32) / (SIDE - 1) as f32 - INSET) / (1.0 - 2.0 * INSET);
+            pixels.push(if uv.min_element() >= 0.0 && uv.max_element() <= 1.0 {
+                sample(image, uv, false)
+            } else {
+                [0; 4]
+            });
         }
     }
     Some(pixels)
@@ -150,7 +156,7 @@ impl Portrait {
             .map(|&raw| {
                 let point = self.rotation * Vec3::from_array(raw);
                 let uv = Vec2::new(0.5 + point.x / self.area.x, 1.0 - point.y / self.area.y);
-                (uv * (SIDE - 1) as f32, point.z)
+                (centered_inset(uv) * (SIDE - 1) as f32, point.z)
             })
             .collect();
         for triangle in mesh.indices.chunks_exact(3) {
@@ -198,7 +204,7 @@ impl Portrait {
                     let normal = self.rotation
                         * blend(indices.map(|i| Vec3::from_array(mesh.normals[i])), weights)
                             .normalize_or_zero();
-                    let shade = 0.76 + 0.38 * normal.dot(Vec3::new(-0.4, 0.72, 0.55)).abs();
+                    let shade = 0.88 + 0.23 * normal.dot(Vec3::new(-0.4, 0.72, 0.55)).abs();
                     let rgb = color
                         * Vec3::new(
                             (f32::from(texel[0]) / 255.0).powi(2),

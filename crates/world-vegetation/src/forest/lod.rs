@@ -1,17 +1,15 @@
 //! Screen-space detail selection and shared, complementary dither materials.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     asset::AssetId,
-    pbr::{ExtendedMaterial, MaterialExtension},
-    light::{NotShadowCaster, NotShadowReceiver},
-    prelude::*,
     camera::primitives::Aabb,
-    shader::ShaderRef,
+    light::NotShadowCaster,
+    pbr::{ExtendedMaterial, MaterialExtension},
+    prelude::*,
     reflect::TypePath,
-    render::{
-        render_resource::AsBindGroup,
-    },
+    render::render_resource::AsBindGroup,
+    shader::ShaderRef,
 };
 use world_core::runtime::{
     GridTransform, PlanetRoot, ReferenceFrame, ReferenceFrames, WorldCamera,
@@ -20,12 +18,14 @@ use world_core::runtime::{
 use super::{
     placement::{PatchKey, Site},
     streaming::ForestStream,
-    FoliageMaterial, ForestModels, Species,
+    CoconutPalm, FoliageMaterial, ForestModels, Species,
 };
 
 const STEPS: f32 = 12.0;
 const REFERENCE_FOCAL: f32 = 935.3074;
 const REFERENCE_HEIGHT: f32 = 15.0;
+const MAX_SHADOW_TREES: usize = 24;
+const SHADOW_RANGE: f64 = 76.0;
 
 /// Vegetation quality controls. Distances describe a 1080p, 60-degree reference view.
 #[derive(Clone, Copy, Resource)]
@@ -86,7 +86,7 @@ impl View {
         if self.orthographic {
             size
         } else {
-            size / distance.max(1.0)
+            site.height() * self.focal.max(REFERENCE_FOCAL * 0.74) / distance.max(1.0)
         }
     }
 
@@ -94,7 +94,7 @@ impl View {
         let scale = if self.orthographic {
             1.0
         } else {
-            (self.focal / REFERENCE_FOCAL).clamp(0.48, 1.55)
+            (self.focal / REFERENCE_FOCAL).clamp(0.83, 1.55)
         };
         let start = settings.impostor_blend[0].clamp(15.0, 230.0);
         let end = settings.impostor_blend[1].clamp(start + 4.0, 260.0);
@@ -245,6 +245,7 @@ pub(super) struct DetailTree {
     lod: LodState<ModelChoice>,
     slots: [(Entity, Entity); 2],
     presented: [Option<(ModelChoice, u8, u8)>; 2],
+    shadow_slot: Option<usize>,
 }
 
 #[derive(Component)]
@@ -271,6 +272,9 @@ pub(super) fn spawn_tree(
         ),
     );
     tree.insert(cell);
+    if site.species == Species::Palm {
+        tree.insert(CoconutPalm);
+    }
     let mut slots = [(Entity::PLACEHOLDER, Entity::PLACEHOLDER); 2];
     tree.with_children(|children| {
         for slot in &mut slots {
@@ -278,7 +282,6 @@ pub(super) fn spawn_tree(
                 .spawn((
                     Trunk,
                     NotShadowCaster,
-                    NotShadowReceiver,
                     Aabb::default(),
                     Mesh3d::default(),
                     MeshMaterial3d::<BarkMaterial>::default(),
@@ -289,7 +292,6 @@ pub(super) fn spawn_tree(
                 .spawn((
                     Leaves,
                     NotShadowCaster,
-                    NotShadowReceiver,
                     Aabb::default(),
                     Mesh3d::default(),
                     MeshMaterial3d::<FoliageMaterial>::default(),
@@ -305,6 +307,7 @@ pub(super) fn spawn_tree(
         lod: LodState::default(),
         slots,
         presented: [None; 2],
+        shadow_slot: None,
     });
     tree.id()
 }
@@ -317,6 +320,7 @@ type RenderParts<'a, M> = (
 );
 
 pub(super) fn update_lods(
+    mut commands: Commands,
     models: Res<ForestModels>,
     forest: Res<ForestStream>,
     settings: Res<VegetationSettings>,
@@ -328,7 +332,7 @@ pub(super) fn update_lods(
     mut leaf_materials: ResMut<Assets<FoliageMaterial>>,
     mut bark_materials: ResMut<Assets<BarkMaterial>>,
     mut stats: ResMut<super::debug::LodDiagnostics>,
-    mut trees: Query<&mut DetailTree>,
+    mut trees: Query<(Entity, &mut DetailTree)>,
     mut trunks: Query<RenderParts<BarkMaterial>, With<Trunk>>,
     mut leaves: Query<RenderParts<FoliageMaterial>, (With<Leaves>, Without<Trunk>)>,
 ) {
@@ -345,7 +349,22 @@ pub(super) fn update_lods(
     stats.levels = [0; 3];
     stats.blends = 0;
     let models_changed = models.is_changed();
-    for mut tree in &mut trees {
+    let mut nearest: Vec<_> = trees
+        .iter()
+        .filter_map(|(entity, tree)| {
+            let distance = eye.distance_squared(tree.site.position);
+            let limit = SHADOW_RANGE + if tree.shadow_slot.is_some() { 8.0 } else { 0.0 };
+            (distance <= limit * limit).then_some((distance, entity))
+        })
+        .collect();
+    nearest.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let shadow_trees: HashSet<_> = nearest
+        .into_iter()
+        .take(MAX_SHADOW_TREES)
+        .map(|(_, entity)| entity)
+        .collect();
+
+    for (entity, mut tree) in &mut trees {
         let distance = eye.distance(tree.site.position) as f32;
         let (impostor, readiness) = forest.coverage(tree.patch);
         let range = settings.impostor_range.clamp(200.0, 600.0);
@@ -354,6 +373,7 @@ pub(super) fn update_lods(
         ));
         let upper = quantize(impostor * readiness * (1.0 - smoothstep(band.x, band.y, distance)));
         if upper == 0 {
+            set_shadow_slot(&mut commands, &mut tree, None);
             if tree.lod.current.is_some() {
                 tree.lod = LodState::default();
                 for (index, slot) in tree.slots.into_iter().enumerate() {
@@ -380,6 +400,9 @@ pub(super) fn update_lods(
             .lod
             .slots(upper)
             .expect("an active tree is assigned a model");
+        let shadow_slot = (shadow_trees.contains(&entity) && upper > STEPS as u8 / 2)
+            .then(|| usize::from(slots[1].2 - slots[1].1 > slots[0].2 - slots[0].1));
+        set_shadow_slot(&mut commands, &mut tree, shadow_slot);
         for (index, ((trunk, canopy), (choice, low, high))) in
             tree.slots.into_iter().zip(slots).enumerate()
         {
@@ -448,6 +471,23 @@ pub(super) fn update_lods(
             }
         }
     }
+}
+
+fn set_shadow_slot(commands: &mut Commands, tree: &mut DetailTree, slot: Option<usize>) {
+    if tree.shadow_slot == slot {
+        return;
+    }
+    if let Some(old) = tree.shadow_slot {
+        let (wood, leaves) = tree.slots[old];
+        commands.entity(wood).insert(NotShadowCaster);
+        commands.entity(leaves).insert(NotShadowCaster);
+    }
+    if let Some(new) = slot {
+        let (wood, leaves) = tree.slots[new];
+        commands.entity(wood).remove::<NotShadowCaster>();
+        commands.entity(leaves).remove::<NotShadowCaster>();
+    }
+    tree.shadow_slot = slot;
 }
 
 fn hide(

@@ -29,7 +29,7 @@ use super::{
 const MAX_NODES: usize = 112;
 const NODE_ALLOWANCE: f32 = 480.0;
 const DISCOVERY_INTERVAL: f64 = 0.16;
-const PLACEMENTS_PER_FRAME: usize = 13;
+const PLACEMENT_JOBS: usize = 12;
 const PARENT_JOBS: usize = 3;
 const LEAF_JOBS: usize = 5;
 // Give close-range tree meshes enough room in tropical stands; otherwise
@@ -46,6 +46,7 @@ struct Leaf {
     key: PatchKey,
     anchor: DVec3,
     sites: Option<Sites>,
+    placement: Option<Task<Sites>>,
     impostor: MeshState,
     trees: Vec<Entity>,
     coverage: f32,
@@ -214,6 +215,7 @@ impl ForestStream {
                         key: patch,
                         anchor: anchor(heights, patch.center()),
                         sites: None,
+                        placement: None,
                         impostor: MeshState::Missing,
                         trees: Vec::new(),
                         coverage: 0.0,
@@ -236,9 +238,20 @@ impl ForestStream {
         eye: DVec3,
         clearing: Option<&ForestClearing>,
     ) {
-        // Sampling stays on the main thread so all tiers use the existing authoritative
-        // terrain and river queries. Mesh assembly consumes only immutable owned sites.
-        let mut budget = PLACEMENTS_PER_FRAME;
+        let mut pending = 0;
+        for leaf in self.nodes.values_mut().flat_map(|node| &mut node.leaves) {
+            let ready = leaf
+                .placement
+                .as_mut()
+                .and_then(|task| block_on(poll_once(task)));
+            if let Some(sites) = ready {
+                leaf.placement = None;
+                leaf.sites = Some(sites);
+            }
+            pending += usize::from(leaf.placement.is_some());
+        }
+        let mut budget = PLACEMENT_JOBS.saturating_sub(pending);
+        let pool = AsyncComputeTaskPool::get();
         for key in &self.order {
             if budget == 0 {
                 break;
@@ -247,7 +260,7 @@ impl ForestStream {
             let mut leaves: Vec<_> = node
                 .leaves
                 .iter_mut()
-                .filter(|leaf| leaf.sites.is_none())
+                .filter(|leaf| leaf.sites.is_none() && leaf.placement.is_none())
                 .collect();
             leaves.sort_unstable_by(|a, b| {
                 eye.distance_squared(a.anchor)
@@ -255,11 +268,16 @@ impl ForestStream {
                     .then(a.key.cmp(&b.key))
             });
             for leaf in leaves.into_iter().take(budget) {
-                let mut sites = leaf.key.sites(heights);
-                if let Some(clearing) = clearing {
-                    sites.retain(|site| !clearing.contains(site.position));
-                }
-                leaf.sites = Some(sites.into());
+                let key = leaf.key;
+                let heights = heights.clone();
+                let clearing = clearing.copied();
+                leaf.placement = Some(pool.spawn(async move {
+                    let mut sites = key.sites(&heights);
+                    if let Some(clearing) = clearing {
+                        sites.retain(|site| !clearing.contains(site.position));
+                    }
+                    sites.into()
+                }));
                 budget -= 1;
             }
         }
@@ -605,24 +623,8 @@ pub(super) fn stream(
         let mut uploads = MAX_BATCH_UPLOADS;
         for key in &forest.order {
             let node = forest.nodes.get_mut(key).unwrap();
-            if uploads > 0
-                && upload(
-                    &mut commands,
-                    &root,
-                    frame,
-                    &mut node.parent,
-                    node.anchor,
-                    &mut assets,
-                    || ProxyMaterial {
-                        coverage: proxy_parameters(forest_range, range, band, true),
-                        atlas: atlas.clone(),
-                    },
-                )
-            {
-                uploads -= 1;
-            }
             for leaf in &mut node.leaves {
-                if uploads > 0
+                if uploads > 1
                     && upload(
                         &mut commands,
                         &root,
@@ -638,6 +640,26 @@ pub(super) fn stream(
                 {
                     uploads -= 1;
                 }
+            }
+        }
+        for key in &forest.order {
+            if uploads == 0 {
+                break;
+            }
+            let node = forest.nodes.get_mut(key).unwrap();
+            if upload(
+                &mut commands,
+                &root,
+                frame,
+                &mut node.parent,
+                node.anchor,
+                &mut assets,
+                || ProxyMaterial {
+                    coverage: proxy_parameters(forest_range, range, band, true),
+                    atlas: atlas.clone(),
+                },
+            ) {
+                uploads -= 1;
             }
         }
     }
@@ -687,7 +709,8 @@ pub(super) fn stream(
                 forest.stats.impostors += 1;
             }
             forest.stats.unsampled += usize::from(leaf.sites.is_none());
-            forest.stats.jobs += usize::from(matches!(leaf.impostor, MeshState::Pending(_)));
+            forest.stats.jobs += usize::from(leaf.placement.is_some())
+                + usize::from(matches!(leaf.impostor, MeshState::Pending(_)));
             forest.stats.trees += leaf.trees.len();
         }
         forest.stats.jobs += usize::from(matches!(node.parent, MeshState::Pending(_)));

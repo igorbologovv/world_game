@@ -1,6 +1,6 @@
 //! Canonical tree sites. Representation and task completion order do not affect placement.
 use bevy::{math::DVec3, prelude::*};
-use world_core::{coordinates::terrain_aligned_direction, planet::RADIUS, SurfaceHeights};
+use world_core::{planet::RADIUS, SurfaceHeights};
 
 use super::{hero_oak, tree_height, tree_site, Random, Species};
 
@@ -47,13 +47,12 @@ impl PatchKey {
         // in i64: i32 would silently overflow when grouping patches.
         NodeKey(
             band,
-            (i64::from(self.1) * i64::from(node_columns(band))
-                / i64::from(columns(self.0))) as i32,
+            (i64::from(self.1) * i64::from(node_columns(band)) / i64::from(columns(self.0))) as i32,
         )
     }
 
     /// Candidate patches whose canonical trees may shade the given surface tile.
-    /// The extra row and column cover the legacy baked-direction offset.
+    /// The surrounding rows include shade cast across neighboring trees' patch edges.
     pub fn shade_neighborhood(direction: DVec3) -> impl Iterator<Item = Self> {
         let latitude = direction.y.clamp(-1.0, 1.0).asin();
         let longitude = direction.z.atan2(direction.x).rem_euclid(TAU);
@@ -83,10 +82,10 @@ impl PatchKey {
             .filter_map(|candidate| {
                 let mut rng =
                     Random::new(seed ^ (candidate as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
-                let up = terrain_aligned_direction(direction(
+                let up = direction(
                     (latitude + rng.unit64() * ANGLE).clamp(-HALF_PI, HALF_PI),
                     (f64::from(self.1) + rng.unit64()) * step,
-                ));
+                );
                 let (ground, species) = tree_site(heights, up, &mut rng)?;
                 let variant = rng.next_u32() as usize % species.variants();
                 let scale = rng.range(0.84, 1.28);
@@ -170,6 +169,7 @@ fn direction(latitude: f64, longitude: f64) -> DVec3 {
 mod tests {
     use super::*;
     use std::{collections::HashSet, path::Path};
+    use world_core::coordinates::terrain_aligned_direction;
 
     #[test]
     fn hierarchy_covers_wrapped_rows_with_no_duplicate_sites() {
@@ -237,7 +237,17 @@ mod tests {
             "/../../assets"
         )));
         let up = terrain_aligned_direction(world_regions::STARTER_REGION.spawn.direction);
-        let patch = PatchKey::shade_neighborhood(up).next().unwrap();
-        assert_eq!(patch.sites(&heights), patch.sites(&heights));
+        let (patch, sites) = NodeKey::around(up, 1_800.0)
+            .into_iter()
+            .flat_map(NodeKey::leaves)
+            .find_map(|patch| {
+                let sites = patch.sites(&heights);
+                (!sites.is_empty()).then_some((patch, sites))
+            })
+            .expect("the fixture contains woodland");
+        assert_eq!(sites, patch.sites(&heights));
+        assert!(sites.iter().all(|site| {
+            site.position.normalize().distance(patch.center()) * RADIUS < PATCH_METERS
+        }));
     }
 }

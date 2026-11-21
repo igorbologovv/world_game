@@ -1,6 +1,6 @@
 //! Load the standalone tree meshes into the shared forest model and portrait tables.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
@@ -10,6 +10,7 @@ use bevy::{
     mesh::VertexAttributeValues,
     pbr::gltf::standard_material_from_gltf_material,
     prelude::*,
+    tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
 };
 use world_core::runtime::WorldAssets;
 
@@ -63,6 +64,7 @@ const PREFABS: [Prefab; 4] = [
 pub(super) struct TreeAssets {
     pending: Vec<(&'static Prefab, [Handle<Gltf>; LODS])>,
     mipmaps: HashMap<AssetId<Image>, Handle<Image>>,
+    processing: Option<(&'static Prefab, Task<Option<PreparedPrefab>>)>,
 }
 
 pub(super) fn request_assets(
@@ -100,6 +102,42 @@ pub(super) fn finish_loading(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut foliage: ResMut<Assets<FoliageMaterial>>,
 ) {
+    if let Some((prefab, task)) = &mut loading.processing {
+        let Some(ready) = block_on(poll_once(task)) else {
+            return;
+        };
+        let prefab = *prefab;
+        loading.processing = None;
+        if let Some(mut ready) = ready {
+            for (source, image) in ready.mipmaps.drain(..) {
+                loading.mipmaps.insert(source, images.add(image));
+            }
+            apply_texture_handles(&mut ready.bark, &loading.mipmaps);
+            apply_texture_handles(&mut ready.leaves, &loading.mipmaps);
+            if let Some(model) = install_variant(
+                ready.geometry,
+                ready.bark,
+                ready.leaves,
+                &mut meshes,
+                &mut materials,
+                &mut foliage,
+            ) {
+                models.variants[prefab.species as usize][prefab.variant] = model;
+                models
+                    .portraits
+                    .insert(prefab.species, prefab.variant, ready.portrait);
+                info!("Loaded tree prefab {}", prefab.path);
+            } else {
+                warn!("Tree prefab {} has incompatible geometry", prefab.path);
+            }
+        } else {
+            warn!(
+                "Tree prefab {} has incompatible portrait textures",
+                prefab.path
+            );
+        }
+    }
+
     let mut index = 0;
     while index < loading.pending.len() {
         let (prefab, files) = &loading.pending[index];
@@ -123,47 +161,51 @@ pub(super) fn finish_loading(
         }
 
         let (prefab, files) = loading.pending.swap_remove(index);
-        if let Some((model, portrait)) = build_variant(
+        if let Some(task) = prepare_variant(
             prefab,
             &files,
             &gltfs,
             &gltf_meshes,
             &gltf_materials,
-            &mut meshes,
-            &mut images,
-            &mut materials,
-            &mut foliage,
-            &mut loading.mipmaps,
+            &meshes,
+            &images,
+            &loading.mipmaps,
         ) {
-            models.variants[prefab.species as usize][prefab.variant] = model;
-            models
-                .portraits
-                .insert(prefab.species, prefab.variant, portrait);
-            info!("Loaded tree prefab {}", prefab.path);
-        } else {
-            warn!(
-                "Tree prefab {} has incompatible geometry or materials",
-                prefab.path
-            );
+            // One worker owns texture snapshots at a time. A shared source
+            // mip chain (e.g. woodland bark) is reused after installation.
+            loading.processing = Some((prefab, task));
+            return;
         }
+        warn!(
+            "Tree prefab {} has incompatible geometry or materials",
+            prefab.path
+        );
     }
     if loading.pending.is_empty() {
         loading.mipmaps.clear();
     }
 }
 
-fn build_variant(
-    prefab: &Prefab,
+type Geometry = Vec<(Handle<Mesh>, Handle<Mesh>)>;
+
+struct PreparedPrefab {
+    geometry: Geometry,
+    bark: StandardMaterial,
+    leaves: StandardMaterial,
+    portrait: Vec<[u8; 4]>,
+    mipmaps: Vec<(AssetId<Image>, Image)>,
+}
+
+fn prepare_variant(
+    prefab: &'static Prefab,
     files: &[Handle<Gltf>; LODS],
     gltfs: &Assets<Gltf>,
     gltf_meshes: &Assets<GltfMesh>,
     gltf_materials: &Assets<GltfMaterial>,
-    meshes: &mut Assets<Mesh>,
-    images: &mut Assets<Image>,
-    materials: &mut Assets<StandardMaterial>,
-    foliage: &mut Assets<FoliageMaterial>,
-    mipmaps: &mut HashMap<AssetId<Image>, Handle<Image>>,
-) -> Option<(VariantModels, Vec<[u8; 4]>)> {
+    meshes: &Assets<Mesh>,
+    images: &Assets<Image>,
+    mipmaps: &HashMap<AssetId<Image>, Handle<Image>>,
+) -> Option<Task<Option<PreparedPrefab>>> {
     let parts = |file, name: &str| {
         let gltf = gltfs.get(file)?;
         let material = gltf.named_materials.get(name)?;
@@ -182,49 +224,99 @@ fn build_variant(
         geometry.push((wood, leaves));
     }
 
-    let mut bark = standard_material_from_gltf_material(parts(&files[0], "Bark")?.1);
-    let mut leaves = standard_material_from_gltf_material(parts(&files[0], "Leaves")?.1);
+    let bark = standard_material_from_gltf_material(parts(&files[0], "Bark")?.1);
+    let leaves = standard_material_from_gltf_material(parts(&files[0], "Leaves")?.1);
     let AlphaMode::Mask(cutoff) = leaves.alpha_mode else {
         return None;
     };
-    let bark_image = bark.base_color_texture.as_ref()?;
-    let leaf_image = leaves.base_color_texture.as_ref()?;
     let (far_wood, far_leaves) = geometry.last()?;
-    let portrait = impostor::render_authored(
-        prefab.species,
-        prefab.variant,
-        [
-            (
-                meshes.get(far_wood)?,
-                images.get(bark_image)?,
-                0.0,
-                prefab.repeat_bark,
-            ),
-            (
-                meshes.get(far_leaves)?,
-                images.get(leaf_image)?,
-                cutoff,
-                prefab.repeat_leaves,
-            ),
-        ],
-    )?;
+    let (wood, canopy) = (
+        meshes.get(far_wood)?.clone(),
+        meshes.get(far_leaves)?.clone(),
+    );
+    let bark_id = bark.base_color_texture.as_ref()?.id();
+    let leaf_id = leaves.base_color_texture.as_ref()?.id();
+    let mut inputs = HashMap::new();
+    for (material, cutoff, repeat) in [
+        (&bark, None, prefab.repeat_bark),
+        (&leaves, Some(cutoff), prefab.repeat_leaves),
+    ] {
+        for (handle, cutoff) in [
+            (&material.base_color_texture, cutoff),
+            (&material.normal_map_texture, None),
+            (&material.metallic_roughness_texture, None),
+        ] {
+            if let Some(handle) = handle {
+                let id = handle.id();
+                let needs_mipmaps = !mipmaps.contains_key(&id);
+                if needs_mipmaps || id == bark_id || id == leaf_id {
+                    if let Entry::Vacant(entry) = inputs.entry(id) {
+                        entry.insert((images.get(handle)?.clone(), cutoff, repeat, needs_mipmaps));
+                    }
+                }
+            }
+        }
+    }
+    Some(AsyncComputeTaskPool::get().spawn(async move {
+        let portrait = impostor::render_authored(
+            prefab.species,
+            prefab.variant,
+            [
+                (&wood, &inputs.get(&bark_id)?.0, 0.0, prefab.repeat_bark),
+                (
+                    &canopy,
+                    &inputs.get(&leaf_id)?.0,
+                    cutoff,
+                    prefab.repeat_leaves,
+                ),
+            ],
+        )?;
+        let mipmaps = inputs
+            .into_iter()
+            .filter_map(|(id, (image, cutoff, repeat, needed))| {
+                if needed {
+                    textures::prepare_mipmaps(&image, cutoff, repeat).map(|mips| (id, mips))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Some(PreparedPrefab {
+            geometry,
+            bark,
+            leaves,
+            portrait,
+            mipmaps,
+        })
+    }))
+}
 
-    bark.base_color_texture = Some(
-        mipmaps
-            .entry(bark_image.id())
-            .or_insert_with(|| {
-                textures::import_mipmapped(images, bark_image, None, prefab.repeat_bark)
-            })
-            .clone(),
-    );
-    leaves.base_color_texture = Some(
-        mipmaps
-            .entry(leaf_image.id())
-            .or_insert_with(|| {
-                textures::import_mipmapped(images, leaf_image, Some(cutoff), prefab.repeat_leaves)
-            })
-            .clone(),
-    );
+fn apply_texture_handles(
+    material: &mut StandardMaterial,
+    mipmaps: &HashMap<AssetId<Image>, Handle<Image>>,
+) {
+    for handle in [
+        &mut material.base_color_texture,
+        &mut material.normal_map_texture,
+        &mut material.metallic_roughness_texture,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(mipmapped) = mipmaps.get(&handle.id()) {
+            *handle = mipmapped.clone();
+        }
+    }
+}
+
+fn install_variant(
+    geometry: Geometry,
+    bark: StandardMaterial,
+    leaves: StandardMaterial,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    foliage: &mut Assets<FoliageMaterial>,
+) -> Option<VariantModels> {
     let bark = materials.add(bark);
     let leaf_material = foliage.add(FoliageMaterial {
         base: leaves,
@@ -262,13 +354,10 @@ fn build_variant(
             bounds,
         ));
     }
-    Some((
-        VariantModels {
-            lods,
-            bark: Some(bark),
-        },
-        portrait,
-    ))
+    Some(VariantModels {
+        lods,
+        bark: Some(bark),
+    })
 }
 
 #[cfg(test)]
@@ -316,7 +405,8 @@ mod tests {
         let timeout = Instant::now() + Duration::from_secs(10);
         loop {
             app.update();
-            if app.world().resource::<TreeAssets>().pending.is_empty() {
+            let loading = app.world().resource::<TreeAssets>();
+            if loading.pending.is_empty() && loading.processing.is_none() {
                 break;
             }
             assert!(Instant::now() < timeout, "tree assets timed out");

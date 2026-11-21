@@ -98,14 +98,33 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     }
     app.update();
     let world = app.world_mut();
-    assert!(
-        world
-            .query::<(&Text, &Visibility)>()
-            .iter(world)
-            .any(|(text, visibility)| text.0 == "Coconut palm"
-                && *visibility == Visibility::Inherited)
-    );
+    assert!(world
+        .query::<(&Text, &Visibility)>()
+        .iter(world)
+        .any(|(text, visibility)| {
+            text.0 == "Coconut palm" && *visibility == Visibility::Hidden
+        }));
+    // A resident palm in the active view drives the guide, independent of
+    // asset streaming timing in this headless composition test.
+    let view = *world
+        .query_filtered::<&GlobalTransform, With<WorldCamera>>()
+        .single(world)
+        .unwrap();
+    let position = view.translation() + *view.forward() * 70.0 - Vec3::Y * 5.4;
+    world.spawn((
+        world_vegetation::CoconutPalm,
+        GlobalTransform::from_translation(position),
+    ));
+    app.update();
+    assert!(app
+        .world_mut()
+        .query::<(&Text, &Visibility)>()
+        .iter(app.world())
+        .any(|(text, visibility)| {
+            text.0 == "Coconut palm" && *visibility == Visibility::Inherited
+        }));
 
+    let world = app.world_mut();
     // The imported demonstration is an asset source, not a second terrain tile.
     assert_eq!(
         world

@@ -135,31 +135,41 @@ pub(super) fn import_mipmapped(
     cutoff: Option<f32>,
     repeat: bool,
 ) -> Handle<Image> {
-    let Some(image) = images.get(source) else {
-        return source.clone();
-    };
+    let prepared = images
+        .get(source)
+        .and_then(|image| prepare_mipmaps(image, cutoff, repeat));
+    prepared.map_or_else(|| source.clone(), |image| images.add(image))
+}
+
+pub(super) fn prepare_mipmaps(image: &Image, cutoff: Option<f32>, repeat: bool) -> Option<Image> {
     let size = image.texture_descriptor.size;
-    if image.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb
-        || image.texture_descriptor.mip_level_count != 1
+    let format = image.texture_descriptor.format;
+    if !matches!(
+        format,
+        TextureFormat::Rgba8UnormSrgb | TextureFormat::Rgba8Unorm
+    ) || image.texture_descriptor.mip_level_count != 1
         || size.depth_or_array_layers != 1
     {
-        return source.clone();
+        return None;
     }
-    let Some(source_bytes) = image.data.as_ref() else {
-        return source.clone();
-    };
-    let pixels = source_bytes
+    let pixels = image
+        .data
+        .as_ref()?
         .chunks_exact(4)
         .map(|p| [p[0], p[1], p[2], p[3]])
         .collect();
-    images.add(mipmapped(
+    let mut image = mipmapped(
         pixels,
         size.width as usize,
         size.height as usize,
         1,
         cutoff,
         repeat,
-    ))
+    );
+    // Normal and metallic/roughness maps stay linear through GPU sampling.
+    image.texture_descriptor.format = format;
+    image.asset_usage = RenderAssetUsages::RENDER_WORLD;
+    Some(image)
 }
 
 pub(super) fn mipmapped(
@@ -237,6 +247,7 @@ pub(super) fn mipmapped(
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 4,
         ..default()
     });
     image

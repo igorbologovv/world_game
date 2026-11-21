@@ -108,12 +108,13 @@ impl ProxyMesh {
 
 pub(super) fn half_width(species: Species, variant: usize) -> f32 {
     match (species, variant) {
-        (Species::Oak, _) => 0.37,
-        (Species::Pine, _) => 0.24,
-        (Species::Acacia, _) => 0.50,
+        (Species::Oak, 0) => 0.37,
+        (Species::Oak, _) => 0.47,
+        (Species::Pine, _) => 0.41,
+        (Species::Acacia, _) => 0.80,
         (Species::Jungle, 1) => 0.65,
-        (Species::Jungle, _) => 0.32,
-        (Species::Palm, _) => 0.53,
+        (Species::Jungle, _) => 0.50,
+        (Species::Palm, _) => 0.61,
     }
 }
 
