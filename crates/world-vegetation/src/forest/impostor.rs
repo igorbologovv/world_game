@@ -163,7 +163,7 @@ fn sample(image: &Image, uv: Vec2) -> [u8; 4] {
     let x = (uv.x.clamp(0.0, 1.0) * (size.width - 1) as f32).round() as usize;
     let y = (uv.y.clamp(0.0, 1.0) * (size.height - 1) as f32).round() as usize;
     let i = (y * size.width as usize + x) * 4;
-    image.data[i..i + 4].try_into().unwrap()
+    image.data.as_ref().expect("CPU image bytes")[i..i + 4].try_into().unwrap()
 }
 
 #[cfg(test)]
@@ -180,7 +180,7 @@ mod tests {
                 .flat_map(|y| (0..SIDE).map(move |x| (y * width + tile * SIDE + x) * 4 + 3));
             let solid = alpha
                 .clone()
-                .filter(|&index| image.data[index] >= 120)
+                .filter(|&index| image.data.as_ref().expect("CPU image bytes")[index] >= 120)
                 .count();
             assert!(
                 (50..SIDE * SIDE / 2).contains(&solid),
