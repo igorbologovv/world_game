@@ -552,9 +552,10 @@ pub(super) fn stream(
         .and_then(|task| block_on(poll_once(task)))
     {
         if let Some(atlas) = forest.atlas.as_ref() {
-            // Existing ProxyMaterial handles continue to point to this image.
-            if let Some(mut stored) = images.get_mut(atlas) {
-                *stored = image;
+            // Check existence before taking AssetMut: the guard from get_mut()
+            // otherwise keeps the mutable borrow alive across the else branch.
+            if images.get(atlas).is_some() {
+                *images.get_mut(atlas).expect("atlas was checked above") = image;
             } else {
                 forest.atlas = Some(images.add(image));
             }
