@@ -5,10 +5,11 @@ use bevy::{
     asset::AssetId,
     pbr::{ExtendedMaterial, MaterialExtension, NotShadowCaster, NotShadowReceiver},
     prelude::*,
+    camera::primitives::Aabb,
+    shader::ShaderRef,
     reflect::TypePath,
     render::{
-        primitives::Aabb,
-        render_resource::{AsBindGroup, ShaderRef},
+        render_resource::AsBindGroup,
     },
 };
 use world_core::runtime::{
