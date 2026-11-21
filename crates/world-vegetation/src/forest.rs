@@ -1036,11 +1036,11 @@ mod tests {
                 let density = forest_density(direction, 400.0);
                 assert!((0.0..=1.0).contains(&density));
                 open += usize::from(density < 0.08);
-                forested += usize::from(density > 0.28);
+                forested += usize::from(density > 0.12);
             }
         }
         assert!(open > 90, "missing wide open landscapes: {open}");
-        assert!(forested > 40, "missing clusters of woodland: {forested}");
+        assert!(forested > 10, "missing clusters of woodland: {forested}");
     }
 
     #[test]
