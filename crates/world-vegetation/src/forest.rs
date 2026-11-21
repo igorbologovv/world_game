@@ -443,12 +443,13 @@ fn forest_density(direction: DVec3, height: f64) -> f32 {
     let region = forest_field(p / 78_000.0, 0xB1D2_8491);
     let meadow = forest_field(p / 8_400.0, 0x9284_F505);
     let stand = forest_field(p / 510.0, 0x61A7_96F4);
-    let open = forest_smoothstep(-0.34, 0.18, region)
-        * forest_smoothstep(-0.26, 0.24, meadow);
+    let open = forest_smoothstep(-0.12, 0.32, region)
+        * forest_smoothstep(-0.06, 0.29, meadow);
     let clusters = forest_smoothstep(-0.35, 0.29, stand);
     // Mountain peaks and high exposed slopes remain visibly open.
     let treeline = 1.0 - forest_smoothstep(1_500.0, 2_600.0, height);
-    (open * (0.30 + clusters * 0.70) * treeline) as f32
+    // Keep most land naturally open; concentrated groves are still possible.
+    (open * (0.16 + clusters * 0.54) * treeline) as f32
 }
 
 fn forest_smoothstep(a: f64, b: f64, x: f64) -> f64 {
@@ -503,26 +504,26 @@ fn species_for_climate(
     if height > 2_600.0 || latitude > 0.96 || temp < 0.13 {
         return None;
     }
-    let tropical_palm = temp > 0.78 && moisture > 0.50 && height <= 420.0 && roll < density * 0.22;
+    let tropical_palm = temp > 0.78 && moisture > 0.50 && height <= 420.0 && roll < density * 0.18;
     let coastal_palm =
-        || temp > 0.70 && moisture > 0.25 && height <= 45.0 && roll < density * 0.58 && coastal();
+        || temp > 0.70 && moisture > 0.25 && height <= 45.0 && roll < density * 0.30 && coastal();
     if tropical_palm || coastal_palm() {
         return Some(Species::Palm);
     }
-    if temp > 0.68 && moisture > 0.49 && roll < density * 0.98 {
+    if temp > 0.68 && moisture > 0.49 && roll < density * 0.70 {
         return Some(Species::Jungle);
     }
-    if temp > 0.66 && (0.19..0.61).contains(&moisture) && roll < density * 0.34 {
+    if temp > 0.66 && (0.19..0.61).contains(&moisture) && roll < density * 0.29 {
         return Some(Species::Acacia);
     }
-    if (0.29..=0.68).contains(&temp) && moisture > 0.41 && roll < density * 0.94 {
+    if (0.29..=0.68).contains(&temp) && moisture > 0.41 && roll < density * 0.72 {
         return if random.unit() < 0.77 {
             Some(Species::Oak)
         } else {
             Some(Species::Pine)
         };
     }
-    if temp <= 0.46 && moisture > 0.27 && roll < density * 0.87 {
+    if temp <= 0.46 && moisture > 0.27 && roll < density * 0.72 {
         return Some(Species::Pine);
     }
     None
