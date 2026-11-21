@@ -59,6 +59,9 @@ fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
             return None;
         }
     };
+    if bytes.is_empty() {
+        return None;
+    }
     if bytes.len() % (12 * RIVER_REACH_VERTICES) != 0 {
         warn!("Invalid river surface geometry in {}", path.display());
         return None;
