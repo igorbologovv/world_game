@@ -72,8 +72,10 @@ fn biome_surface(
     let latitude = abs(direction.y);
     let weather = macro_noise(direction * 5.8 + vec3<f32>(17.3, -4.7, 11.8));
     let rainfall_patches = macro_noise(direction * 17.0 + vec3<f32>(-2.1, 9.4, 4.6));
+    // Match the CPU select_species() climate exactly. The local terrain
+    // variation is only a visual tint, not a different biome map.
     let moisture = clamp(
-        0.50 + 0.96 * weather + 0.32 * rainfall_patches + 0.13 * variation,
+        0.50 + 0.96 * weather + 0.32 * rainfall_patches,
         0.0, 1.0,
     );
     let temperature = clamp(
@@ -108,29 +110,39 @@ fn biome_surface(
 
     // Smooth, overlapping climate zones: tropical rainforest, temperate
     // forest, savanna, steppe, temperate grassland and polar tundra.
-    let rainforest = smoothstep(0.68, 0.88, temperature)
-        * smoothstep(0.47, 0.76, moisture);
-    let temperate_forest = smoothstep(0.29, 0.49, temperature)
-        * (1.0 - smoothstep(0.70, 0.90, temperature))
-        * smoothstep(0.44, 0.73, moisture);
-    let boreal_forest = smoothstep(0.13, 0.25, temperature)
-        * (1.0 - smoothstep(0.44, 0.51, temperature))
-        * smoothstep(0.265, 0.47, moisture);
-    let savanna = smoothstep(0.68, 0.86, temperature)
-        * smoothstep(0.18, 0.37, moisture)
-        * (1.0 - smoothstep(0.49, 0.70, moisture));
+    // The transition bands straddle the actual CPU tree thresholds:
+    // jungle (T > .68, M > .49), temperate (T .29-.68, M > .41),
+    // boreal (T <= .46, M > .27), and sparse acacia (T > .66, M .19-.61).
+    // Climate varies over the whole sphere; no local tree chunk is needed.
+    let rainforest = smoothstep(0.62, 0.79, temperature)
+        * smoothstep(0.43, 0.60, moisture);
+    let temperate_forest = smoothstep(0.26, 0.38, temperature)
+        * (1.0 - smoothstep(0.65, 0.74, temperature))
+        * smoothstep(0.35, 0.54, moisture);
+    let boreal_forest = smoothstep(0.12, 0.22, temperature)
+        * (1.0 - smoothstep(0.43, 0.53, temperature))
+        * smoothstep(0.22, 0.40, moisture);
+    let savanna = smoothstep(0.62, 0.75, temperature)
+        * smoothstep(0.17, 0.29, moisture)
+        * (1.0 - smoothstep(0.54, 0.67, moisture));
     let steppe = (1.0 - smoothstep(0.22, 0.54, moisture))
         * (1.0 - savanna)
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
-    let forest = max(max(rainforest, temperate_forest), max(boreal_forest, savanna * 0.29));
-    let tree_limit = smoothstep(3.5, 35.0, height)
+    let forest = max(
+        max(rainforest * 0.98, temperate_forest * 0.91),
+        max(boreal_forest * 0.94, savanna * 0.36),
+    );
+    // CPU places trees from 3.5 m elevation, including low coastal groves.
+    let tree_limit = smoothstep(3.5, 9.0, height)
         * (1.0 - smoothstep(2200.0, 2600.0, height))
         * (1.0 - smoothstep(0.38, 0.63, slope))
         * (1.0 - smoothstep(0.93, 0.96, latitude));
-    var canopy = mix(vec3<f32>(0.063, 0.119, 0.035), vec3<f32>(0.039, 0.095, 0.043), boreal_forest);
-    canopy = mix(canopy, vec3<f32>(0.033, 0.112, 0.036), rainforest);
-    canopy = mix(canopy, vec3<f32>(0.104, 0.143, 0.049), savanna);
+    // Tree-species-colored canopy, shaded below the actual leaf albedo.
+    // A dark conifer forest and a sunlit savanna must not converge to one green.
+    var canopy = mix(vec3<f32>(0.090, 0.226, 0.073), vec3<f32>(0.062, 0.166, 0.109), boreal_forest);
+    canopy = mix(canopy, vec3<f32>(0.052, 0.193, 0.057), rainforest);
+    canopy = mix(canopy, vec3<f32>(0.139, 0.191, 0.063), savanna);
 
     // Tint only the grass/dirt layers. Rock remains mineral-grey and snow
     // remains white. Triplanar PBR albedo/normal/roughness stay in use.
@@ -156,14 +168,27 @@ fn biome_surface(
 }
 
 fn forest_canopy(surface: vec3<f32>, footprint: f32, tint: vec3<f32>) -> vec4<f32> {
-    // Forest stands use the layout noise that guides individual tree placement.
-    let grove = filtered_noise(surface / 260.0 + vec3<f32>(7.4, -12.8, 3.7),
-        1.0 - smoothstep(85.0, 380.0, footprint));
-    let crown_position = surface / 22.0;
-    let crowns = filtered_noise(crown_position, 1.0 - smoothstep(2.5, 22.0, footprint));
-    let density = smoothstep(-0.29, 0.23, grove + crowns * 0.22);
-    let sunlit_crowns = 0.89 + 0.29 * grove + 0.85 * crowns;
-    return vec4<f32>(tint * sunlit_crowns, mix(0.53, 1.0, density));
+    // Continuously evaluated at planet-space coordinates, even for chunks
+    // too far away to stream a single tree. The regional terms remain
+    // visible when 20 m crowns are smaller than a screen pixel.
+    let continental = macro_noise(surface / 14500.0 + vec3<f32>(-6.2, 11.4, 3.8));
+    let region = filtered_noise(
+        surface / 4200.0 + vec3<f32>(8.3, -2.4, 14.1),
+        1.0 - smoothstep(900.0, 5800.0, footprint),
+    );
+    let grove = filtered_noise(
+        surface / 260.0 + vec3<f32>(7.4, -12.8, 3.7),
+        1.0 - smoothstep(85.0, 380.0, footprint),
+    );
+    let crowns = filtered_noise(
+        surface / 22.0,
+        1.0 - smoothstep(2.5, 22.0, footprint),
+    );
+    let structure = continental * 0.31 + region * 0.27
+        + grove * 0.32 + crowns * 0.23;
+    let clustered = smoothstep(-0.22, 0.25, structure);
+    let light = clamp(0.93 + structure * 0.91, 0.63, 1.31);
+    return vec4<f32>(tint * light, mix(0.72, 1.0, clustered));
 }
 
 struct Projection {
@@ -357,10 +382,13 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
 
     var occlusion = 1.0;
     let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
-    let forest_amount = smoothstep(200.0, 920.0, forest_distance) * biome.forest_cover * (weights[1] + weights[2]);
+    // Begin replacing 3D trees while the batched forest is still resident;
+    // retain its color at any altitude after the tree streamer cuts off.
+    let forest_amount = smoothstep(120.0, 660.0, forest_distance)
+        * biome.forest_cover * (weights[1] + weights[2]);
     if forest_amount > 0.015 {
         let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
-        let cover = smoothstep(0.02, 0.72, forest_amount) * canopy.a * 0.91;
+        let cover = smoothstep(0.015, 0.77, forest_amount) * canopy.a * 0.96;
         surface.color = mix(surface.color, canopy.rgb, cover);
         surface.roughness = mix(surface.roughness, 0.97, cover);
         occlusion = 1.0 - cover * 0.18;
