@@ -1,0 +1,11 @@
+[package]
+name = "world-generator"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "generate_world"
+path = "src/main.rs"
+
+[dependencies]
+world-generation.workspace = true

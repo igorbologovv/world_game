@@ -1,0 +1,10 @@
+[package]
+name = "world-generation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy_math.workspace = true
+image.workspace = true
+noise.workspace = true
+world-core.workspace = true

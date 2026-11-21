@@ -1,0 +1,146 @@
+use std::{fs, path::Path};
+
+use bevy::{
+    gizmos::config::GizmoConfigGroup,
+    prelude::*,
+    reflect::TypePath,
+    render::{
+        render_asset::RenderAssetUsages,
+        render_resource::{AsBindGroup, PrimitiveTopology},
+    },
+};
+
+use world_core::{
+    coordinates::terrain_aligned_direction,
+    planet::{RIVER_REACH_VERTICES, RIVER_SURFACE_PATH},
+    runtime::{Explorer, WorldCamera},
+};
+
+#[derive(Component)]
+pub(super) struct RiverWater;
+
+// Bevy's view globals supply animation time directly; no per-frame CPU updates.
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub(super) struct RiverMaterial {
+    #[uniform(0)]
+    pub(super) brightness: f32,
+}
+
+impl Material for RiverMaterial {
+    fn vertex_shader() -> bevy::render::render_resource::ShaderRef {
+        "shaders/river_water.wgsl".into()
+    }
+
+    fn fragment_shader() -> bevy::render::render_resource::ShaderRef {
+        "shaders/river_water.wgsl".into()
+    }
+}
+
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub(super) struct RiverMapLines;
+
+#[derive(Resource)]
+pub(super) struct RiverCenterlines(Vec<[Vec3; 2]>);
+
+pub(super) fn load(assets: &Path) -> Option<(Mesh, RiverCenterlines)> {
+    let path = assets.join(RIVER_SURFACE_PATH);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warn!("Could not load river surface {}: {error}", path.display());
+            return None;
+        }
+    };
+    if bytes.is_empty() || bytes.len() % (12 * RIVER_REACH_VERTICES) != 0 {
+        warn!("Invalid river surface geometry in {}", path.display());
+        return None;
+    }
+    let mut positions = Vec::with_capacity(bytes.len() / 12);
+    for vertex in bytes.chunks_exact(12) {
+        let coordinate =
+            |offset| f32::from_le_bytes(vertex[offset..offset + 4].try_into().unwrap());
+        let position = Vec3::new(coordinate(0), coordinate(4), coordinate(8));
+        if !position.is_finite() || position.length_squared() == 0.0 {
+            warn!("Invalid river surface vertex in {}", path.display());
+            return None;
+        }
+        let position = position.as_dvec3();
+        let normal = terrain_aligned_direction(position.normalize());
+        positions.push((normal * position.length()).as_vec3().to_array());
+    }
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    let centerlines: Vec<[Vec3; 2]> = positions
+        .chunks_exact(RIVER_REACH_VERTICES)
+        .map(|reach| {
+            let start = Vec3::from_array(reach[6]);
+            let left = Vec3::from_array(reach[1]);
+            let right = Vec3::from_array(reach[5]);
+            let end = (left + right).normalize() * ((left.length() + right.length()) * 0.5);
+            [start, end]
+        })
+        .collect();
+    // The strip tapers with the channel. Its vertices specify the banks exactly,
+    // while the round cap at each junction uses the local bank direction.
+    let mut uvs = Vec::with_capacity(positions.len());
+    let mut flow_velocities = Vec::with_capacity(positions.len());
+    let strip_banks = [0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    for (reach, &[start, end]) in positions
+        .chunks_exact(RIVER_REACH_VERTICES)
+        .zip(centerlines.iter())
+    {
+        let flow = (end - start).normalize_or_zero();
+        let left_start = Vec3::from_array(reach[0]);
+        let right_start = Vec3::from_array(reach[2]);
+        let bank_vector = right_start - left_start;
+        let width = bank_vector.length().max(0.01);
+        let across = bank_vector / width;
+        let slope = ((start.length() - end.length()) / start.distance(end).max(1.0)).max(0.0);
+        let velocity = flow * (0.75 + 9.0 * slope.sqrt()).min(4.5);
+        for (index, vertex) in reach.iter().enumerate() {
+            let offset = Vec3::from_array(*vertex) - start;
+            let bank = strip_banks
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| 0.5 + offset.dot(across) / width);
+            uvs.push([offset.dot(flow), bank]);
+            flow_velocities.push([velocity.x, velocity.y, velocity.z, 1.0]);
+        }
+    }
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, flow_velocities);
+    Some((mesh, RiverCenterlines(centerlines)))
+}
+
+pub(super) fn draw_map(
+    rivers: Option<Res<RiverCenterlines>>,
+    water: Query<&GlobalTransform, With<RiverWater>>,
+    player: Query<&GlobalTransform, With<Explorer>>,
+    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    mut gizmos: Gizmos<RiverMapLines>,
+) {
+    let (Some(rivers), Ok(water), Ok(player), Ok(camera)) = (
+        rivers,
+        water.get_single(),
+        player.get_single(),
+        camera.get_single(),
+    ) else {
+        return;
+    };
+    let distance = camera.translation().distance(player.translation());
+    let opacity = ((distance - 500.0) / 700.0).clamp(0.0, 1.0);
+    if opacity == 0.0 {
+        return;
+    }
+    let lift = (distance * 0.010).clamp(6.0, 285.0);
+    let color = Color::srgba(0.24, 0.81, 0.98, opacity * 0.88);
+    let transform = water.affine();
+    for &[start, end] in &rivers.0 {
+        let start = transform.transform_point3(start + start.normalize() * lift);
+        let end = transform.transform_point3(end + end.normalize() * lift);
+        gizmos.line(start, end, color);
+    }
+}

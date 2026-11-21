@@ -1,0 +1,8 @@
+[package]
+name = "world-terrain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+world-core = { workspace = true, features = ["runtime"] }

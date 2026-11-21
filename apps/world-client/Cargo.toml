@@ -1,0 +1,18 @@
+[package]
+name = "world-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+world-core = { workspace = true, features = ["runtime"] }
+world-diagnostics.workspace = true
+world-player.workspace = true
+world-regions.workspace = true
+world-terrain.workspace = true
+world-vegetation.workspace = true
+world-water.workspace = true
+
+# Retain dynamic Bevy linkage on Linux for faster client rebuilds.
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { workspace = true, features = ["dynamic_linking"] }

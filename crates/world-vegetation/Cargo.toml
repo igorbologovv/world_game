@@ -1,0 +1,12 @@
+[package]
+name = "world-vegetation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+world-core = { workspace = true, features = ["runtime"] }
+noise.workspace = true
+
+[dev-dependencies]
+world-regions.workspace = true

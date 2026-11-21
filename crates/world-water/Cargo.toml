@@ -1,0 +1,9 @@
+[package]
+name = "world-water"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+world-core = { workspace = true, features = ["runtime"] }
+image.workspace = true

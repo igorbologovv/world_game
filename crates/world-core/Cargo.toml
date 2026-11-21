@@ -1,0 +1,14 @@
+[package]
+name = "world-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+runtime = ["dep:bevy", "dep:bevy_terrain"]
+
+[dependencies]
+bevy = { workspace = true, optional = true }
+bevy_ecs.workspace = true
+bevy_math.workspace = true
+bevy_terrain = { workspace = true, optional = true }
+image.workspace = true
