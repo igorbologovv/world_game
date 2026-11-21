@@ -494,12 +494,12 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         // Preserve detailed terrain within 650 m even while inspecting
         // the planet-wide map. Fade the diagnostic in gradually rather
         // than painting the nearby soil a flat green or gray.
-        var diagnostic = biome.canopy_tint * biome.forest_cover;
+        var debug_color = biome.canopy_tint * biome.forest_cover;
         if terrain_debug_mode == 1u {
-            diagnostic = vec3<f32>(biome.forest_cover);
+            debug_color = vec3<f32>(biome.forest_cover);
         }
         let diagnostic_blend = smoothstep(650.0, 1450.0, forest_distance);
-        final_color = mix(final_color, vec4<f32>(diagnostic, 1.0), diagnostic_blend);
+        final_color = mix(final_color, vec4<f32>(debug_color, 1.0), diagnostic_blend);
     }
     return FragmentOutput(final_color);
 }
