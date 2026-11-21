@@ -1,19 +1,38 @@
-[package]
-name = "world-client"
+[workspace]
+resolver = "2"
+members = [
+    "apps/world-client",
+    "apps/world-generator",
+    "crates/world-core",
+    "crates/world-diagnostics",
+    "crates/world-generation",
+    "crates/world-player",
+    "crates/world-regions",
+    "crates/world-terrain",
+    "crates/world-vegetation",
+    "crates/world-water",
+]
+exclude = ["Epic_Game_V"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[workspace.dependencies]
 bevy = "0.14.0"
+bevy_ecs = { version = "0.14.0", default-features = false }
+bevy_math = "0.14.0"
 bevy_terrain = { path = "../bevy_terrain", features = ["high_precision"] }
 image = { version = "0.25", features = ["tiff"] }
 noise = "0.9"
-
-# On Linux keep Bevy in a shared library. This makes editing world-client
-# cheaper because its small executable no longer relinks all of Bevy.
-# Windows and other targets keep the existing static linkage.
-[target.'cfg(target_os = "linux")'.dependencies]
-bevy = { version = "0.14.0", features = ["dynamic_linking"] }
+world-core = { path = "crates/world-core" }
+world-diagnostics = { path = "crates/world-diagnostics" }
+world-generation = { path = "crates/world-generation" }
+world-regions = { path = "crates/world-regions" }
+world-player = { path = "crates/world-player" }
+world-terrain = { path = "crates/world-terrain" }
+world-vegetation = { path = "crates/world-vegetation" }
+world-water = { path = "crates/world-water" }
 
 # Smaller debugging symbols make incremental development faster and reduce
 # peak linker memory without removing backtraces/normal debugging entirely.

@@ -5220,9 +5220,93 @@ name = "world-client"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "world-core",
+ "world-diagnostics",
+ "world-player",
+ "world-regions",
+ "world-terrain",
+ "world-vegetation",
+ "world-water",
+]
+
+[[package]]
+name = "world-core"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_ecs",
+ "bevy_math",
  "bevy_terrain",
  "image",
+]
+
+[[package]]
+name = "world-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
+name = "world-generation"
+version = "0.1.0"
+dependencies = [
+ "bevy_math",
+ "image",
  "noise",
+ "world-core",
+]
+
+[[package]]
+name = "world-generator"
+version = "0.1.0"
+dependencies = [
+ "world-generation",
+]
+
+[[package]]
+name = "world-player"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_terrain",
+ "world-core",
+ "world-regions",
+]
+
+[[package]]
+name = "world-regions"
+version = "0.1.0"
+dependencies = [
+ "bevy_math",
+ "world-core",
+]
+
+[[package]]
+name = "world-terrain"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "world-core",
+]
+
+[[package]]
+name = "world-vegetation"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "noise",
+ "world-core",
+ "world-regions",
+]
+
+[[package]]
+name = "world-water"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "image",
+ "world-core",
 ]
 
 [[package]]

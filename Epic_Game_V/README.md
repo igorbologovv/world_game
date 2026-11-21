@@ -6,8 +6,9 @@ resource balances, hourly production/consumption, and its own PostgreSQL schema 
 seed rules. No other MoonTrade repository is needed to build or run it.
 
 The backend lives in `Epic_Game_V/` inside the world-client repository. The Bevy
-world client remains at the repository root. Each project keeps its own Cargo
-manifest and lockfile; run backend commands from this directory.
+workspace is rooted in the parent directory and the client lives in
+`apps/world-client/`. The backend keeps its own Cargo manifest and lockfile.
+Run backend commands from this directory.
 
 ## Start
 
