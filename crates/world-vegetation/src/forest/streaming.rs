@@ -32,8 +32,10 @@ const DISCOVERY_INTERVAL: f64 = 0.16;
 const PLACEMENTS_PER_FRAME: usize = 13;
 const PARENT_JOBS: usize = 3;
 const LEAF_JOBS: usize = 5;
-const MAX_DETAILS: usize = 300;
-const SPAWNS_PER_FRAME: usize = 26;
+// Give close-range tree meshes enough room in tropical stands; otherwise
+// whole patches fall back to billboard silhouettes even next to the player.
+const MAX_DETAILS: usize = 600;
+const SPAWNS_PER_FRAME: usize = 40;
 const RETIREMENTS_PER_FRAME: usize = 34;
 const MAX_BATCH_UPLOADS: usize = 4;
 const MAX_BATCH_RETIREMENTS: usize = 12;
