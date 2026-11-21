@@ -1,7 +1,7 @@
-import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput}
-import bevy_pbr::render::mesh_view_bindings::view
-import bevy_pbr::render::pbr_types::{PbrInput, pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT}
-import bevy_pbr::render::pbr_functions::{calculate_view, apply_pbr_lighting, main_pass_post_lighting_processing}
+import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
+import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::pbr_types::{PbrInput, pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
+import bevy_pbr::render::pbr_functions::{calculate_view, apply_pbr_lighting, main_pass_post_lighting_processing};
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var terrain_albedo: texture_2d_array<f32>;
@@ -356,7 +356,7 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     }
 
     var occlusion = 1.0;
-    let forest_distance = distance(input.world_position.xyz, view.world_position);
+    let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
     let forest_amount = smoothstep(200.0, 920.0, forest_distance) * biome.forest_cover * (weights[1] + weights[2]);
     if forest_amount > 0.015 {
         let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
