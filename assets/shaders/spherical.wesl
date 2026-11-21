@@ -356,15 +356,11 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     }
 
     var occlusion = 1.0;
-    let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
-    let forest_amount = smoothstep(200.0, 920.0, forest_distance) * biome.forest_cover * (weights[1] + weights[2]);
-    if forest_amount > 0.015 {
-        let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
-        let cover = smoothstep(0.02, 0.72, forest_amount) * canopy.a * 0.91;
-        surface.color = mix(surface.color, canopy.rgb, cover);
-        surface.roughness = mix(surface.roughness, 0.97, cover);
-        occlusion = 1.0 - cover * 0.18;
-    }
+    // Vegetation is streamed as real trees using a sparse world-space
+    // distribution. The old shader-painted canopy ignored that distribution
+    // and turned distant meadows and deserts into a uniform green carpet.
+    // Until GPU biome coverage shares the exact CPU mask, keep bare ground
+    // visible between authored and generated tree stands.
 
     if ground_detail > 0.0 {
         // A second, tighter sample gives dirt, stones and grass their own
