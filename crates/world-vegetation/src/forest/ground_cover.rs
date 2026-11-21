@@ -105,7 +105,7 @@ pub(super) fn stream(
     root: Res<PlanetRoot>,
     mut renderables: Query<(&mut Handle<FoliageMaterial>, &mut Visibility)>,
 ) {
-    let Ok((camera_entity, camera)) = cameras.get_single() else {
+    let Ok((camera_entity, camera)) = cameras.single() else {
         return;
     };
     let Some(frame) = frames.parent_frame(camera_entity) else {
@@ -122,12 +122,12 @@ pub(super) fn stream(
                 Visibility::Hidden
             });
             if patch.arrival < 1.0 {
-                patch.arrival = (patch.arrival + time.delta_seconds().min(0.075) * 3.5).min(1.0);
+                patch.arrival = (patch.arrival + time.delta_secs().min(0.075) * 3.5).min(1.0);
                 handle.set_if_neq(material.0[quantize(patch.arrival) as usize].clone());
             }
         }
     }
-    let now = time.elapsed_seconds_f64();
+    let now = time.elapsed_secs_f64();
     if now < cover.next_tick {
         return;
     }
