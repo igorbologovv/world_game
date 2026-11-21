@@ -3,7 +3,8 @@ use std::collections::HashMap;
 
 use bevy::{
     asset::AssetId,
-    pbr::{ExtendedMaterial, MaterialExtension, NotShadowCaster, NotShadowReceiver},
+    pbr::{ExtendedMaterial, MaterialExtension},
+    light::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
     camera::primitives::Aabb,
     shader::ShaderRef,
