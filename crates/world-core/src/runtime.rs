@@ -96,7 +96,10 @@ impl PlanetRoot {
     pub fn spawn<'a>(&self, commands: &'a mut Commands, bundle: impl Bundle) -> EntityCommands<'a> {
         // Bevy 0.20 has no SpatialBundle; transform/visibility use required components.
         let mut child = commands.spawn((Transform::default(), Visibility::default(), GridCell::default()));
-        child.insert(bundle).set_parent_in_place(self.0);
+        // The bundle's Transform is already local to the planet Grid. Parenting
+        // must not recompute it from a newly spawned entity's GlobalTransform:
+        // set_parent_in_place() would overwrite the intended cell-local position.
+        child.insert(bundle).insert(ChildOf(self.0));
         child
     }
 }
