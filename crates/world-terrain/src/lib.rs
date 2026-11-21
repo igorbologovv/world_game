@@ -84,11 +84,11 @@ impl TerrainMaterial {
 }
 /// Cycle diagnostic overlays for global forest coverage and its canopy colors.
 fn toggle_canopy_debug(
-    keyboard: Res<ButtonInput<KeyCode>>,
+    keyboard: Option<Res<ButtonInput<KeyCode>>>,
     terrain: Option<Res<terrain_surface::TerrainSurface>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
-    if !keyboard.just_pressed(KeyCode::F9) {
+    if !keyboard.is_some_and(|input| input.just_pressed(KeyCode::F9)) {
         return;
     }
     let Some(terrain) = terrain else {
