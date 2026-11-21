@@ -39,6 +39,7 @@ impl Plugin for PlayerPlugin {
                 Update,
                 (
                     trip::change_speed,
+                    trip::style_buttons,
                     player::walk.in_set(WorldMovement),
                     player::animate,
                     trip::update,
