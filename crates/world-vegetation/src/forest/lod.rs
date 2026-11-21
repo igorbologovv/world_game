@@ -344,11 +344,8 @@ pub(super) fn update_lods(
     let band = view.impostor_band(&settings);
     stats.levels = [0; 3];
     stats.blends = 0;
+    let models_changed = models.is_changed();
     for mut tree in &mut trees {
-        // Newly loaded GLB variants must replace mesh handles already presented.
-        if models.is_changed() {
-            tree.presented = [None; 2];
-        }
         let distance = eye.distance(tree.site.position) as f32;
         let (impostor, readiness) = forest.coverage(tree.patch);
         let range = settings.impostor_range.clamp(200.0, 600.0);
@@ -387,7 +384,9 @@ pub(super) fn update_lods(
             tree.slots.into_iter().zip(slots).enumerate()
         {
             let desired = (low != high).then_some((choice, low, high));
-            if tree.presented[index] == desired {
+            // Refresh visible handles when a shared model has finished loading.
+            let refresh_model = models_changed && desired.is_some();
+            if tree.presented[index] == desired && !refresh_model {
                 continue;
             }
             tree.presented[index] = desired;
