@@ -30,6 +30,7 @@ pub(super) fn generate(
     ocean: &[bool],
     output: &Path,
     surface_output: &Path,
+    lake_output: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let drainage = super::hydrology::route(heights, ocean);
     let outlets = &drainage.outlets;
@@ -168,6 +169,36 @@ pub(super) fn generate(
         banks += usize::from(encoded[cell] < old);
     }
     let diagonal_cuts = open_diagonal_channels(heights, encoded, land, outlets, area, &drainage.lakes);
+    // Lake surfaces are separate from the river ribbons: each depression
+    // uses its actual priority-flood spill level rather than global sea level.
+    // Do not carve these cells back to sea level; their terrain remains below
+    // the water surface until its natural outlet is reached.
+    let mut lakes = Vec::new();
+    let mut lake_cells = 0usize;
+    for (cell, &is_lake) in drainage.lakes.iter().enumerate() {
+        if !is_lake { continue; }
+        let (face, x, y) = decode_index(cell);
+        let last = (SIZE - 1) as f64;
+        let ux = x as f64;
+        let uy = y as f64;
+        let left = sphere_direction(face, ((ux - 0.5).max(0.0)) / last, uy / last);
+        let right = sphere_direction(face, ((ux + 0.5).min(last)) / last, uy / last);
+        let bottom = sphere_direction(face, ux / last, ((uy - 0.5).max(0.0)) / last);
+        let top = sphere_direction(face, ux / last, ((uy + 0.5).min(last)) / last);
+        let from = DVec3::from_array(left);
+        let to = DVec3::from_array(right);
+        let width = 0.5 * RADIUS * DVec3::from_array(bottom).angle_between(DVec3::from_array(top));
+        if width <= 0.0 || from.distance_squared(to) <= 1.0e-20 { continue; }
+        let elevation = drainage.spill[cell] + 0.10;
+        append_surface(&mut lakes, from, to, elevation, elevation, width, width);
+        lake_cells += 1;
+    }
+    let lake_bytes: Vec<_> = lakes.iter()
+        .flat_map(|p| p.to_array().into_iter().flat_map(f32::to_le_bytes))
+        .collect();
+    fs::write(lake_output, lake_bytes)?;
+    println!("Inland lake surface: {lake_cells} cells / {} triangles", lakes.len() / 3);
+
     println!(
         "River network: {sections} downstream reaches, {mouths} outlets, {seams} face crossings, {banks} tapered bank samples, {diagonal_cuts} diagonal channel cuts"
     );
