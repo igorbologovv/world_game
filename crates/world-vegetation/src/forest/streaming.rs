@@ -424,13 +424,10 @@ fn make_batch(
         .spawn(
             commands,
             (
-                MaterialMeshBundle {
-                    mesh: meshes.add(mesh),
-                    material: material.clone(),
-                    transform: Transform::from_translation(translation),
-                    visibility: Visibility::Hidden,
-                    ..default()
-                },
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(material.clone()),
+                Transform::from_translation(translation),
+                Visibility::Hidden,
                 bounds,
                 NotShadowCaster,
             ),
@@ -561,7 +558,7 @@ pub(super) fn stream(
     forest.request_meshes(eye, range, preload);
     let retired = forest.retiring.len().saturating_sub(RETIREMENTS_PER_FRAME);
     for tree in forest.retiring.drain(retired..) {
-        commands.entity(tree).despawn_recursive();
+        commands.entity(tree).despawn();
     }
 
     let retired_batches = forest
@@ -569,7 +566,7 @@ pub(super) fn stream(
         .len()
         .saturating_sub(MAX_BATCH_RETIREMENTS);
     for batch in forest.retiring_batches.drain(retired_batches..) {
-        commands.entity(batch).despawn_recursive();
+        commands.entity(batch).despawn();
     }
     let forest = &mut *forest;
     forest.stats = StreamStats {
@@ -732,7 +729,7 @@ mod tests {
                 let Fixture { state, retire } = &mut *fixture;
                 state.retire(&mut commands, retire);
                 for entity in retire.drain(..) {
-                    commands.entity(entity).despawn_recursive();
+                    commands.entity(entity).despawn();
                 }
             },
         );
