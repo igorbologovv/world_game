@@ -439,17 +439,18 @@ fn select_species(
 // coordinates at multi-million-meter radii, and no global vegetation map.
 fn forest_density(direction: DVec3, height: f64) -> f32 {
     let p = direction.normalize() * RADIUS;
-    // Kilometer-sized fields and glades cut broad, traversable open areas.
-    let region = forest_field(p / 78_000.0, 0xB1D2_8491);
-    let meadow = forest_field(p / 8_400.0, 0x9284_F505);
-    let stand = forest_field(p / 510.0, 0x61A7_96F4);
-    let open = forest_smoothstep(-0.12, 0.32, region)
-        * forest_smoothstep(-0.06, 0.29, meadow);
-    let clusters = forest_smoothstep(-0.35, 0.29, stand);
-    // Mountain peaks and high exposed slopes remain visibly open.
+    // Large woodland regions, smaller meadow clearings and local stands are
+    // sampled at physical distances, regardless of the planet's radius.
+    // Give climate-eligible land a *small* background of scattered trees:
+    // multiplying zero-valued masks previously created enormous dead zones.
+    let region = forest_field(p / 22_000.0, 0xB1D2_8491);
+    let meadow = forest_field(p / 3_800.0, 0x9284_F505);
+    let stand = forest_field(p / 620.0, 0x61A7_96F4);
+    let woodland = 0.15 + 0.85 * forest_smoothstep(-0.30, 0.25, region);
+    let clearing = 0.08 + 0.92 * forest_smoothstep(-0.36, 0.20, meadow);
+    let grove = 0.08 + 0.92 * forest_smoothstep(-0.42, 0.25, stand);
     let treeline = 1.0 - forest_smoothstep(1_500.0, 2_600.0, height);
-    // Keep most land naturally open; concentrated groves are still possible.
-    (open * (0.16 + clusters * 0.54) * treeline) as f32
+    (0.025 + 0.75 * woodland * clearing * grove) as f32 * treeline as f32
 }
 
 fn forest_smoothstep(a: f64, b: f64, x: f64) -> f64 {
@@ -1041,6 +1042,30 @@ mod tests {
         }
         assert!(open > 90, "missing wide open landscapes: {open}");
         assert!(forested > 10, "missing clusters of woodland: {forested}");
+    }
+
+    #[test]
+    fn climate_eligible_land_has_scattered_trees_between_groves() {
+        let up = DVec3::new(-0.97684968336687, 0.21339114535822, 0.01512994344821)
+            .normalize();
+        let east = up.cross(DVec3::Y).normalize();
+        let north = east.cross(up).normalize();
+        let mut low = 0.0_f32;
+        let mut high = 0.0_f32;
+        for x in -12..=12 {
+            for z in -12..=12 {
+                let direction = (up
+                    + east * (f64::from(x) * 400.0 / RADIUS)
+                    + north * (f64::from(z) * 400.0 / RADIUS))
+                    .normalize();
+                let density = forest_density(direction, 100.0);
+                assert!(density >= 0.025 - f32::EPSILON && density <= 0.775);
+                low = low.min(density);
+                high = high.max(density);
+            }
+        }
+        assert!(high > 0.20, "no woodland stands around the coast");
+        assert!(high - low > 0.14, "density must vary across the landscape");
     }
 
     #[test]
