@@ -72,6 +72,7 @@ impl View {
         let (focal, orthographic) = match projection {
             Projection::Perspective(view) => (height / (2.0 * (view.fov * 0.5).tan()), false),
             Projection::Orthographic(view) => (height / view.area.height().max(0.01), true),
+            Projection::Custom(_) => (height, false),
         };
         Self {
             focal,
