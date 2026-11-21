@@ -29,6 +29,7 @@ def args():
     p.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--list", action="store_true", help="Inspect actual imported object names; never export")
+    p.add_argument("--water-report", action="store_true", help="Inspect pond/water source materials and their textures")
     p.add_argument("--roots", nargs="+", help="Explicit root names to export (as printed by --list)")
     p.add_argument("--lod-ratios", type=float, nargs=3, default=(1.0, 0.45, 0.18))
     return p.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
@@ -117,6 +118,30 @@ def export_one(name, output, ratios):
     return {"source_root": name, "asset_dir": str(destination.relative_to(ROOT)), "height_m": high.y-low.y, "lods": len(ratios)}
 
 
+
+def water_report():
+    report = []
+    for mat in bpy.data.materials:
+        if not re.search(r"(water|pond|lake|river|liquid)", mat.name, re.I):
+            continue
+        nodes = mat.node_tree.nodes if mat.use_nodes and mat.node_tree else []
+        textures = []
+        for node in nodes:
+            if node.type == "TEX_IMAGE" and node.image:
+                textures.append({
+                    "image": node.image.name,
+                    "source": node.image.source,
+                    "path": bpy.path.abspath(node.image.filepath),
+                    "size": list(node.image.size),
+                })
+        report.append({
+            "material": mat.name,
+            "blend_method": str(getattr(mat, "surface_render_method", "unknown")),
+            "textures": textures,
+            "note": "Static glTF material data is not a dynamic river shader.",
+        })
+    return report
+
 def main():
     options = args()
     if not options.source.exists():
@@ -124,6 +149,9 @@ def main():
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     bpy.ops.import_scene.gltf(filepath=str(options.source))
+    if options.water_report:
+        print(json.dumps({"water_materials": water_report()}, indent=2))
+        return
     if options.list or not options.roots:
         print(json.dumps(inspect(), indent=2))
         if not options.list:
