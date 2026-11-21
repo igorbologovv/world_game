@@ -9,6 +9,7 @@ mod placement;
 mod proxy;
 mod streaming;
 mod textures;
+mod woodland;
 
 use bevy::{
     math::DVec3,
@@ -124,6 +125,7 @@ impl ModelLod {
 
 struct VariantModels {
     lods: Vec<ModelLod>,
+    bark: Option<Handle<StandardMaterial>>,
 }
 
 #[derive(Resource)]
@@ -148,10 +150,8 @@ impl ForestModels {
                 .expect("hero models stay resident after loading");
             return (&hero.lods[level], &hero.bark);
         }
-        (
-            &self.variants[species as usize][variant].lods[level],
-            &self.bark_material,
-        )
+        let model = &self.variants[species as usize][variant];
+        (&model.lods[level], model.bark.as_ref().unwrap_or(&self.bark_material))
     }
 }
 
@@ -209,6 +209,7 @@ impl Plugin for ProceduralForestPlugin {
             (
                 build_models,
                 hero_oak::request_assets,
+                woodland::request_assets,
                 ground_cover::build_material,
                 debug::spawn,
             ),
@@ -216,7 +217,7 @@ impl Plugin for ProceduralForestPlugin {
         .add_systems(Update, ground_cover::stream.after(WorldMovement))
         .add_systems(
             Update,
-            (hero_oak::finish_loading, streaming::stream)
+            (hero_oak::finish_loading, woodland::finish_loading, streaming::stream)
                 .chain()
                 .after(WorldMovement),
         )
@@ -259,7 +260,7 @@ fn build_models(
                     &mut meshes,
                 ));
             }
-            species_variants.push(VariantModels { lods });
+            species_variants.push(VariantModels { lods, bark: None });
         }
         variants.push(species_variants);
     }
