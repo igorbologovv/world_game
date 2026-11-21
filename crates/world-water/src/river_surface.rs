@@ -43,15 +43,15 @@ pub(super) struct RiverMapLines;
 pub(super) struct RiverCenterlines(Vec<[Vec3; 2]>);
 
 pub(super) fn load(assets: &Path) -> Option<(Mesh, RiverCenterlines)> {
-    load_mesh(assets.join(RIVER_SURFACE_PATH))
+    load_mesh(assets.join(RIVER_SURFACE_PATH), RIVER_REACH_VERTICES)
 }
 
 /// Lake surfaces share the river water material but have zero flow velocity.
 pub(super) fn load_lakes(assets: &Path) -> Option<Mesh> {
-    load_mesh(assets.join(LAKE_SURFACE_PATH)).map(|(mesh, _)| mesh)
+    load_mesh(assets.join(LAKE_SURFACE_PATH), 6).map(|(mesh, _)| mesh)
 }
 
-fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
+fn load_mesh(path: std::path::PathBuf, record_vertices: usize) -> Option<(Mesh, RiverCenterlines)> {
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -62,7 +62,7 @@ fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
     if bytes.is_empty() {
         return None;
     }
-    if bytes.len() % (12 * RIVER_REACH_VERTICES) != 0 {
+    if bytes.len() % (12 * record_vertices) != 0 {
         warn!("Invalid river surface geometry in {}", path.display());
         return None;
     }
@@ -83,6 +83,14 @@ fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
+    if record_vertices == 6 {
+        // Lake triangles use the same shader, but have no directional flow.
+        let count = positions.len();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; count]);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0, 0.0, 0.0, 1.0]; count]);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        return Some((mesh, RiverCenterlines(Vec::new())));
+    }
     let centerlines: Vec<[Vec3; 2]> = positions
         .chunks_exact(RIVER_REACH_VERTICES)
         .map(|reach| {
