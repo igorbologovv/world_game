@@ -3,11 +3,7 @@ use std::{fs, path::Path};
 use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
-    reflect::TypePath,
-    render::{
-        render_asset::RenderAssetUsages,
-        render_resource::{AsBindGroup, PrimitiveTopology},
-    },
+    render::{render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
 };
 
 use world_core::{
@@ -20,23 +16,6 @@ use world_core::{
 
 #[derive(Component)]
 pub(super) struct RiverWater;
-
-// Bevy's view globals supply animation time directly; no per-frame CPU updates.
-#[derive(Asset, AsBindGroup, TypePath, Clone)]
-pub(super) struct RiverMaterial {
-    #[uniform(0)]
-    pub(super) brightness: f32,
-}
-
-impl Material for RiverMaterial {
-    fn vertex_shader() -> bevy::render::render_resource::ShaderRef {
-        "shaders/river_water.wgsl".into()
-    }
-
-    fn fragment_shader() -> bevy::render::render_resource::ShaderRef {
-        "shaders/river_water.wgsl".into()
-    }
-}
 
 #[derive(Default, Reflect, GizmoConfigGroup)]
 pub(super) struct RiverMapLines;
@@ -59,7 +38,11 @@ pub(super) fn load_lakes(assets: &Path) -> Option<Mesh> {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; count]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0, 0.0, 0.0, 1.0]; count]);
+    let normals: Vec<[f32; 3]> = positions.iter()
+        .map(|point| Vec3::from_array(*point).normalize().to_array())
+        .collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     Some(mesh)
 }
 
@@ -150,7 +133,11 @@ fn river_mesh(positions: Vec<[f32; 3]>) -> (Mesh, RiverCenterlines) {
             flow_velocities.push([velocity.x, velocity.y, velocity.z, 1.0]);
         }
     }
+    let normals: Vec<[f32; 3]> = positions.iter()
+        .map(|point| Vec3::from_array(*point).normalize().to_array())
+        .collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, flow_velocities);
     (mesh, RiverCenterlines(centerlines))
