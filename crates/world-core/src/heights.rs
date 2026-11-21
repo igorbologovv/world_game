@@ -6,6 +6,7 @@ use bevy_math::{DVec2, DVec3};
 use crate::{
     coordinates::{height_source_uv, surface_uv},
     planet::{decode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, RIVER_ATLAS_PATH},
+    terrain_detail,
 };
 
 type HeightFace = image::ImageBuffer<image::Luma<u16>, Vec<u16>>;
@@ -53,6 +54,19 @@ impl SurfaceHeights {
 
     /// Sample elevation in meters above the reference sphere along a radial direction.
     pub fn sample(&self, direction: DVec3) -> Option<f64> {
+        let base = self.sample_base(direction)?;
+        // Tiny test heightmaps exercise the legacy decoder independently of
+        // the 1024² production planet. Real worlds add procedural micro-relief.
+        if self.faces.as_ref()?.first()?.width() != HEIGHT_MAP_SIZE {
+            return Some(base);
+        }
+        let river = self.river_coverage(direction);
+        Some(base + terrain_detail::detail(direction, base, river))
+    }
+
+    /// Interpolate only the pre-baked global terrain, without procedural detail.
+    /// Hydrology still uses these values until the regional water rebuild.
+    pub fn sample_base(&self, direction: DVec3) -> Option<f64> {
         if direction == DVec3::ZERO || !direction.is_finite() {
             return None;
         }
@@ -72,10 +86,11 @@ impl SurfaceHeights {
         (image.dimensions() == (side, side)).then_some(image.as_raw().as_slice())
     }
 
-    /// Query river coverage at a terrain-aligned radial direction.
-    pub fn is_river(&self, direction: DVec3) -> bool {
+    /// Bilinearly sampled legacy river mask, in 0..=255 coverage units.
+    /// This can smoothly suppress additional terrain detail near baked channels.
+    pub fn river_coverage(&self, direction: DVec3) -> f64 {
         if direction == DVec3::ZERO || !direction.is_finite() {
-            return false;
+            return 0.0;
         }
         let Some(map) = &self.rivers else {
             return false;
@@ -85,10 +100,14 @@ impl SurfaceHeights {
         let side = map.width() / 3;
         let x_offset = (face as u32 % 3) * side;
         let y_offset = (face as u32 / 3) * side;
-        let coverage = bilinear(uv, side, side, |x, y| {
+        bilinear(uv, side, side, |x, y| {
             f64::from(map.get_pixel(x + x_offset, y + y_offset).0[0])
-        });
-        coverage >= 156.0
+        })
+    }
+
+    /// Query river coverage at a terrain-aligned radial direction.
+    pub fn is_river(&self, direction: DVec3) -> bool {
+        self.river_coverage(direction) >= 156.0
     }
 }
 
