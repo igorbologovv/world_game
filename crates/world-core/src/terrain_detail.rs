@@ -63,9 +63,9 @@ fn value_noise(p: DVec3, seed: u64) -> f64 {
     for dz in 0..=1 {
         for dy in 0..=1 {
             for dx in 0..=1 {
-                let weight = if dx == 0 { 1.0 - t.x } else { t.x }
-                    * if dy == 0 { 1.0 - t.y } else { t.y }
-                    * if dz == 0 { 1.0 - t.z } else { t.z };
+                let weight = (if dx == 0 { 1.0 - t.x } else { t.x })
+                    * (if dy == 0 { 1.0 - t.y } else { t.y })
+                    * (if dz == 0 { 1.0 - t.z } else { t.z });
                 sum += weight * lattice_hash(x + dx, y + dy, z + dz, seed);
             }
         }
