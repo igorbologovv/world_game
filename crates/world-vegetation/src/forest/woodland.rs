@@ -7,10 +7,11 @@
 
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
-    gltf::{Gltf, GltfMesh},
+    gltf::{Gltf, GltfMesh, GltfMaterial},
+    pbr::gltf::standard_material_from_gltf_material,
     render::alpha::AlphaMode,
     prelude::*,
-    render::mesh::VertexAttributeValues,
+    mesh::VertexAttributeValues,
 };
 
 use world_core::runtime::WorldAssets;
@@ -62,6 +63,7 @@ pub(super) fn finish_loading(
     mut models: ResMut<ForestModels>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    gltf_materials: Res<Assets<GltfMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -74,7 +76,7 @@ pub(super) fn finish_loading(
             matches!(asset_server.load_state(file.id()), LoadState::Failed(_))
                 || matches!(
                     asset_server.get_recursive_dependency_load_state(file.id()),
-                    Some(RecursiveDependencyLoadState::Failed)
+                    Some(RecursiveDependencyLoadState::Failed(_))
                 )
         });
         if failed {
@@ -87,7 +89,7 @@ pub(super) fn finish_loading(
             continue;
         }
 
-        let converted = build_variant(lods, &gltfs, &gltf_meshes, &mut meshes,
+        let converted = build_variant(lods, &gltfs, &gltf_meshes, &gltf_materials, &mut meshes,
                                       &mut images, &mut materials, &mut foliage);
         if let Some(variant_models) = converted {
             models.variants[Species::Oak as usize][*variant] = variant_models;
@@ -103,6 +105,7 @@ fn build_variant(
     files: &[Handle<Gltf>; LODS],
     gltfs: &Assets<Gltf>,
     gltf_meshes: &Assets<GltfMesh>,
+    gltf_materials: &Assets<GltfMaterial>,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<StandardMaterial>,
@@ -125,10 +128,10 @@ fn build_variant(
         let (wood, source_bark) = find_part("Bark")?;
         let (leaves, source_leaves) = find_part("Leaves")?;
         if level == 0 {
-            let original_bark = materials.get(&source_bark)?.clone();
+            let original_bark = standard_material_from_gltf_material(gltf_materials.get(&source_bark)?);
             bark_material = Some(materials.add(original_bark));
         }
-        let source_leaf_material = materials.get(&source_leaves)?.clone();
+        let source_leaf_material = standard_material_from_gltf_material(gltf_materials.get(&source_leaves)?);
         let source_leaf_image = source_leaf_material.base_color_texture.as_ref()?;
         let image = textures::import_mipmapped(images, source_leaf_image, Some(ALPHA_CUTOFF), false);
         let leaf_material = foliage.add(FoliageMaterial {
