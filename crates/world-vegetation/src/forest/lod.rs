@@ -214,7 +214,7 @@ pub(super) struct BarkFade {
 
 impl MaterialExtension for BarkFade {
     fn fragment_shader() -> ShaderRef {
-        "shaders/vegetation_fade.wgsl".into()
+        "shaders/vegetation_fade.wesl".into()
     }
 }
 
