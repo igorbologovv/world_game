@@ -1,3 +1,11 @@
+## Runtime GPU validation — 21 November 2026
+
+On RADV RX 6750 XT, `cargo run -p world-client` starts successfully and runs at ~219 FPS, but only sky/background and UI render. The runtime reports `expected global item ... found '#'` in water and terrain/vegetation shader modules: the project still contained naga_oil `#import` directives. The log also reports `No standalone woodland tree prefabs found` (independent missing game assets).
+
+The migration branch now contains nine `.wesl` versions of its custom shaders and all `Material::vertex_shader()/fragment_shader()` paths point to `.wesl`. Changes include WESL `import`, `@if`, new Bevy PBR `bevy_pbr::render::*` shader packages, `constants::MATERIAL_BIND_GROUP`, decompressed Bevy 0.20 mesh vertex input, updated PBR alpha-discard call signatures, and `view.world_position.xyz`. Old `.wgsl` files are retained as an unreferenced baseline until runtime shaders are verified.
+
+**Not yet validated:** WESL import resolution, shader pipeline compilation, PBR lighting or visible spherical terrain. `cargo check` does not validate runtime shaders. Re-run the game on the GPU, capture ALL shader errors (not only `#import`) and inspect water, terrain, forest. Do not call the migration complete just because the app starts.
+
 # Миграция на Bevy 0.20 — статус
 
 **Статус: WIP / не компилируется гарантированно.** Рабочая игра остается в `feature/pond-depth-waves`. Эта ветка создана для поэтапной миграции, НЕ для слияния в production.
