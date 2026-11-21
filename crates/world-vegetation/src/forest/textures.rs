@@ -1,10 +1,10 @@
 use bevy::{
     prelude::*,
+    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     asset::RenderAssetUsages,
     render::{
 
         render_resource::{Extent3d, TextureDimension, TextureFormat},
-        texture::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     },
 };
 
