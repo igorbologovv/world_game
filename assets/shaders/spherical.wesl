@@ -124,11 +124,12 @@ fn biome_surface(
         * (1.0 - savanna)
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
-    // Warm grassland carries a thinner canopy than wet or temperate woods.
+    // A forest biome is defined by climate, independent of whether individual
+    // trees are spawned or how steep a particular slope happens to be.
+    // Actual tree placement has its own density, treeline and slope tests.
     let forest = max(max(rainforest, temperate_forest), max(boreal_forest, savanna * 0.48));
-    let tree_limit = smoothstep(3.5, 12.0, height)
-        * (1.0 - smoothstep(0.36, 0.58, slope))
-        * (1.0 - smoothstep(0.93, 0.96, latitude));
+    let alpine = 1.0 - smoothstep(1750.0, 2900.0, height);
+    let forest_landcover = forest * alpine * (1.0 - snow);
     var canopy = mix(vec3<f32>(0.063, 0.119, 0.035), vec3<f32>(0.039, 0.095, 0.043), boreal_forest);
     canopy = mix(canopy, vec3<f32>(0.033, 0.112, 0.036), rainforest);
     canopy = mix(canopy, vec3<f32>(0.104, 0.143, 0.049), savanna);
@@ -151,7 +152,7 @@ fn biome_surface(
             snow,
         ),
         foliage,
-        forest * tree_limit * (1.0 - snow),
+        forest_landcover,
         canopy,
     );
 }
@@ -382,54 +383,51 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
-    // Climate sets the broad landcover palette. A wooded valley should read
-    // as one coherent forest biome, not as bare grass with dark circles only
-    // where individual tree candidates happened to spawn.
-    //
-    // CPU woodland density (UV_0) still supplies gentle intra-biome variation,
-    // but no longer acts as an all-or-nothing mask for the ground color.
-    let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
-    let landcover_fade = smoothstep(350.0, 1450.0, distance_to_eye);
-    let density = mix(input.uv.x, input.uv.y, smoothstep(65.0, 360.0, footprint));
+    // Forest is a continuous *biome*, not a silhouette-density mask.
+    // The ground throughout the same wooded valley keeps one forest-floor
+    // palette even where individual trees have been streamed out or where
+    // local placement happens to be sparse. Climate drives this factor;
+    // tree density does not enter terrain shading.
     let vegetation = clamp(weights[1] + weights[2], 0.0, 1.0);
-    let forest_biome = smoothstep(0.16, 0.55, biome.forest_cover);
-    let forest_cover = forest_biome * vegetation * landcover_fade;
+    let forest_biome = smoothstep(0.18, 0.68, biome.forest_cover);
+    let forest_ground = forest_biome * vegetation;
 
-    // Keep the same forest-floor/canopy color across contiguous wooded
-    // terrain. Broad daylight and terrain normals supply the main shading;
-    // small color fluctuations keep it from looking like a flat paint fill.
-    let soft_variation = clamp(
-        0.97 + 0.10 * regional + 0.06 * patches
-            + 0.06 * smoothstep(0.035, 0.36, density),
-        0.90, 1.10,
+    // Keep triplanar PBR texture and real lighting. Only very broad, muted
+    // color modulation is applied; fine changes come from PBR normals,
+    // sun direction and the actual geometry, not per-tree dark patches.
+    let forest_color_variation = clamp(
+        1.0 + 0.08 * regional + 0.045 * patches,
+        0.92, 1.08,
     );
-    let forest_color = biome.canopy_tint * (1.58 * soft_variation);
-    let forest_blend = forest_cover * 0.81;
-    surface.color = mix(surface.color, forest_color, forest_blend);
-    surface.roughness = mix(surface.roughness, 0.92, forest_blend);
+    let forest_floor_color = biome.canopy_tint * (1.72 * forest_color_variation);
+    surface.color = mix(
+        surface.color,
+        forest_floor_color,
+        forest_ground * 0.79,
+    );
+    surface.roughness = mix(surface.roughness, 0.92, forest_ground * 0.63);
 
-    // Outside wooded climates keep meadows and exposed soil visibly distinct
-    // but subtle. No scatter of dark tree-sized stains across the slopes.
+    // Non-forest biomes keep their own broad meadow/soil colors. Preserve
+    // snow, beach sand and rock material weights as authored above.
     let meadow = smoothstep(-0.19, 0.18, patches + 0.30 * regional);
     let clearing_color = mix(
-        vec3<f32>(0.86, 0.83, 0.74),
-        vec3<f32>(1.10, 1.06, 0.93),
+        vec3<f32>(0.87, 0.84, 0.78),
+        vec3<f32>(1.09, 1.05, 0.95),
         meadow,
     );
-    let clearing_strength = vegetation * (1.0 - forest_biome)
-        * landcover_fade * 0.30;
+    let clearing_strength = vegetation * (1.0 - forest_biome) * 0.22;
     surface.color *= mix(vec3<f32>(1.0), clearing_color, clearing_strength);
 
-    // Keep exposed rock on genuinely steep/high slopes, even inside a
-    // forest biome, using the existing rough PBR rock atlas.
-    let outcrop = smoothstep(0.24, 0.56, slope + patches * 0.12)
+    // Steep mineral outcrops are real rock, even inside a forest region.
+    // Reuse the rock mip already resident on GPU, without new textures.
+    let outcrop = smoothstep(0.27, 0.62, slope + patches * 0.12)
         * smoothstep(140.0, 780.0, height)
-        * (1.0 - weights[4]) * landcover_fade;
+        * (1.0 - weights[4]);
     let rock_average = textureLoad(
         terrain_albedo, vec2<i32>(0), 3,
         i32(textureNumLevels(terrain_albedo)) - 1,
     ).rgb;
-    surface.color = mix(surface.color, rock_average, outcrop * 0.28);
+    surface.color = mix(surface.color, rock_average, outcrop * 0.26);
 
     var shaded_normal = surface_normal;
     if normal_detail > 0.0 {
