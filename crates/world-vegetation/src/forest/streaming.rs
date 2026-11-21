@@ -716,22 +716,35 @@ pub(super) fn stream(
             forest.stats.parents += 1;
         }
     }
-    // One compact status line every five seconds while no tree batches exist.
-    // This distinguishes stream discovery, asset loading and actual rendering.
+    // Diagnose all stages of tree streaming, not only the empty-batch case:
+    // a resident batch can still be invisible due to its material or culling.
     let now = time.elapsed_secs_f64();
-    if now >= forest.next_debug_log && forest.stats.parents == 0
-        && forest.stats.impostors == 0 && forest.stats.trees == 0
-    {
+    if now >= forest.next_debug_log {
         forest.next_debug_log = now + 5.0;
+        let (sampled, placements) = forest
+            .nodes
+            .values()
+            .flat_map(|node| &node.leaves)
+            .fold((0_usize, 0_usize), |(sampled, placements), leaf| {
+                match leaf.sites.as_ref() {
+                    Some(sites) => (sampled + 1, placements + sites.len()),
+                    None => (sampled, placements),
+                }
+            });
+        let altitude = eye.length() - RADIUS - heights.sample(up).unwrap_or(0.0);
         info!(
-            "Forest awaiting content: nodes={} unsampled={} jobs={} atlas_ready={} atlas_baking={} hero_pending={} eye_radius={:.1}m",
+            "Forest stream: nodes={} sampled_patches={} tree_sites={} parents={} impostors={} detail_entities={} jobs={} atlas={} atlas_baking={} hero_pending={} altitude={:.1}m",
             forest.stats.nodes,
-            forest.stats.unsampled,
+            sampled,
+            placements,
+            forest.stats.parents,
+            forest.stats.impostors,
+            forest.stats.trees,
             forest.stats.jobs,
             forest.atlas.is_some(),
             forest.atlas_task.is_some(),
             hero_loading.is_pending(),
-            eye.length(),
+            altitude,
         );
     }
 }
