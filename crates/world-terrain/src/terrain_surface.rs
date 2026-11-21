@@ -304,7 +304,7 @@ fn ground_normal(up: DVec3, height: f64, heights: &SurfaceHeights) -> DVec3 {
 }
 
 pub(super) fn atmosphere(
-    mut cameras: Query<(Entity, GridTransform, &mut Camera3d, &mut DistanceFog), With<WorldCamera>>,
+    mut cameras: Query<(Entity, GridTransform, &mut Camera, &mut DistanceFog), With<WorldCamera>>,
     frames: ReferenceFrames,
 ) {
     let Ok((entity, transform, mut camera, mut fog)) = cameras.single_mut() else {
