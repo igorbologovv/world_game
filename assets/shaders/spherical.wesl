@@ -73,10 +73,8 @@ fn biome_surface(
     let latitude = abs(direction.y);
     let weather = macro_noise(direction * 5.8 + vec3<f32>(17.3, -4.7, 11.8));
     let rainfall_patches = macro_noise(direction * 17.0 + vec3<f32>(-2.1, 9.4, 4.6));
-    let moisture = clamp(
-        0.50 + 0.96 * weather + 0.32 * rainfall_patches + 0.13 * variation,
-        0.0, 1.0,
-    );
+    let tree_moisture = 0.50 + 0.96 * weather + 0.32 * rainfall_patches;
+    let moisture = clamp(tree_moisture + 0.13 * variation, 0.0, 1.0);
     let temperature = clamp(
         1.07 - 0.78 * latitude - max(height, 0.0) / 16000.0
             + 0.13 * macro_noise(direction * 4.1 + vec3<f32>(3.2, 18.6, -8.4)),
@@ -109,25 +107,27 @@ fn biome_surface(
 
     // Smooth, overlapping climate zones: tropical rainforest, temperate
     // forest, savanna, steppe, temperate grassland and polar tundra.
-    let rainforest = smoothstep(0.68, 0.88, temperature)
-        * smoothstep(0.47, 0.76, moisture);
-    let temperate_forest = smoothstep(0.29, 0.49, temperature)
-        * (1.0 - smoothstep(0.70, 0.90, temperature))
-        * smoothstep(0.44, 0.73, moisture);
-    let boreal_forest = smoothstep(0.13, 0.25, temperature)
-        * (1.0 - smoothstep(0.44, 0.51, temperature))
-        * smoothstep(0.265, 0.47, moisture);
-    let savanna = smoothstep(0.68, 0.86, temperature)
-        * smoothstep(0.18, 0.37, moisture)
-        * (1.0 - smoothstep(0.49, 0.70, moisture));
+    // Feather the tree placement climate thresholds for aggregate canopy.
+    // Local ground variation still affects the soil and grass mixture.
+    let rainforest = smoothstep(0.65, 0.72, temperature)
+        * smoothstep(0.45, 0.54, tree_moisture);
+    let temperate_forest = smoothstep(0.26, 0.33, temperature)
+        * (1.0 - smoothstep(0.64, 0.72, temperature))
+        * smoothstep(0.38, 0.45, tree_moisture);
+    let boreal_forest = smoothstep(0.12, 0.16, temperature)
+        * (1.0 - smoothstep(0.43, 0.49, temperature))
+        * smoothstep(0.25, 0.34, tree_moisture);
+    let savanna = smoothstep(0.63, 0.72, temperature)
+        * smoothstep(0.17, 0.24, tree_moisture)
+        * (1.0 - smoothstep(0.55, 0.65, tree_moisture));
     let steppe = (1.0 - smoothstep(0.22, 0.54, moisture))
         * (1.0 - savanna)
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
-    let forest = max(max(rainforest, temperate_forest), max(boreal_forest, savanna * 0.29));
-    let tree_limit = smoothstep(3.5, 35.0, height)
-        * (1.0 - smoothstep(2200.0, 2600.0, height))
-        * (1.0 - smoothstep(0.38, 0.63, slope))
+    // Warm grassland carries a thinner canopy than wet or temperate woods.
+    let forest = max(max(rainforest, temperate_forest), max(boreal_forest, savanna * 0.48));
+    let tree_limit = smoothstep(3.5, 12.0, height)
+        * (1.0 - smoothstep(0.36, 0.58, slope))
         * (1.0 - smoothstep(0.93, 0.96, latitude));
     var canopy = mix(vec3<f32>(0.063, 0.119, 0.035), vec3<f32>(0.039, 0.095, 0.043), boreal_forest);
     canopy = mix(canopy, vec3<f32>(0.033, 0.112, 0.036), rainforest);
@@ -151,20 +151,9 @@ fn biome_surface(
             snow,
         ),
         foliage,
-        forest * tree_limit,
+        forest * tree_limit * (1.0 - snow),
         canopy,
     );
-}
-
-fn forest_canopy(surface: vec3<f32>, footprint: f32, tint: vec3<f32>) -> vec4<f32> {
-    // Forest stands use the layout noise that guides individual tree placement.
-    let grove = filtered_noise(surface / 260.0 + vec3<f32>(7.4, -12.8, 3.7),
-        1.0 - smoothstep(85.0, 380.0, footprint));
-    let crown_position = surface / 22.0;
-    let crowns = filtered_noise(crown_position, 1.0 - smoothstep(2.5, 22.0, footprint));
-    let density = smoothstep(-0.29, 0.23, grove + crowns * 0.22);
-    let sunlit_crowns = 0.89 + 0.29 * grove + 0.85 * crowns;
-    return vec4<f32>(tint * sunlit_crowns, mix(0.53, 1.0, density));
 }
 
 struct Projection {
@@ -359,11 +348,6 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     }
 
     var occlusion = 1.0;
-    // Vegetation is streamed as real trees using a sparse world-space
-    // distribution. The old shader-painted canopy ignored that distribution
-    // and turned distant meadows and deserts into a uniform green carpet.
-    // Until GPU biome coverage shares the exact CPU mask, keep bare ground
-    // visible between authored and generated tree stands.
 
     if ground_detail > 0.0 {
         // A second, tighter sample gives dirt, stones and grass their own
@@ -397,6 +381,16 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     if detail_enabled != 0u && fine_detail > 0.0 {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
+
+    // The terrain mesh carries the CPU woodland fields. Average out local
+    // groves when they are unresolved, and let the impostor fade overlap the
+    // terrain tint (the default batch fades between 1.66 and 2.1 km).
+    let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
+    let canopy_fade = smoothstep(1200.0, 2750.0, distance_to_eye);
+    let density = mix(input.uv.x, input.uv.y, smoothstep(75.0, 420.0, footprint));
+    let canopy = smoothstep(0.043, 0.19, density) * biome.forest_cover * canopy_fade;
+    surface.color = mix(surface.color, biome.canopy_tint, canopy);
+    surface.roughness = mix(surface.roughness, 0.91, canopy);
 
     var shaded_normal = surface_normal;
     if normal_detail > 0.0 {

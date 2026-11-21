@@ -93,7 +93,12 @@ fn spawn(
         (
             Camera3d::default(),
             // Physical sky, aerial perspective and sky-derived image-based lighting.
-            AtmosphereSettings::default(),
+            AtmosphereSettings {
+                // Keep the physical aerial perspective over Mars-scale flight
+                // distances. The LUT uses its existing resolution and pass.
+                aerial_view_lut_max_distance: 160_000.0,
+                ..default()
+            },
             AtmosphereEnvironmentMapLight {
                 // The cubemap supplies ambient/reflection lighting. The sky
                 // itself still uses the full atmosphere lookup textures.

@@ -12,6 +12,7 @@ use bevy::{
 };
 use world_core::{
     coordinates::cube_direction,
+    forest::forest_density_bands,
     planet::RADIUS,
     runtime::{GridTransform, PlanetRoot, ReferenceFrames, WorldCamera},
     SurfaceHeights,
@@ -370,6 +371,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     let mut positions = Vec::with_capacity(stride * stride + 4 * GRID);
     let mut normals = Vec::with_capacity(positions.capacity());
     let mut locations = Vec::with_capacity(positions.capacity());
+    let mut canopy = Vec::with_capacity(positions.capacity());
     let mut indices = Vec::with_capacity((GRID * GRID + 4 * GRID) * 6);
     let spacing = RADIUS * tile.unit() / GRID as f64;
     let normal_step = spacing.max(8.0);
@@ -381,6 +383,15 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
             positions.push((position - anchor).as_vec3().to_array());
             let planet = position.as_vec3();
             locations.push([planet.x, planet.y, planet.z, height as f32]);
+            let density = if (3.5..2_600.0).contains(&height) && up.y.abs() < 0.96 {
+                // Feather the edge of the baked river exclusion around the
+                // same threshold that rejects tree sites.
+                let dry = ((175.0 - heights.river_coverage(up)) / 50.0).clamp(0.0, 1.0) as f32;
+                forest_density_bands(up, height).map(|band| dry * band)
+            } else {
+                [0.0; 2]
+            };
+            canopy.push(density);
         }
     }
 
@@ -430,6 +441,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
         positions.push((lowered - anchor).as_vec3().to_array());
         normals.push(normals[a]);
         locations.push(locations[a]);
+        canopy.push(canopy[a]);
         let a = a as u16;
         indices.extend_from_slice(&[a, b, low_b, a, low_b, low_a, a, low_b, b, a, low_a, low_b]);
     }
@@ -442,6 +454,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     // Preserve a planet-local position across floating-origin shifts.
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, locations);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, canopy);
     mesh.insert_indices(Indices::U16(indices));
     mesh
 }

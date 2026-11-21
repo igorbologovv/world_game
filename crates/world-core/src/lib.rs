@@ -2,6 +2,7 @@
 //! Shared planetary data and optional Bevy client contracts.
 
 pub mod coordinates;
+pub mod forest;
 pub mod planet;
 
 mod heights;
