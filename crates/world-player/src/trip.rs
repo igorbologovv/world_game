@@ -89,7 +89,7 @@ fn speed_button(
     adjustment: isize,
 ) {
     builder.spawn((
-        Button,
+        Button::default(),
         Node {
             width: Val::Px(36.0),
             height: Val::Px(32.0),
@@ -141,7 +141,8 @@ pub(super) fn update(
     mut speed_text: Query<&mut Text, (With<SpeedReadout>, Without<TripReadout>)>,
 ) {
     let meters_per_second = speed.meters_per_second();
-    let trip = match player.single().trip() {
+    let Ok(player) = player.single() else { return; };
+    let trip = match player.trip() {
         Some((distance, blocked, pace)) => {
             let remaining = if distance >= 1000.0 {
                 format!("{:.1} km remaining", distance / 1000.0)
@@ -150,7 +151,7 @@ pub(super) fn update(
             };
             let status = if blocked {
                 "Route blocked. Press F to fly".to_string()
-            } else if camera.single().enabled {
+            } else if camera.single().is_ok_and(|camera| camera.enabled) {
                 "Trip paused".to_string()
             } else {
                 format!("ETA ~{}", format_eta(distance / (meters_per_second * pace)))
@@ -159,13 +160,14 @@ pub(super) fn update(
         }
         None => "No destination".to_string(),
     };
-    let mut trip_text = trip_text.single_mut();
+    let Ok(mut trip_text) = trip_text.single_mut() else { return; };
     if trip_text.0 != trip {
         trip_text.0 = trip;
     }
     if speed.is_changed() {
-        speed_text.single_mut().0 =
-            format!("{}× · {:.1} m/s", MULTIPLIERS[speed.0], meters_per_second);
+        if let Ok(mut text) = speed_text.single_mut() {
+            text.0 = format!("{}× · {:.1} m/s", MULTIPLIERS[speed.0], meters_per_second);
+        }
     }
 }
 
