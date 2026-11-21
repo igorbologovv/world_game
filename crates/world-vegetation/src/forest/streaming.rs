@@ -128,6 +128,16 @@ pub(super) struct StreamStats {
 }
 
 impl ForestStream {
+    pub fn sites(&self, key: PatchKey) -> Option<&[Site]> {
+        self.nodes
+            .get(&key.parent())?
+            .leaves
+            .iter()
+            .find(|leaf| leaf.key == key)?
+            .sites
+            .as_deref()
+    }
+
     pub fn coverage(&self, patch: PatchKey) -> (f32, f32) {
         self.mask.get(&patch).copied().unwrap_or_default()
     }

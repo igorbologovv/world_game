@@ -1,5 +1,6 @@
 //! Shared vegetation models, material integration, and biome placement rules.
 mod debug;
+mod fern;
 mod ground_cover;
 mod hero_oak;
 mod impostor;
@@ -24,6 +25,7 @@ use bevy::{
 };
 use world_core::{planet::RADIUS, runtime::WorldMovement, SurfaceHeights};
 
+pub use fern::FernSettings;
 pub use lod::VegetationSettings;
 
 const VARIANTS: usize = 3;
@@ -178,6 +180,7 @@ impl Plugin for ProceduralForestPlugin {
                 ..default()
             },
         ))
+        .add_plugins(fern::FernPlugin)
         .init_resource::<VegetationSettings>()
         .init_resource::<streaming::ForestStream>()
         .init_resource::<lod::FadeMaterials>()
@@ -195,10 +198,11 @@ impl Plugin for ProceduralForestPlugin {
         .add_systems(Update, ground_cover::stream.after(WorldMovement))
         .add_systems(
             Update,
-            (hero_oak::finish_loading, streaming::stream, debug::update)
+            (hero_oak::finish_loading, streaming::stream)
                 .chain()
                 .after(WorldMovement),
         )
+        .add_systems(Update, debug::update.after(fern::FernStreaming))
         .add_systems(
             PostUpdate,
             lod::update_lods

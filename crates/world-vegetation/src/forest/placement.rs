@@ -39,6 +39,24 @@ impl Site {
 }
 
 impl PatchKey {
+    pub fn parent(self) -> NodeKey {
+        let band = self.0 / GROUP;
+        NodeKey(band, self.1 * node_columns(band) / columns(self.0))
+    }
+
+    /// Candidate patches whose canonical trees may shade the given surface tile.
+    /// The extra row and column cover the legacy baked-direction offset.
+    pub fn shade_neighborhood(direction: DVec3) -> impl Iterator<Item = Self> {
+        let latitude = direction.y.clamp(-1.0, 1.0).asin();
+        let longitude = direction.z.atan2(direction.x).rem_euclid(TAU);
+        let row = ((latitude + HALF_PI) / ANGLE).floor() as i32;
+        ((row - 2).max(0)..=(row + 2).min(LAST_ROW)).flat_map(move |r| {
+            let count = columns(r);
+            let col = (longitude * f64::from(count) / TAU).floor() as i32;
+            (-2..=2).map(move |offset| Self(r, (col + offset).rem_euclid(count)))
+        })
+    }
+
     pub fn center(self) -> DVec3 {
         direction(
             (f64::from(self.0) + 0.5) * ANGLE - HALF_PI,
@@ -156,7 +174,12 @@ mod tests {
                 .map(columns)
                 .sum();
             assert_eq!(keys.len(), count as usize);
-            assert!((0..node_columns(band)).all(|col| NodeKey(band, col).leaves().len() <= 24));
+            for col in 0..node_columns(band) {
+                let node = NodeKey(band, col);
+                let leaves = node.leaves();
+                assert!(leaves.len() <= 24);
+                assert!(leaves.into_iter().all(|patch| patch.parent() == node));
+            }
         }
     }
 

@@ -126,20 +126,30 @@ struct ModelChoice {
 }
 
 #[derive(Clone, Copy)]
-struct Blend {
-    target: ModelChoice,
+struct Blend<T> {
+    target: T,
     progress: f32,
 }
 
-#[derive(Clone, Copy, Default)]
-struct LodState {
-    desired: Option<ModelChoice>,
-    current: Option<ModelChoice>,
-    blend: Option<Blend>,
+#[derive(Clone, Copy)]
+pub(super) struct LodState<T> {
+    pub desired: Option<T>,
+    pub current: Option<T>,
+    blend: Option<Blend<T>>,
 }
 
-impl LodState {
-    fn update(&mut self, target: ModelChoice, step: f32) {
+impl<T> Default for LodState<T> {
+    fn default() -> Self {
+        Self {
+            desired: None,
+            current: None,
+            blend: None,
+        }
+    }
+}
+
+impl<T: Copy + Eq> LodState<T> {
+    pub fn update(&mut self, target: T, step: f32) {
         self.desired = Some(target);
         let Some(current) = self.current else {
             self.current = Some(target);
@@ -161,6 +171,18 @@ impl LodState {
                 progress: step.min(1.0),
             });
         }
+    }
+    pub fn slots(&self, upper: u8) -> Option<[(T, u8, u8); 2]> {
+        let active = self.current?;
+        let split = self.blend.map_or(upper, |blend| {
+            (f32::from(upper) * (1.0 - blend.progress)).round() as u8
+        });
+        let incoming = self.blend.map_or(active, |blend| blend.target);
+        Some([(active, 0, split), (incoming, split, upper)])
+    }
+
+    pub fn is_blending(&self) -> bool {
+        self.blend.is_some()
     }
 }
 
@@ -195,6 +217,16 @@ impl MaterialExtension for BarkFade {
 
 pub(super) type BarkMaterial = ExtendedMaterial<StandardMaterial, BarkFade>;
 
+/// A shared PBR material variant for an opaque or alpha-clipped dither interval.
+pub(super) fn dither_material(base: StandardMaterial, low: u8, high: u8) -> BarkMaterial {
+    BarkMaterial {
+        base,
+        extension: BarkFade {
+            coverage: Vec4::new(coverage(low), coverage(high), 0.0, 0.0),
+        },
+    }
+}
+
 type Palette<T, U> = HashMap<(AssetId<T>, u8, u8), Handle<U>>;
 
 #[derive(Resource, Default)]
@@ -207,7 +239,7 @@ pub(super) struct FadeMaterials {
 pub(super) struct DetailTree {
     patch: PatchKey,
     site: Site,
-    lod: LodState,
+    lod: LodState<ModelChoice>,
     slots: [(Entity, Entity); 2],
     presented: [Option<(ModelChoice, u8, u8)>; 2],
 }
@@ -338,18 +370,11 @@ pub(super) fn update_lods(
         tree.lod.update(ModelChoice { level, hero }, step);
         let active = tree.lod.current.unwrap();
         stats.levels[active.level] += 1;
-        stats.blends += usize::from(tree.lod.blend.is_some());
-        let split = tree.lod.blend.map_or(upper, |blend| {
-            (f32::from(upper) * (1.0 - blend.progress)).round() as u8
-        });
-        let slots = [
-            (active, 0, split),
-            (
-                tree.lod.blend.map_or(active, |blend| blend.target),
-                split,
-                upper,
-            ),
-        ];
+        stats.blends += usize::from(tree.lod.is_blending());
+        let slots = tree
+            .lod
+            .slots(upper)
+            .expect("an active tree is assigned a model");
         for (index, ((trunk, canopy), (choice, low, high))) in
             tree.slots.into_iter().zip(slots).enumerate()
         {
@@ -375,13 +400,14 @@ pub(super) fn update_lods(
                         .bark
                         .entry((bark.id(), low, high))
                         .or_insert_with(|| {
-                            bark_materials.add(BarkMaterial {
-                                base: standard
+                            bark_materials.add(dither_material(
+                                standard
                                     .get(bark)
                                     .expect("forest owns its bark materials")
                                     .clone(),
-                                extension: BarkFade { coverage: dither },
-                            })
+                                low,
+                                high,
+                            ))
                         });
                     mesh.set_if_neq(wood.mesh.clone());
                     material.set_if_neq(handle.clone());

@@ -46,6 +46,39 @@ entities are ready. Frustum culling uses conservative mesh bounds, and parent
 forest batches are also culled against the spherical horizon. A teleport into
 a cold region still requires streaming.
 
+## Woodland Fern
+
+The four supplied GLBs are packaged in
+`assets/models/vegetation/woodland_fern/`. Blender is only needed to edit the
+source asset. The asset loader validates the entire set at startup. It reports
+load or layout errors in the log and on the F8 overlay.
+
+The public `FernSettings` resource controls distances, hysteresis, the preload
+margin, blend duration, and the LOD0 budget. The default bands are 0–15 m,
+15–35 m, 35–70 m, and 70–120 m. The default hysteresis is 10%, the preload margin
+is 30 m, and up to 12 ferns can use the 33,600-triangle LOD0 mesh. The far range
+is capped at 195 m to bound the streamed region. The last band fades out
+gradually near its outer edge.
+
+Fern clumps use the canonical tree sites to estimate canopy shade. Placement
+also samples humidity, height, slope, and river coverage. Each clump has
+seeded spacing, rotation, and scale. All four LODs use the same terrain-aligned
+root.
+
+| Export | Triangles per fern | Rendering |
+| --- | ---: | --- |
+| LOD0 | 33,600 | Shared indexed mesh and PBR material |
+| LOD1 | 5,544 | Shared indexed mesh and PBR material |
+| LOD2 | 1,280 | Shared indexed mesh and PBR material |
+| LOD3 | 4 | Exported crossed alpha-mask cards merged by chunk |
+
+The three detailed LODs merge each export's rachis and fronds and share
+dither material variants through Bevy's normal batching. A detailed fern
+needs one render entity, with a second only during mesh-to-mesh blending.
+The distant layer uses one small mesh per occupied chunk with no fern
+entities in that layer. Both layers use Bevy's frustum culling. F8 shows
+fern asset status, per-LOD counts, blends, card batches, and queued chunks.
+
 ## Validation
 
 ```sh
