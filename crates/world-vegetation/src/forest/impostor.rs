@@ -8,7 +8,9 @@ use super::{
     VARIANTS,
 };
 
-const SIDE: usize = 128;
+// Keep canopy silhouettes crisp while moving from the near mesh to distant
+// proxy cards; a 128px portrait is clearly pixelated at the near handoff.
+const SIDE: usize = 256;
 const TILES: usize = Species::Palm as usize * VARIANTS + Species::Palm.variants();
 const INSET: f32 = 0.022;
 
