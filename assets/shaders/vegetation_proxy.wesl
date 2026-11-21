@@ -1,9 +1,9 @@
-import super::vegetation_dither::{vegetation_threshold, vegetation_coverage}
-import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_local_to_world}
-import bevy_pbr::render::view_transformations::position_world_to_clip
-import bevy_pbr::render::mesh_view_bindings::view
-import bevy_pbr::render::pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT}
-import bevy_pbr::render::pbr_functions::main_pass_post_lighting_processing
+import super::vegetation_dither::{vegetation_threshold, vegetation_coverage};
+import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_local_to_world};
+import bevy_pbr::render::view_transformations::position_world_to_clip;
+import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
+import bevy_pbr::render::pbr_functions::main_pass_post_lighting_processing;
 
 struct ProxyCoverage {
     leaf: vec4<f32>,
