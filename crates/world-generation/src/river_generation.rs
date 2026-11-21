@@ -240,19 +240,8 @@ pub(super) fn generate(
     for (cell, &is_lake) in drainage.lakes.iter().enumerate() {
         if !is_lake { continue; }
         let (face, x, y) = decode_index(cell);
-        let last = (SIZE - 1) as f64;
-        let ux = x as f64;
-        let uy = y as f64;
-        let left = sphere_direction(face, ((ux - 0.5).max(0.0)) / last, uy / last);
-        let right = sphere_direction(face, ((ux + 0.5).min(last)) / last, uy / last);
-        let bottom = sphere_direction(face, ux / last, ((uy - 0.5).max(0.0)) / last);
-        let top = sphere_direction(face, ux / last, ((uy + 0.5).min(last)) / last);
-        let from = DVec3::from_array(left);
-        let to = DVec3::from_array(right);
-        let width = 0.5 * RADIUS * DVec3::from_array(bottom).angle_between(DVec3::from_array(top));
-        if width <= 0.0 || from.distance_squared(to) <= 1.0e-20 { continue; }
-        let elevation = drainage.spill[cell] + 0.10;
-        append_surface(&mut lakes, from, to, elevation, elevation, width, width);
+        let level = drainage.spill[cell] + 0.10;
+        append_lake_quad(&mut lakes, face, x, y, level);
         // Include the lake footprint in the shared river/wet-area mask so
         // vegetation placement never plants ferns and trees underwater.
         let atlas_x = (face as u32 % 3) * MASK_SIDE;
@@ -285,6 +274,33 @@ pub(super) fn generate(
         .collect();
     fs::write(surface_output, bytes)?;
     Ok(drainage.lakes)
+}
+
+// One lake cell is a surface tile: two outward-facing triangles.
+// Never use the river segment geometry here: its radial cap produces large
+// disconnected discs that look like floating straight water strips.
+fn append_lake_quad(vertices: &mut Vec<Vec3>, face: usize, x: usize, y: usize, height: f64) {
+    let last = (SIZE - 1) as f64;
+    let uv = |x: f64, y: f64| {
+        let direction = sphere_direction(face, (x / last).clamp(0.0, 1.0), (y / last).clamp(0.0, 1.0));
+        DVec3::from_array(direction) * (RADIUS + height)
+    };
+    let xl = x as f64 - 0.5;
+    let xr = x as f64 + 0.5;
+    let yb = y as f64 - 0.5;
+    let yt = y as f64 + 0.5;
+    let p00 = uv(xl, yb);
+    let p10 = uv(xr, yb);
+    let p01 = uv(xl, yt);
+    let p11 = uv(xr, yt);
+    // Source face orientations differ; use radial-facing winding on every face.
+    let outward = (p01 - p00).cross(p10 - p00).dot(p00) > 0.0;
+    let quad = if outward {
+        [p00, p01, p10, p10, p01, p11]
+    } else {
+        [p00, p10, p01, p10, p11, p01]
+    };
+    vertices.extend(quad.into_iter().map(|p| p.as_vec3()));
 }
 
 fn open_diagonal_channels(
