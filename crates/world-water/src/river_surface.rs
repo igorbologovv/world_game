@@ -188,9 +188,9 @@ pub(super) fn draw_map(
 ) {
     let (Some(rivers), Ok(water), Ok(player), Ok((camera, mode))) = (
         rivers,
-        water.get_single(),
-        player.get_single(),
-        camera.get_single(),
+        water.single(),
+        player.single(),
+        camera.single(),
     ) else {
         return;
     };
