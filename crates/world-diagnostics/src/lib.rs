@@ -16,7 +16,7 @@ struct FrameStatsText;
 
 impl Plugin for FrameStatsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin)
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_systems(Startup, spawn_stats)
             .add_systems(Update, update_stats);
     }
@@ -26,7 +26,7 @@ fn spawn_stats(mut commands: Commands) {
     commands.spawn((
         FrameStatsText,
         Text::new("FPS: ... | Frame: ..."),
-        TextFont { font_size: 15.0, ..default() },
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
         TextColor(Color::srgb(0.95, 0.95, 0.9)),
         Node {
             position_type: PositionType::Absolute,
