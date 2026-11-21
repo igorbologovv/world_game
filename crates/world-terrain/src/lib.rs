@@ -30,6 +30,7 @@ impl Plugin for TerrainPlugin {
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup.after(WorldReady))
         .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
+        .add_systems(Update, toggle_canopy_debug)
         .add_systems(Update, terrain_surface::stream.after(WorldMovement));
     }
 }
@@ -47,6 +48,9 @@ struct TerrainMaterial {
     detail_normal_roughness: Handle<Image>,
     #[uniform(5)]
     detail_enabled: u32,
+    // F9 cycles normal terrain, forest density and canopy color.
+    #[uniform(6)]
+    terrain_debug_mode: u32,
 }
 
 impl TerrainMaterial {
@@ -74,7 +78,32 @@ impl TerrainMaterial {
             albedo,
             normal_roughness,
             detail_enabled: 0,
+            terrain_debug_mode: 0,
         }
+    }
+}
+/// Cycle diagnostic overlays for global forest coverage and its canopy colors.
+fn toggle_canopy_debug(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    terrain: Option<Res<terrain_surface::TerrainSurface>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
+) {
+    if !keyboard.just_pressed(KeyCode::F9) {
+        return;
+    }
+    let Some(terrain) = terrain else {
+        return;
+    };
+    if let Some(material) = materials.get_mut(&terrain.material) {
+        material.terrain_debug_mode = (material.terrain_debug_mode + 1) % 3;
+        info!(
+            "Planet forest diagnostic: {} (F9 to cycle)",
+            match material.terrain_debug_mode {
+                1 => "forest coverage (grayscale)",
+                2 => "canopy colors",
+                _ => "normal terrain",
+            }
+        );
     }
 }
 
