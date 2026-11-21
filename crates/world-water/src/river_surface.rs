@@ -4,6 +4,7 @@ use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
     reflect::TypePath,
+    render::alpha::AlphaMode,
     render::{
         render_asset::RenderAssetUsages,
         render_resource::{AsBindGroup, PrimitiveTopology},
@@ -29,6 +30,10 @@ pub(super) struct RiverMaterial {
 }
 
 impl Material for RiverMaterial {
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
     fn vertex_shader() -> bevy::render::render_resource::ShaderRef {
         "shaders/river_water.wgsl".into()
     }
