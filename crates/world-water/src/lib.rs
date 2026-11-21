@@ -62,11 +62,8 @@ fn spawn(
         root.spawn(
             &mut commands,
             (
-                MaterialMeshBundle {
-                    mesh: meshes.add(surface),
-                    material: river_materials.add(river_surface::RiverMaterial { brightness: 1.0 }),
-                    ..default()
-                },
+                Mesh3d(meshes.add(surface)),
+                MeshMaterial3d(river_materials.add(river_surface::RiverMaterial { brightness: 1.0 })),
                 NotShadowCaster,
                 river_surface::RiverWater,
             ),
@@ -79,12 +76,8 @@ fn spawn(
         root.spawn(
             &mut commands,
             (
-                MaterialMeshBundle {
-                    mesh: meshes.add(lakes),
-                    material: river_materials
-                        .add(river_surface::RiverMaterial { brightness: 0.93 }),
-                    ..default()
-                },
+                Mesh3d(meshes.add(lakes)),
+                MeshMaterial3d(river_materials.add(river_surface::RiverMaterial { brightness: 0.93 })),
                 NotShadowCaster,
             ),
         );
@@ -96,11 +89,8 @@ fn spawn(
             root.spawn(
                 &mut commands,
                 (
-                    MaterialMeshBundle {
-                        mesh: meshes.add(mesh),
-                        material: material.clone(),
-                        ..default()
-                    },
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(material.clone()),
                     bounds,
                     NotShadowCaster,
                 ),
