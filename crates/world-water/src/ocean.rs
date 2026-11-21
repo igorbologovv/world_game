@@ -46,11 +46,11 @@ impl Material for OceanMaterial {
     }
 
     fn vertex_shader() -> ShaderRef {
-        "shaders/ocean.wgsl".into()
+        "shaders/ocean.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/ocean.wgsl".into()
+        "shaders/ocean.wesl".into()
     }
 }
 
