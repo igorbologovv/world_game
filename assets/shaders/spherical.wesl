@@ -386,9 +386,10 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     // groves when they are unresolved, and let the impostor fade overlap the
     // terrain tint (the default batch fades between 1.66 and 2.1 km).
     let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
-    let canopy_fade = smoothstep(1200.0, 2750.0, distance_to_eye);
+    let canopy_fade = smoothstep(1050.0, 2500.0, distance_to_eye);
     let density = mix(input.uv.x, input.uv.y, smoothstep(75.0, 420.0, footprint));
-    let canopy = smoothstep(0.043, 0.19, density) * biome.forest_cover * canopy_fade;
+    let canopy = smoothstep(0.035, 0.13, density)
+        * sqrt(biome.forest_cover) * canopy_fade * 0.85;
     surface.color = mix(surface.color, biome.canopy_tint, canopy);
     surface.roughness = mix(surface.roughness, 0.91, canopy);
 
