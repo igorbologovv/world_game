@@ -35,9 +35,9 @@ fn water_light(water_color: vec3<f32>, up: vec3<f32>, normal: vec3<f32>, eye: ve
     let fresnel = 0.0204 + 0.9796 * grazing * grazing * grazing * grazing * grazing;
     let elevation = smoothstep(0.0, 0.85, saturate(dot(reflected, up)));
     let daylight = 0.61 + 0.39 * saturate(0.4 + dot(up, sun));
-    let sky = daylight * mix(vec3<f32>(0.30, 0.47, 0.61), vec3<f32>(0.085, 0.22, 0.43), elevation);
+    let sky = daylight * mix(vec3<f32>(0.42, 0.65, 0.72), vec3<f32>(0.18, 0.38, 0.51), elevation);
     let sunward = saturate(dot(reflected, sun));
     let glint = pow(sunward, mix(420.0, 48.0, roughness)) * smoothstep(0.0, 0.12, dot(up, sun));
     return mix(water_color * daylight, sky, fresnel)
-        + vec3<f32>(1.0, 0.82, 0.62) * glint * (0.43 + 0.54 * fresnel);
+        + vec3<f32>(0.91, 0.97, 0.93) * glint * (0.43 + 0.54 * fresnel);
 }
