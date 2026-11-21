@@ -2,8 +2,16 @@
 
 use bevy_math::DVec3;
 
-/// Radius of the reference sphere in meters.
-pub const RADIUS: f64 = 100_000.0;
+/// Radius of the planetary reference sphere in meters (Mars mean radius).
+///
+/// Terrain is sampled through a multiresolution height provider; the 1024²
+/// source maps only describe the global shape, not local surface detail.
+pub const RADIUS: f64 = 3_389_500.0;
+
+/// Radius in meters used when the currently checked-in binary river/lake
+/// positions were baked. These files are migrated in memory until the new
+/// hydrology baker produces assets at the current planet radius.
+pub const LEGACY_BAKED_RADIUS: f64 = 100_000.0;
 /// Datum used by the generator to classify land and bodies of water.
 pub const SEA_LEVEL: f64 = 0.0;
 /// Runtime water surface elevation in meters above the reference sphere.
