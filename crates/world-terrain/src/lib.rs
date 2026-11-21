@@ -16,7 +16,7 @@ use bevy::{
 
     },
 };
-use world_core::{planet::RADIUS, runtime::{CameraMotion, PlanetRoot, WorldMovement, WorldReady}};
+use world_core::{planet::RADIUS, runtime::{PlanetRoot, WorldMovement, WorldReady}};
 
 /// Register terrain materials, chunk streaming, lighting, and atmospheric fog.
 ///
@@ -30,8 +30,7 @@ impl Plugin for TerrainPlugin {
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup.after(WorldReady))
         .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
-        .add_systems(Update, terrain_surface::stream.after(WorldMovement))
-        .add_systems(PostUpdate, terrain_surface::atmosphere.after(CameraMotion));
+        .add_systems(Update, terrain_surface::stream.after(WorldMovement));
     }
 }
 
