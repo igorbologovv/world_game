@@ -98,12 +98,13 @@ fn biome_surface(
     let rock = (1.0 - snow) * cliff;
     let soil_available = (1.0 - snow) * (1.0 - cliff);
 
-    // Sand on coastlines and in warm dry interiors, not on all low terrain.
-    let beach = 1.0 - smoothstep(20.0, 170.0, height + variation * 80.0);
+    // Restrict beaches to the actual low coastal strip. The previous 20..170 m
+    // band classified enormous inland forest lowlands as bare white sand.
+    // Keep a small, continuous transition without noisy 80 m elevation offsets.
+    let beach = 1.0 - smoothstep(2.0, 12.0, height + variation * 3.0);
     let desert = smoothstep(0.65, 0.86, temperature)
         * (1.0 - smoothstep(0.19, 0.43, moisture));
     let sand = soil_available * max(beach, desert);
-    let vegetated = max(soil_available - sand, 0.0);
     let exposed_soil = clamp(
         0.12 + 0.32 * (1.0 - moisture)
             + 0.14 * smoothstep(900.0, 3900.0, height) + 0.16 * variation,
@@ -156,6 +157,15 @@ fn biome_surface(
         * (1.0 - snow);
     let cover = canopy_occupancy * tree_limit;
 
+    // Forested lowlands are living soil, not a broad pale beach. Even coastal
+    // groves may contain isolated sand patches, so only suppress beach sand
+    // where dense tree stands can actually grow. Genuine deserts keep sand.
+    let coastal_forest_floor = canopy_occupancy
+        * smoothstep(3.5, 7.0, height)
+        * (1.0 - desert);
+    let exposed_sand = sand * (1.0 - 0.91 * coastal_forest_floor);
+    let vegetated = max(soil_available - exposed_sand, 0.0);
+
     // Values are linear PBR albedo, chosen to relate to the actual leaf
     // palettes (jungle, oak, pine, acacia) rather than the grass texture.
     let total_species = rainforest + temperate_forest + boreal_forest + savanna + 0.001;
@@ -178,7 +188,7 @@ fn biome_surface(
 
     return BiomeSurface(
         array(
-            sand,
+            exposed_sand,
             vegetated * (1.0 - exposed_soil),
             vegetated * exposed_soil,
             rock,
@@ -368,6 +378,11 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     let tint = 1.0 + 0.32 * regional + 0.32 * patches + 0.26 * detail;
 
     let biome = biome_surface(height, slope, direction, variation);
+    // F10 bypasses materials entirely. If the supposed missing ground turns
+    // magenta, the spherical mesh exists and the issue is its surface shading.
+    if terrain_debug_mode == 3u {
+        return FragmentOutput(vec4<f32>(1.0, 0.0, 1.0, 1.0));
+    }
     // F9 diagnostics are composited after terrain PBR lighting, and
     // never replace the actual grass/soil/rock directly under the camera.
     var weights = biome.weights;
