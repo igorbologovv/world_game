@@ -103,7 +103,7 @@ pub(super) fn stream(
     cameras: Query<(Entity, GridTransform), With<WorldCamera>>,
     frames: ReferenceFrames,
     root: Res<PlanetRoot>,
-    mut renderables: Query<(&mut Handle<FoliageMaterial>, &mut Visibility)>,
+    mut renderables: Query<(&mut MeshMaterial3d<FoliageMaterial>, &mut Visibility)>,
 ) {
     let Ok((camera_entity, camera)) = cameras.single() else {
         return;
@@ -123,7 +123,7 @@ pub(super) fn stream(
             });
             if patch.arrival < 1.0 {
                 patch.arrival = (patch.arrival + time.delta_secs().min(0.075) * 3.5).min(1.0);
-                handle.set_if_neq(material.0[quantize(patch.arrival) as usize].clone());
+                handle.set_if_neq(MeshMaterial3d(material.0[quantize(patch.arrival) as usize].clone()));
             }
         }
     }
@@ -167,7 +167,7 @@ pub(super) fn stream(
     for patch in pending {
         let entity = load_patch(patch, &heights).map(|(mesh, position, rotation)| {
             let (cell, translation) = frame.translation_to_grid(position);
-            let mut bounds = mesh.compute_aabb().expect("plant patches contain vertices");
+            let mut bounds = mesh.get_aabb().expect("plant patches contain vertices");
             bounds.half_extents += WIND_MARGIN;
             let id = commands
                 .spawn((
