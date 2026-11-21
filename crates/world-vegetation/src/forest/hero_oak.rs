@@ -120,7 +120,7 @@ impl OakPrimitives {
             bark.metallic_roughness_texture = Some(roughness.clone());
             bark.perceptual_roughness = 1.0;
             if self.wood.iter().all(|handle| {
-                meshes.get_mut(handle).is_some_and(|mesh| {
+                meshes.get_mut(handle).is_some_and(|mut mesh| {
                     mesh.contains_attribute(Mesh::ATTRIBUTE_TANGENT)
                         || mesh.generate_tangents().is_ok()
                 })
@@ -147,7 +147,7 @@ impl OakPrimitives {
         ));
         let mut lods = Vec::with_capacity(4);
         for (level, leaves) in self.leaves.iter().enumerate() {
-            let mesh = meshes.get_mut(leaves)?;
+            let mut mesh = meshes.get_mut(leaves)?;
             let foliage_bounds = mesh.get_aabb()?;
             // The existing foliage shader uses a color and a second UV set.
             // Prepare the imported mesh once so every oak can share it.
@@ -169,6 +169,7 @@ impl OakPrimitives {
                 .collect();
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0; 4]; wind.len()]);
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, wind);
+            drop(mesh); // Release the AssetMut guard before reading other meshes.
 
             let wood = self.wood.get(level).and_then(|handle| {
                 Some(WoodLod {
