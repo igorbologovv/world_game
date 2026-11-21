@@ -382,46 +382,54 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
-    // Fade in terrain landcover as individual tree meshes yield to
-    // impostors. The CPU forest fields are carried by terrain vertices in
-    // UV_0: x=local groves, y=averaged coverage at coarse footprints.
-    // No extra trees or per-pixel forest-noise evaluation is required.
+    // Climate sets the broad landcover palette. A wooded valley should read
+    // as one coherent forest biome, not as bare grass with dark circles only
+    // where individual tree candidates happened to spawn.
+    //
+    // CPU woodland density (UV_0) still supplies gentle intra-biome variation,
+    // but no longer acts as an all-or-nothing mask for the ground color.
     let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
-    let landcover_fade = smoothstep(420.0, 1650.0, distance_to_eye);
+    let landcover_fade = smoothstep(350.0, 1450.0, distance_to_eye);
     let density = mix(input.uv.x, input.uv.y, smoothstep(65.0, 360.0, footprint));
     let vegetation = clamp(weights[1] + weights[2], 0.0, 1.0);
-    let woodland = smoothstep(0.035, 0.17, density)
-        * sqrt(clamp(biome.forest_cover, 0.0, 1.0));
+    let forest_biome = smoothstep(0.16, 0.55, biome.forest_cover);
+    let forest_cover = forest_biome * vegetation * landcover_fade;
 
-    // Between forests, reuse existing multi-kilometer color variation to
-    // distinguish pale meadows from exposed dry soil. Only vegetation layers
-    // are tinted: beaches, cliffs and snowy peaks keep their PBR materials.
+    // Keep the same forest-floor/canopy color across contiguous wooded
+    // terrain. Broad daylight and terrain normals supply the main shading;
+    // small color fluctuations keep it from looking like a flat paint fill.
+    let soft_variation = clamp(
+        0.97 + 0.10 * regional + 0.06 * patches
+            + 0.06 * smoothstep(0.035, 0.36, density),
+        0.90, 1.10,
+    );
+    let forest_color = biome.canopy_tint * (1.58 * soft_variation);
+    let forest_blend = forest_cover * 0.81;
+    surface.color = mix(surface.color, forest_color, forest_blend);
+    surface.roughness = mix(surface.roughness, 0.92, forest_blend);
+
+    // Outside wooded climates keep meadows and exposed soil visibly distinct
+    // but subtle. No scatter of dark tree-sized stains across the slopes.
     let meadow = smoothstep(-0.19, 0.18, patches + 0.30 * regional);
     let clearing_color = mix(
-        vec3<f32>(0.82, 0.80, 0.70),
-        vec3<f32>(1.13, 1.08, 0.89),
+        vec3<f32>(0.86, 0.83, 0.74),
+        vec3<f32>(1.10, 1.06, 0.93),
         meadow,
     );
-    let clearing_strength = vegetation * (1.0 - woodland)
-        * landcover_fade * 0.44;
+    let clearing_strength = vegetation * (1.0 - forest_biome)
+        * landcover_fade * 0.30;
     surface.color *= mix(vec3<f32>(1.0), clearing_color, clearing_strength);
 
-    // Sparse mineral outcrops on steeper mid-distance ground. Sample only
-    // the already resident 1x1 rock mip: no additional terrain assets.
-    let outcrop = smoothstep(0.22, 0.54, slope + patches * 0.19)
+    // Keep exposed rock on genuinely steep/high slopes, even inside a
+    // forest biome, using the existing rough PBR rock atlas.
+    let outcrop = smoothstep(0.24, 0.56, slope + patches * 0.12)
         * smoothstep(140.0, 780.0, height)
         * (1.0 - weights[4]) * landcover_fade;
     let rock_average = textureLoad(
         terrain_albedo, vec2<i32>(0), 3,
         i32(textureNumLevels(terrain_albedo)) - 1,
     ).rgb;
-    surface.color = mix(surface.color, rock_average, outcrop * 0.24);
-
-    // The canopy tint tracks real CPU-side grove density and overlaps the
-    // 1.66–2.1 km impostor fade instead of leaving a bare middle band.
-    let canopy = woodland * vegetation * landcover_fade * 0.90;
-    surface.color = mix(surface.color, biome.canopy_tint, canopy);
-    surface.roughness = mix(surface.roughness, 0.91, canopy);
+    surface.color = mix(surface.color, rock_average, outcrop * 0.28);
 
     var shaded_normal = surface_normal;
     if normal_detail > 0.0 {
