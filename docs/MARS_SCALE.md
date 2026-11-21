@@ -80,3 +80,24 @@ Do not regenerate hydrology into shipped `assets/` as a validation shortcut.
 
 The connected GitHub-edit environment cannot execute Bevy or Cargo. The tests
 above are **required verification**, not claimed to have passed here.
+
+## Palm Coast visual repair (needs local verification)
+
+- Decreased forest candidates from 112 to 56 per physical 145 m patch,
+  lowered acceptance probabilities, and made multi-kilometer meadow and
+  grove masks sparser. A 240 m radius authored clearing surrounds the
+  Palm Coast explorer start.
+- Ground-cover patch resolution is now derived from 25 m physical patches,
+  not a fixed 8192 cells per face (which became ~827 m patches on Mars).
+  Microplant noise is sampled using double-precision physical coordinates.
+- Coastal hills now ramp in from the baked waterline over 10 m elevation;
+  near-coast heightfields include 1300 m and 360 m relief, rather than
+  staying almost flat wherever the legacy atlas samples ~8 m.
+- **Tree appearance is not yet fully fixed.** The imported leaf cutout
+  textures, alpha masking, near LOD0 geometry and GPU aliasing still need
+  direct screenshot/mesh inspection on Vulkan. The 256px portraits only
+  improve billboard LOD, not the quality of close-up imported leaves.
+- The first run should verify that the clearing is present, nearby terrain
+  varies at visible distances, and tree populations are significantly lower.
+  The full Cargo test suite and live client still must run outside this
+  GitHub authoring environment.
