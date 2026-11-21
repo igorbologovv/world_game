@@ -20,7 +20,7 @@ use bevy::{
     render::{
         mesh::Indices,
         primitives::Aabb,
-        ,
+
         render_resource::{AsBindGroup, PrimitiveTopology, ShaderRef},
         view::VisibilitySystems,
     },
