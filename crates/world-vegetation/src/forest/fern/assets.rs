@@ -1,10 +1,12 @@
 //! Load and validate the supplied fern GLBs once.
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
-    gltf::{Gltf, GltfMesh, GltfNode},
+    gltf::{Gltf, GltfMesh, GltfNode, GltfMaterial},
+    pbr::gltf::standard_material_from_gltf_material,
     prelude::*,
+    asset::RenderAssetUsages,
     render::{
-        mesh::VertexAttributeValues, primitives::Aabb, ,
+        mesh::VertexAttributeValues, primitives::Aabb,
         render_resource::PrimitiveTopology,
     },
 };
@@ -52,7 +54,7 @@ pub(super) fn finish(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     gltf_nodes: Res<Assets<GltfNode>>,
-    materials: Res<Assets<StandardMaterial>>,
+    materials: Res<Assets<GltfMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut fern: ResMut<FernAssets>,
@@ -64,7 +66,7 @@ pub(super) fn finish(
         matches!(server.load_state(handle.id()), LoadState::Failed(_))
             || matches!(
                 server.get_recursive_dependency_load_state(handle.id()),
-                Some(RecursiveDependencyLoadState::Failed)
+                Some(RecursiveDependencyLoadState::Failed(_))
             )
     }) {
         warn!(
@@ -168,7 +170,7 @@ fn combine(
     gltf_meshes: &Assets<GltfMesh>,
     gltf_nodes: &Assets<GltfNode>,
     meshes: &Assets<Mesh>,
-    materials: &Assets<StandardMaterial>,
+    materials: &Assets<GltfMaterial>,
 ) -> Result<(MeshBuilder, StandardMaterial), &'static str> {
     let cards = level == 3;
     if gltf.meshes.len() != 2
@@ -191,6 +193,7 @@ fn combine(
             .material
             .as_ref()
             .and_then(|mat| materials.get(mat))
+            .map(standard_material_from_gltf_material)
             .ok_or("missing its PBR material")?;
         if !material.double_sided
             || material.cull_mode.is_some()
@@ -201,7 +204,7 @@ fn combine(
             return Err("has an incompatible vertex-color or double-sided material");
         }
         if let Some(previous) = shared {
-            if !same_surface(previous, material) {
+            if !same_surface(previous, &material) {
                 return Err("parts require different PBR materials");
             }
         }
@@ -212,7 +215,7 @@ fn combine(
             cards,
         )?;
     }
-    Ok((merged, shared.ok_or("has no material")?.clone()))
+    Ok((merged, shared.ok_or("has no material")?))
 }
 
 fn append(builder: &mut MeshBuilder, source: &Mesh, cards: bool) -> Result<(), &'static str> {
