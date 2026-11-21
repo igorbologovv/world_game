@@ -654,7 +654,7 @@ pub(super) fn stream(
                             mat.coverage.leaf != new || mat.coverage.impostor != uniform.impostor
                         })
                     {
-                        if let Some(material) = assets.materials.get_mut(batch.material.id()) {
+                        if let Some(mut material) = assets.materials.get_mut(batch.material.id()) {
                             material.coverage.leaf = new;
                             material.coverage.impostor = uniform.impostor;
                         }
@@ -686,7 +686,7 @@ pub(super) fn stream(
                             || mat.coverage.impostor != uniform.impostor
                     });
                 if changed {
-                    if let Some(material) = assets.materials.get_mut(batch.material.id()) {
+                    if let Some(mut material) = assets.materials.get_mut(batch.material.id()) {
                         material.coverage = uniform;
                     }
                 }
