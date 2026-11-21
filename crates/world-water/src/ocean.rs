@@ -3,19 +3,22 @@ use std::path::Path;
 use bevy::{
     math::{DVec2, DVec3},
     prelude::*,
+    reflect::TypePath,
+    render::alpha::AlphaMode,
     render::{
         mesh::Indices,
         render_asset::RenderAssetUsages,
         render_resource::{
-            Extent3d, PrimitiveTopology, TextureDimension, TextureFormat,
+            AsBindGroup, Extent3d, PrimitiveTopology, ShaderRef, TextureDimension, TextureFormat,
         },
         texture::ImageSampler,
     },
 };
 use world_core::{
     coordinates::{cube_direction, height_source_uv},
-    planet::{OCEAN_ATLAS_PATH, RADIUS, WATER_SURFACE_ELEVATION},
+    planet::{decode_height, OCEAN_ATLAS_PATH, RADIUS, WATER_SURFACE_ELEVATION},
     runtime::{GridTransform, ReferenceFrames, WorldCamera},
+    SurfaceHeights,
 };
 
 const WATER_RADIUS: f64 = RADIUS + WATER_SURFACE_ELEVATION;
@@ -24,6 +27,29 @@ const PATCHES_PER_FACE: u32 = 8;
 const SEGMENTS: u32 = 48;
 // The previous sRGB texture classified a pixel as water at 0.25 linear.
 const MIN_WATER: u8 = 137;
+const DEPTH_OFFSET: f64 = 16.0;
+const DEPTH_RANGE: f64 = 96.0;
+
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub(super) struct OceanMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    mask: Handle<Image>,
+}
+
+impl Material for OceanMaterial {
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn vertex_shader() -> ShaderRef {
+        "shaders/ocean.wgsl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        "shaders/ocean.wgsl".into()
+    }
+}
 
 #[derive(Component)]
 pub(super) struct OceanPatch {
@@ -34,8 +60,9 @@ pub(super) struct OceanPatch {
 
 pub(super) fn load(
     images: &mut Assets<Image>,
+    heights: &SurfaceHeights,
     assets: &Path,
-) -> Option<(StandardMaterial, Vec<(Mesh, OceanPatch)>)> {
+) -> Option<(OceanMaterial, Vec<(Mesh, OceanPatch)>)> {
     let path = assets.join(OCEAN_ATLAS_PATH);
     let mask = match image::open(&path) {
         Ok(mask) => mask.into_luma8(),
@@ -71,12 +98,24 @@ pub(super) fn load(
             }
         }
     }
-    // Apply the source pond's StandardMaterial to the existing water mask.
-    // The white RGBA texture only supplies the shoreline alpha coverage;
-    // the actual visible tint and alpha come from material_3 in lib.rs.
-    let mut pixels = vec![255u8; mask.as_raw().len() * 4];
-    for (index, &coverage) in mask.as_raw().iter().enumerate() {
-        pixels[4 * index + 3] = if coverage >= MIN_WATER { 255 } else { 0 };
+    let mut pixels = vec![0; mask.as_raw().len() * 2];
+    for face in 0..6 {
+        let origin = UVec2::new(face as u32 % 3, face as u32 / 3) * side;
+        let texels = heights.face_texels(face, side);
+        for y in 0..side {
+            let atlas_start = ((origin.y + y) * mask.width() + origin.x) as usize;
+            let source_start = (y * side) as usize;
+            for x in 0..side as usize {
+                let atlas_index = atlas_start + x;
+                let coverage = mask.as_raw()[atlas_index];
+                let depth = texels.map_or(45.0, |values| {
+                    WATER_RADIUS - RADIUS - decode_height(f64::from(values[source_start + x]))
+                });
+                // Keep signed depth around the waterline for bilinear shore sampling.
+                pixels[2 * atlas_index] = coverage;
+                pixels[2 * atlas_index + 1] = encode_depth(depth);
+            }
+        }
     }
     let mut image = Image::new(
         Extent3d {
@@ -86,13 +125,20 @@ pub(super) fn load(
         },
         TextureDimension::D2,
         pixels,
-        TextureFormat::Rgba8UnormSrgb,
+        TextureFormat::Rg8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::linear();
-    let mut material = super::pond_material();
-    material.base_color_texture = Some(images.add(image));
-    Some((material, patches))
+    Some((
+        OceanMaterial {
+            mask: images.add(image),
+        },
+        patches,
+    ))
+}
+
+fn encode_depth(depth: f64) -> u8 {
+    ((depth + DEPTH_OFFSET).clamp(0.0, DEPTH_RANGE) * (255.0 / DEPTH_RANGE)).round() as u8
 }
 
 fn source_pixel(uv: DVec2, side: u32) -> DVec2 {
@@ -109,7 +155,6 @@ fn build_patch(
     let stride = (SEGMENTS + 1) as usize;
     let mut positions = Vec::with_capacity(stride * stride);
     let mut uvs = Vec::with_capacity(stride * stride);
-    let mut normals = Vec::with_capacity(stride * stride);
     let mut indices = Vec::with_capacity((SEGMENTS * SEGMENTS * 6) as usize);
     let mid = cube_direction(face, (start + end) * 0.5);
     let mut angular_radius: f64 = 0.0;
@@ -121,11 +166,7 @@ fn build_patch(
             let direction = cube_direction(face, uv);
             angular_radius = angular_radius.max(mid.distance_squared(direction));
             positions.push((direction * WATER_RADIUS).as_vec3().to_array());
-            normals.push(direction.as_vec3().to_array());
-            // PBR textures require normalized UVs; the former shader used
-            // integer texel-space UVs for textureLoad.
-            let atlas_size = Vec2::new((side * 3) as f32, (side * 2) as f32);
-            uvs.push(((origin.as_vec2() + source_pixel(uv, side).as_vec2()) / atlas_size).to_array());
+            uvs.push((origin.as_vec2() + source_pixel(uv, side).as_vec2()).to_array());
         }
     }
 
@@ -144,7 +185,6 @@ fn build_patch(
         RenderAssetUsages::default(),
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U16(indices));
     // Pad the cap to cover the difference between triangle normals and the
