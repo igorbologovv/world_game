@@ -382,14 +382,44 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
-    // The terrain mesh carries the CPU woodland fields. Average out local
-    // groves when they are unresolved, and let the impostor fade overlap the
-    // terrain tint (the default batch fades between 1.66 and 2.1 km).
+    // Fade in terrain landcover as individual tree meshes yield to
+    // impostors. The CPU forest fields are carried by terrain vertices in
+    // UV_0: x=local groves, y=averaged coverage at coarse footprints.
+    // No extra trees or per-pixel forest-noise evaluation is required.
     let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
-    let canopy_fade = smoothstep(1050.0, 2500.0, distance_to_eye);
-    let density = mix(input.uv.x, input.uv.y, smoothstep(75.0, 420.0, footprint));
-    let canopy = smoothstep(0.035, 0.13, density)
-        * sqrt(biome.forest_cover) * canopy_fade * 0.85;
+    let landcover_fade = smoothstep(420.0, 1650.0, distance_to_eye);
+    let density = mix(input.uv.x, input.uv.y, smoothstep(65.0, 360.0, footprint));
+    let vegetation = clamp(weights[1] + weights[2], 0.0, 1.0);
+    let woodland = smoothstep(0.035, 0.17, density)
+        * sqrt(clamp(biome.forest_cover, 0.0, 1.0));
+
+    // Between forests, reuse existing multi-kilometer color variation to
+    // distinguish pale meadows from exposed dry soil. Only vegetation layers
+    // are tinted: beaches, cliffs and snowy peaks keep their PBR materials.
+    let meadow = smoothstep(-0.19, 0.18, patches + 0.30 * regional);
+    let clearing_color = mix(
+        vec3<f32>(0.82, 0.80, 0.70),
+        vec3<f32>(1.13, 1.08, 0.89),
+        meadow,
+    );
+    let clearing_strength = vegetation * (1.0 - woodland)
+        * landcover_fade * 0.44;
+    surface.color *= mix(vec3<f32>(1.0), clearing_color, clearing_strength);
+
+    // Sparse mineral outcrops on steeper mid-distance ground. Sample only
+    // the already resident 1x1 rock mip: no additional terrain assets.
+    let outcrop = smoothstep(0.22, 0.54, slope + patches * 0.19)
+        * smoothstep(140.0, 780.0, height)
+        * (1.0 - weights[4]) * landcover_fade;
+    let rock_average = textureLoad(
+        terrain_albedo, vec2<i32>(0), 3,
+        i32(textureNumLevels(terrain_albedo)) - 1,
+    ).rgb;
+    surface.color = mix(surface.color, rock_average, outcrop * 0.24);
+
+    // The canopy tint tracks real CPU-side grove density and overlaps the
+    // 1.66–2.1 km impostor fade instead of leaving a bare middle band.
+    let canopy = woodland * vegetation * landcover_fade * 0.90;
     surface.color = mix(surface.color, biome.canopy_tint, canopy);
     surface.roughness = mix(surface.roughness, 0.91, canopy);
 
