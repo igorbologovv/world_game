@@ -427,9 +427,67 @@ fn select_species(
     // Smooth, spatially coherent groves, not isolated dice-roll trees.
     // The broad noise varies on a scale of a few hundred metres and makes
     // forest clearings and densely packed stands.
-    let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
-    let density = (0.82 + grove * 0.90).clamp(0.25, 1.0);
+    // Use physically-sized, double-precision biome fields rather than
+    // uniformly filling every warm/wet cell. Broad plains remain open while
+    // smaller groves and forest margins make coherent, natural clusters.
+    // Evaluating these on the sphere makes them independent of render tiles.
+    let density = forest_density(direction, height);
     species_for_climate(latitude, temp, moisture, height, density, random, coastal)
+}
+
+// Coherent, bounded coverage mask: no camera dependence, no f32
+// coordinates at multi-million-meter radii, and no global vegetation map.
+fn forest_density(direction: DVec3, height: f64) -> f32 {
+    let p = direction.normalize() * RADIUS;
+    // Kilometer-sized fields and glades cut broad, traversable open areas.
+    let region = forest_field(p / 78_000.0, 0xB1D2_8491);
+    let meadow = forest_field(p / 8_400.0, 0x9284_F5E3);
+    let stand = forest_field(p / 510.0, 0x61A7_96F4);
+    let open = forest_smoothstep(-0.34, 0.18, region)
+        * forest_smoothstep(-0.26, 0.24, meadow);
+    let clusters = forest_smoothstep(-0.35, 0.29, stand);
+    // Mountain peaks and high exposed slopes remain visibly open.
+    let treeline = 1.0 - forest_smoothstep(1_500.0, 2_600.0, height);
+    (open * (0.30 + clusters * 0.70) * treeline) as f32
+}
+
+fn forest_smoothstep(a: f64, b: f64, x: f64) -> f64 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn forest_hash(x: i64, y: i64, z: i64, seed: u64) -> f64 {
+    let mut v = seed
+        ^ (x as u64).wrapping_mul(0x9E37_79B1_85EB_CA87)
+        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (z as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    v ^= v >> 30;
+    v = v.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    v ^= v >> 27;
+    v = v.wrapping_mul(0x94D0_49BB_1331_11EB);
+    v ^= v >> 31;
+    (v as f64 / u64::MAX as f64) * 2.0 - 1.0
+}
+
+fn forest_field(p: DVec3, seed: u64) -> f64 {
+    let base = p.floor();
+    let f = p - base;
+    let t = f * f * (DVec3::splat(3.0) - f * 2.0);
+    let x = base.x as i64;
+    let y = base.y as i64;
+    let z = base.z as i64;
+    let mut value = 0.0;
+    for dz in 0..=1 {
+        for dy in 0..=1 {
+            for dx in 0..=1 {
+                let weight = (if dx == 0 { 1.0 - t.x } else { t.x })
+                    * (if dy == 0 { 1.0 - t.y } else { t.y })
+                    * (if dz == 0 { 1.0 - t.z } else { t.z });
+                value += weight * forest_hash(x + dx, y + dy, z + dz, seed);
+            }
+        }
+    }
+    value
 }
 
 fn species_for_climate(
@@ -962,6 +1020,35 @@ fn leaf_cluster(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forest_fields_create_open_plains_and_dense_groves() {
+        let mut open = 0;
+        let mut forested = 0;
+        for x in 0..30 {
+            for z in 0..30 {
+                let direction = DVec3::new(
+                    0.30 + f64::from(x) * 0.04,
+                    0.27,
+                    0.18 + f64::from(z) * 0.04,
+                ).normalize();
+                let density = forest_density(direction, 400.0);
+                assert!((0.0..=1.0).contains(&density));
+                open += usize::from(density < 0.08);
+                forested += usize::from(density > 0.28);
+            }
+        }
+        assert!(open > 90, "missing wide open landscapes: {open}");
+        assert!(forested > 40, "missing clusters of woodland: {forested}");
+    }
+
+    #[test]
+    fn forest_fields_are_deterministic() {
+        let direction = DVec3::new(0.4, 0.5, -0.7).normalize();
+        let density = forest_density(direction, 700.0);
+        assert_eq!(forest_density(direction, 700.0), density);
+        assert_eq!(forest_density(direction, 2900.0), 0.0);
+    }
 
     #[test]
     fn palms_favor_tropical_lowlands_and_warm_coasts() {
