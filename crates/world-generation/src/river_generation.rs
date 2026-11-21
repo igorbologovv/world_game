@@ -702,9 +702,11 @@ mod tests {
                 for triangle in vertices.chunks_exact(3) {
                     let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
                     assert!((b - a).cross(c - a).dot(a) > 0.0);
+                    // The legacy binary stores absolute positions in f32.
+                    let tolerance = RADIUS * f64::from(f32::EPSILON);
                     assert!(triangle
                         .iter()
-                        .all(|p| { (p.as_dvec3().length() - RADIUS - 9.6).abs() < 0.01 }));
+                        .all(|p| { (p.as_dvec3().length() - RADIUS - 9.6).abs() < tolerance }));
                 }
             }
         }

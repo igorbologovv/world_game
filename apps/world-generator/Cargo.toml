@@ -9,3 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 world-generation.workspace = true
+
+[dev-dependencies]
+world-core.workspace = true

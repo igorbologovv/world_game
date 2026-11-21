@@ -2,17 +2,18 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{
-    math::{DVec2, DVec3},
-    light::NotShadowCaster,
-    camera::primitives::MeshAabb,
-    prelude::*,
     asset::RenderAssetUsages,
+    camera::primitives::{Aabb, MeshAabb},
+    light::NotShadowCaster,
+    math::{DVec2, DVec3},
     mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+    tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
 };
 use world_core::{
     coordinates::cube_direction,
     planet::RADIUS,
-    runtime::{GridTransform, PlanetRoot, ReferenceFrame, ReferenceFrames, WorldCamera},
+    runtime::{GridTransform, PlanetRoot, ReferenceFrames, WorldCamera},
     SurfaceHeights,
 };
 
@@ -24,8 +25,8 @@ const BASE_LEVEL: u8 = 1;
 // radius with GRID=20; only a bounded set of chunks is kept in memory.
 const MAX_LEVEL: u8 = 18;
 const MAX_CHUNKS: usize = 960;
-const SPLITS_PER_FRAME: usize = 4;
-const MERGES_PER_FRAME: usize = 8;
+const MAX_JOBS: usize = 6;
+const UPLOADS_PER_FRAME: usize = 8;
 // Split when local geometric error becomes visible, even on a Mars-sized
 // planet. Parent tiles remain visible until replacements are submitted.
 const SPLIT_ERROR: f64 = 0.78;
@@ -49,6 +50,7 @@ impl Tile {
         }
     }
 
+    #[cfg(test)]
     fn parent(self) -> Option<Self> {
         (self.level > 0).then(|| Self {
             level: self.level - 1,
@@ -95,10 +97,69 @@ struct Chunk {
     mesh: Handle<Mesh>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    Roots,
+    Split(Tile),
+    Merge(Tile),
+}
+
+impl Edit {
+    fn mesh_count(self) -> usize {
+        match self {
+            Self::Roots => 6,
+            Self::Split(_) => 4,
+            Self::Merge(_) => 1,
+        }
+    }
+
+    fn reserve(self, reserved: &mut HashSet<Tile>) {
+        match self {
+            Self::Roots => {}
+            Self::Split(tile) => {
+                reserved.insert(tile);
+            }
+            Self::Merge(tile) => {
+                reserved.extend(tile.children());
+            }
+        }
+    }
+}
+
+struct PreparedTile {
+    tile: Tile,
+    anchor: DVec3,
+    bounds: Aabb,
+    mesh: Mesh,
+}
+
+impl PreparedTile {
+    fn build(tile: Tile, heights: &SurfaceHeights) -> Self {
+        let anchor = tile.anchor(heights);
+        let mesh = build_mesh(tile, anchor, heights);
+        let bounds = mesh.get_aabb().expect("terrain chunks contain a full grid");
+        Self {
+            tile,
+            anchor,
+            bounds,
+            mesh,
+        }
+    }
+}
+
+struct TerrainJob {
+    edit: Edit,
+    task: Task<Vec<PreparedTile>>,
+}
+
 #[derive(Resource)]
 pub(super) struct TerrainSurface {
     material: Handle<TerrainMaterial>,
     leaves: HashMap<Tile, Chunk>,
+    // Active internal nodes retain the exact sampled center without keeping
+    // their mesh or resampling procedural elevation on every merge scan.
+    parents: HashMap<Tile, DVec3>,
+    pending: Vec<TerrainJob>,
 }
 
 impl TerrainSurface {
@@ -106,13 +167,115 @@ impl TerrainSurface {
         Self {
             material,
             leaves: HashMap::new(),
+            parents: HashMap::new(),
+            pending: Vec::new(),
         }
     }
 
-    fn retire(&mut self, tile: Tile, commands: &mut Commands, meshes: &mut Assets<Mesh>) {
-        if let Some(chunk) = self.leaves.remove(&tile) {
-            commands.entity(chunk.entity).despawn();
-            meshes.remove(&chunk.mesh);
+    fn request(&mut self, edit: Edit, heights: &SurfaceHeights) {
+        let heights = heights.clone();
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            let tiles = match edit {
+                Edit::Roots => (0..6).map(Tile::root).collect(),
+                Edit::Split(tile) => tile.children().into(),
+                Edit::Merge(tile) => vec![tile],
+            };
+            tiles
+                .into_iter()
+                .map(|tile| PreparedTile::build(tile, &heights))
+                .collect()
+        });
+        self.pending.push(TerrainJob { edit, task });
+    }
+
+    fn retire(&mut self, tile: Tile, commands: &mut Commands, meshes: &mut Assets<Mesh>) -> Chunk {
+        let chunk = self
+            .leaves
+            .remove(&tile)
+            .expect("terrain edit owns its resident leaves");
+        commands.entity(chunk.entity).despawn();
+        meshes.remove(&chunk.mesh);
+        chunk
+    }
+
+    fn eligible(&self, edit: Edit, eye: DVec3) -> bool {
+        match edit {
+            Edit::Roots => self.leaves.is_empty(),
+            Edit::Split(tile) => self.leaves.get(&tile).is_some_and(|chunk| {
+                tile.level < BASE_LEVEL || tile.error(eye, chunk.anchor) > SPLIT_ERROR
+            }),
+            Edit::Merge(tile) => self.parents.get(&tile).is_some_and(|&anchor| {
+                tile.error(eye, anchor) < MERGE_ERROR
+                    && tile
+                        .children()
+                        .iter()
+                        .all(|child| self.leaves.contains_key(child))
+            }),
+        }
+    }
+
+    fn plan(&mut self, eye: DVec3, heights: &SurfaceHeights) {
+        if self.leaves.is_empty() {
+            if self.pending.is_empty() {
+                self.request(Edit::Roots, heights);
+            }
+            return;
+        }
+        if self.pending.len() >= MAX_JOBS {
+            return;
+        }
+        let mut reserved = HashSet::with_capacity(MAX_JOBS * 4);
+        for job in &self.pending {
+            job.edit.reserve(&mut reserved);
+        }
+        let mut merges: Vec<_> =
+            self.parents
+                .iter()
+                .filter_map(|(&tile, &anchor)| {
+                    let error = tile.error(eye, anchor);
+                    (tile.level >= BASE_LEVEL
+                        && error < MERGE_ERROR
+                        && tile.children().iter().all(|child| {
+                            self.leaves.contains_key(child) && !reserved.contains(child)
+                        }))
+                    .then_some((error, tile))
+                })
+                .collect();
+        merges.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        // Keep capacity for refinement near the camera while distant tiles coarsen.
+        for (_, tile) in merges
+            .into_iter()
+            .take((MAX_JOBS - self.pending.len()).div_ceil(2))
+        {
+            let edit = Edit::Merge(tile);
+            edit.reserve(&mut reserved);
+            self.request(edit, heights);
+        }
+
+        let pending_splits = self
+            .pending
+            .iter()
+            .filter(|job| matches!(job.edit, Edit::Split(_)))
+            .count();
+        let available = MAX_CHUNKS.saturating_sub(self.leaves.len() + 3 * pending_splits) / 3;
+        let available = available.min(MAX_JOBS - self.pending.len());
+        if available == 0 {
+            return;
+        }
+        let mut splits: Vec<_> = self
+            .leaves
+            .iter()
+            .filter_map(|(&tile, chunk)| {
+                if reserved.contains(&tile) || tile.level >= MAX_LEVEL {
+                    return None;
+                }
+                let error = tile.error(eye, chunk.anchor);
+                (tile.level < BASE_LEVEL || error > SPLIT_ERROR).then_some((error, tile))
+            })
+            .collect();
+        splits.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (_, tile) in splits.into_iter().take(available) {
+            self.request(Edit::Split(tile), heights);
         }
     }
 }
@@ -134,104 +297,72 @@ pub(super) fn stream(
     };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
 
-    let material = terrain.material.clone();
-    let context = TileContext {
-        root: root.entity(),
-        frame,
-        heights: &heights,
-        material: &material,
-    };
-    if terrain.leaves.is_empty() {
-        for face in 0..6 {
-            for tile in Tile::root(face).children() {
-                terrain
-                    .leaves
-                    .insert(tile, context.spawn(tile, &mut commands, &mut meshes));
-            }
+    let mut uploads = UPLOADS_PER_FRAME;
+    let mut index = 0;
+    while index < terrain.pending.len() {
+        let edit = terrain.pending[index].edit;
+        let count = edit.mesh_count();
+        if !terrain.eligible(edit, eye) {
+            terrain.pending.swap_remove(index);
+            continue;
         }
-    }
-
-    let parents: HashSet<_> = terrain
-        .leaves
-        .keys()
-        .filter_map(|tile| tile.parent())
-        .filter(|parent| parent.level >= BASE_LEVEL)
-        .collect();
-    let mut merges: Vec<_> = parents
-        .into_iter()
-        .filter_map(|parent| {
-            if !parent
-                .children()
-                .iter()
-                .all(|child| terrain.leaves.contains_key(child))
-            {
-                return None;
-            }
-            let error = parent.error(eye, parent.anchor(&heights));
-            (error < MERGE_ERROR).then_some((error, parent))
-        })
-        .collect();
-    merges.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    for (_, parent) in merges.into_iter().take(MERGES_PER_FRAME) {
-        let replacement = context.spawn(parent, &mut commands, &mut meshes);
-        for child in parent.children() {
-            terrain.retire(child, &mut commands, &mut meshes);
-        }
-        terrain.leaves.insert(parent, replacement);
-    }
-
-    let available = (MAX_CHUNKS.saturating_sub(terrain.leaves.len()) / 3).min(SPLITS_PER_FRAME);
-    if available == 0 {
-        return;
-    }
-    let mut splits: Vec<_> = terrain
-        .leaves
-        .iter()
-        .filter_map(|(&tile, chunk)| {
-            let error = tile.error(eye, chunk.anchor);
-            (tile.level < MAX_LEVEL && error > SPLIT_ERROR).then_some((error, tile))
-        })
-        .collect();
-    splits.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    for (_, tile) in splits.into_iter().take(available) {
-        // Queue all four replacements together so extraction sees a complete surface.
-        for child in tile.children() {
-            let replacement = context.spawn(child, &mut commands, &mut meshes);
-            terrain.leaves.insert(child, replacement);
-        }
-        terrain.retire(tile, &mut commands, &mut meshes);
-    }
-}
-
-struct TileContext<'a> {
-    root: Entity,
-    frame: &'a ReferenceFrame,
-    heights: &'a SurfaceHeights,
-    material: &'a Handle<TerrainMaterial>,
-}
-
-impl TileContext<'_> {
-    fn spawn(&self, tile: Tile, commands: &mut Commands, meshes: &mut Assets<Mesh>) -> Chunk {
-        let anchor = tile.anchor(self.heights);
-        let (cell, translation) = self.frame.translation_to_grid(anchor);
-        let mesh = build_mesh(tile, anchor, self.heights);
-        let bounds = mesh
-            .get_aabb()
-            .expect("terrain chunks contain a full grid");
-        let mesh = meshes.add(mesh);
-        let entity = commands
-            .spawn((
-                cell,
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(self.material.clone()),
-                Transform::from_translation(translation),
+        let Some(tiles) = (count <= uploads)
+            .then(|| block_on(poll_once(&mut terrain.pending[index].task)))
+            .flatten()
+        else {
+            index += 1;
+            continue;
+        };
+        terrain.pending.swap_remove(index);
+        uploads -= count;
+        // Submit all replacements in one update. Retire old coverage only
+        // after the complete replacement is available.
+        for prepared in tiles {
+            let PreparedTile {
+                tile,
+                anchor,
                 bounds,
-                NotShadowCaster,
-            ))
-            .id();
-        commands.entity(self.root).add_child(entity);
-        Chunk { entity, anchor, mesh }
+                mesh,
+            } = prepared;
+            let (cell, translation) = frame.translation_to_grid(anchor);
+            let mesh = meshes.add(mesh);
+            let entity = root
+                .spawn(
+                    &mut commands,
+                    (
+                        cell,
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(terrain.material.clone()),
+                        Transform::from_translation(translation),
+                        bounds,
+                        NotShadowCaster,
+                    ),
+                )
+                .id();
+            terrain.leaves.insert(
+                tile,
+                Chunk {
+                    entity,
+                    anchor,
+                    mesh,
+                },
+            );
+        }
+        match edit {
+            Edit::Roots => {}
+            Edit::Split(parent) => {
+                let parent_chunk = terrain.retire(parent, &mut commands, &mut meshes);
+                terrain.parents.insert(parent, parent_chunk.anchor);
+            }
+            Edit::Merge(parent) => {
+                for child in parent.children() {
+                    terrain.retire(child, &mut commands, &mut meshes);
+                }
+                terrain.parents.remove(&parent);
+            }
+        }
     }
+    terrain.plan(eye, &heights);
 }
 
 fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
@@ -240,15 +371,35 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     let mut normals = Vec::with_capacity(positions.capacity());
     let mut locations = Vec::with_capacity(positions.capacity());
     let mut indices = Vec::with_capacity((GRID * GRID + 4 * GRID) * 6);
+    let spacing = RADIUS * tile.unit() / GRID as f64;
+    let normal_step = spacing.max(8.0);
     for y in 0..=GRID {
         for x in 0..=GRID {
             let up = tile.direction(DVec2::new(x as f64, y as f64) / GRID as f64);
             let height = heights.sample(up).unwrap_or(0.0);
             let position = up * (RADIUS + height);
             positions.push((position - anchor).as_vec3().to_array());
-            normals.push(ground_normal(up, height, heights).as_vec3().to_array());
             let planet = position.as_vec3();
             locations.push([planet.x, planet.y, planet.z, height as f32]);
+        }
+    }
+
+    for y in 0..=GRID {
+        for x in 0..=GRID {
+            let index = y * stride + x;
+            let normal = if spacing >= 8.0 && x > 0 && x < GRID && y > 0 && y < GRID {
+                // At coarse LODs, use the geometry's existing height samples.
+                let position = |i| Vec3::from_array(positions[i]);
+                let dx = position(index + 1) - position(index - 1);
+                let dy = position(index + stride) - position(index - stride);
+                dy.cross(dx).normalize()
+            } else {
+                // Edge normals remain identical between same-level tiles.
+                // An 8 m footprint keeps fine mesh shading stable.
+                let up = tile.direction(DVec2::new(x as f64, y as f64) / GRID as f64);
+                ground_normal(up, f64::from(locations[index][3]), normal_step, heights).as_vec3()
+            };
+            normals.push(normal.to_array());
         }
     }
 
@@ -295,7 +446,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     mesh
 }
 
-fn ground_normal(up: DVec3, height: f64, heights: &SurfaceHeights) -> DVec3 {
+fn ground_normal(up: DVec3, height: f64, distance: f64, heights: &SurfaceHeights) -> DVec3 {
     let reference = if up.y.abs() < 0.93 {
         DVec3::Y
     } else {
@@ -303,13 +454,13 @@ fn ground_normal(up: DVec3, height: f64, heights: &SurfaceHeights) -> DVec3 {
     };
     let east = up.cross(reference).normalize();
     let north = east.cross(up);
-    let step = 8.0 / RADIUS;
+    let step = distance / RADIUS;
     let sample = |tangent: DVec3| {
         let displaced = (up + tangent * step).normalize();
         heights.sample(displaced).unwrap_or(height)
     };
-    let slope_x = (sample(east) - sample(-east)) / 16.0;
-    let slope_y = (sample(north) - sample(-north)) / 16.0;
+    let slope_x = (sample(east) - sample(-east)) / (2.0 * distance);
+    let slope_y = (sample(north) - sample(-north)) / (2.0 * distance);
     (up - east * slope_x - north * slope_y).normalize()
 }
 
@@ -320,13 +471,21 @@ mod tests {
     #[test]
     fn adjacent_tiles_share_exact_radial_border_directions() {
         for level in [4_u8, 11, 18] {
-            let left = Tile { face: 2, level, x: 0, y: 0 };
+            let left = Tile {
+                face: 2,
+                level,
+                x: 0,
+                y: 0,
+            };
             let right = Tile { x: 1, ..left };
             for i in 0..=GRID {
                 let t = i as f64 / GRID as f64;
                 let a = left.direction(DVec2::new(1.0, t));
                 let b = right.direction(DVec2::new(0.0, t));
-                assert!(a.distance(b) < 1e-12, "mismatched tile border at level {level}");
+                assert!(
+                    a.distance(b) < 1e-12,
+                    "mismatched tile border at level {level}"
+                );
             }
         }
     }

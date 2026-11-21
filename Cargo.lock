@@ -7025,6 +7025,7 @@ dependencies = [
 name = "world-generator"
 version = "0.1.0"
 dependencies = [
+ "world-core",
  "world-generation",
 ]
 

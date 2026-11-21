@@ -6,21 +6,15 @@ mod player;
 mod trip;
 
 use bevy::{
-    camera::Exposure,
-    core_pipeline::tonemapping::Tonemapping,
-    light::AtmosphereEnvironmentMapLight,
-    pbr::AtmosphereSettings,
-    post_process::bloom::Bloom,
-    prelude::*,
-    transform::TransformSystems,
+    camera::Exposure, core_pipeline::tonemapping::Tonemapping,
+    light::AtmosphereEnvironmentMapLight, pbr::AtmosphereSettings, post_process::bloom::Bloom,
+    prelude::*, transform::TransformSystems,
 };
 use big_space::prelude::FloatingOrigin;
 use camera::{camera_controller, DebugCameraController};
 use world_core::{
     planet::{ExplorerSpawn, RADIUS},
-    runtime::{
-        CameraMotion, Explorer, PlanetRoot, ReferenceFrame, WorldMovement, WorldReady,
-    },
+    runtime::{CameraMotion, Explorer, PlanetRoot, ReferenceFrame, WorldMovement, WorldReady},
 };
 
 /// Spawn and control the primary explorer and world camera.
@@ -86,9 +80,12 @@ fn spawn(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let grid = frames.get(root.entity()).expect("WorldReady creates the planet grid");
+    let grid = frames
+        .get(root.entity())
+        .expect("WorldReady creates the planet grid");
     let player = player::Player::new(initial.spawn);
-    let (map, (position, rotation), mode) = player::MapView::at_spawn(&player, initial.first_person);
+    let (map, (position, rotation), mode) =
+        player::MapView::at_spawn(&player, initial.first_person);
     commands.insert_resource(map);
     let (cell, translation) = grid.translation_to_grid(position);
     root.spawn(
@@ -97,7 +94,12 @@ fn spawn(
             Camera3d::default(),
             // Physical sky, aerial perspective and sky-derived image-based lighting.
             AtmosphereSettings::default(),
-            AtmosphereEnvironmentMapLight::default(),
+            AtmosphereEnvironmentMapLight {
+                // The cubemap supplies ambient/reflection lighting. The sky
+                // itself still uses the full atmosphere lookup textures.
+                size: UVec2::splat(64),
+                ..default()
+            },
             Exposure { ev100: 13.0 },
             Tonemapping::AcesFitted,
             Bloom::NATURAL,
@@ -134,7 +136,10 @@ fn spawn(
     commands.spawn((
         player::Controls,
         Text::new(player::WALK_CONTROLS),
-        TextFont { font_size: FontSize::Px(17.0), ..default() },
+        TextFont {
+            font_size: FontSize::Px(17.0),
+            ..default()
+        },
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,

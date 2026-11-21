@@ -1,24 +1,24 @@
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use bevy::{
-    gizmos::config::GizmoConfigGroup,
-    prelude::*,
     asset::RenderAssetUsages,
-    mesh::PrimitiveTopology,
-    shader::ShaderRef,
-    reflect::TypePath,
+    gizmos::config::GizmoConfigGroup,
     material::AlphaMode,
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+    reflect::TypePath,
     render::render_resource::AsBindGroup,
+    shader::ShaderRef,
 };
 
 use world_core::{
     coordinates::terrain_aligned_direction,
-    planet::{RADIUS, LEGACY_BAKED_RADIUS},
-    SurfaceHeights,
     planet::{
         BAKED_WATER_MESH_HEADER, LAKE_SURFACE_PATH, RIVER_REACH_VERTICES, RIVER_SURFACE_PATH,
     },
+    planet::{LEGACY_BAKED_RADIUS, RADIUS},
     runtime::{Explorer, WorldCamera},
+    SurfaceHeights,
 };
 
 #[derive(Component)]
@@ -59,17 +59,34 @@ pub(super) fn load(assets: &Path, heights: &SurfaceHeights) -> Option<(Mesh, Riv
 /// Use flat lake tiles with a zero flow vector and no river-map centerlines.
 pub(super) fn load_lakes(assets: &Path, heights: &SurfaceHeights) -> Option<Mesh> {
     let positions = load_positions(&assets.join(LAKE_SURFACE_PATH), 6)?;
-    let count = positions.len();
+    // Adjacent lake triangles share exactly the same baked positions. Index
+    // them before evaluating the expensive depth and staging GPU attributes.
+    let mut lookup = HashMap::new();
+    let mut vertices = Vec::new();
+    let mut depths = Vec::new();
+    let mut indices = Vec::with_capacity(positions.len());
+    for position in positions {
+        let index = *lookup.entry(position.map(f32::to_bits)).or_insert_with(|| {
+            let index = vertices.len() as u32;
+            vertices.push(position);
+            depths.push([
+                0.0,
+                0.0,
+                0.0,
+                water_depth(Vec3::from_array(position), heights),
+            ]);
+            index
+        });
+        indices.push(index);
+    }
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; count]);
-    let depths: Vec<[f32; 4]> = positions.iter().map(|&position| {
-        [0.0, 0.0, 0.0, water_depth(Vec3::from_array(position), heights)]
-    }).collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; vertices.len()]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, depths);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
+    mesh.insert_indices(Indices::U32(indices));
     Some(mesh)
 }
 
@@ -119,8 +136,8 @@ fn load_positions(path: &Path, record_vertices: usize) -> Option<Vec<[f32; 3]>> 
         // Modern assets already near RADIUS are left untouched.
         let previous_radius = f64::from(aligned.length());
         let aligned = if (previous_radius - LEGACY_BAKED_RADIUS).abs() < 30_000.0 {
-            (aligned.as_dvec3().normalize()
-                * (RADIUS + previous_radius - LEGACY_BAKED_RADIUS)).as_vec3()
+            (aligned.as_dvec3().normalize() * (RADIUS + previous_radius - LEGACY_BAKED_RADIUS))
+                .as_vec3()
         } else {
             aligned
         };
@@ -142,7 +159,7 @@ fn water_depth(position: Vec3, heights: &SurfaceHeights) -> f32 {
 fn river_mesh(positions: Vec<[f32; 3]>, heights: &SurfaceHeights) -> (Mesh, RiverCenterlines) {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     let centerlines: Vec<[Vec3; 2]> = positions
         .chunks_exact(RIVER_REACH_VERTICES)
@@ -179,7 +196,9 @@ fn river_mesh(positions: Vec<[f32; 3]>, heights: &SurfaceHeights) -> (Mesh, Rive
                 .unwrap_or_else(|| 0.5 + offset.dot(across) / width);
             uvs.push([offset.dot(flow), bank]);
             flow_velocities.push([
-                velocity.x, velocity.y, velocity.z,
+                velocity.x,
+                velocity.y,
+                velocity.z,
                 water_depth(Vec3::from_array(*vertex), heights),
             ]);
         }
@@ -197,12 +216,9 @@ pub(super) fn draw_map(
     camera: Query<(&GlobalTransform, &WorldCamera)>,
     mut gizmos: Gizmos<RiverMapLines>,
 ) {
-    let (Some(rivers), Ok(water), Ok(player), Ok((camera, mode))) = (
-        rivers,
-        water.single(),
-        player.single(),
-        camera.single(),
-    ) else {
+    let (Some(rivers), Ok(water), Ok(player), Ok((camera, mode))) =
+        (rivers, water.single(), player.single(), camera.single())
+    else {
         return;
     };
     if *mode != WorldCamera::Map {

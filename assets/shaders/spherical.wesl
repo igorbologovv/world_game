@@ -1,5 +1,6 @@
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT;
 import bevy_pbr::render::pbr_types::{PbrInput, pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
 import bevy_pbr::render::pbr_functions::{calculate_view, apply_pbr_lighting, main_pass_post_lighting_processing};
 
@@ -301,8 +302,10 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     let direction = normalize(position);
     let surface_normal = normalize(input.world_normal);
     let slope = length(cross(direction, surface_normal));
-    let dx = dpdx(position);
-    let dy = dpdy(position);
+    // Use camera-relative coordinates for gradients. Absolute Mars
+    // positions lose fractions of a meter and destabilize close mip levels.
+    let dx = dpdx(input.world_position.xyz);
+    let dy = dpdy(input.world_position.xyz);
     let pixel_dx = length(dx);
     let pixel_dy = length(dy);
     let footprint = max(pixel_dx, pixel_dy);
@@ -404,6 +407,7 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
 
     var pbr_input: PbrInput = pbr_input_new();
     pbr_input.material.flags |= STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    pbr_input.flags |= MESH_FLAGS_SHADOW_RECEIVER_BIT;
     pbr_input.material.base_color = base_color;
     pbr_input.material.perceptual_roughness = surface.roughness;
     pbr_input.diffuse_occlusion = vec3<f32>(occlusion);
