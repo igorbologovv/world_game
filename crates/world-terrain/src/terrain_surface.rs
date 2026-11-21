@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{
     math::{DVec2, DVec3},
-    pbr::{NotShadowCaster, FogFalloff},
+    light::NotShadowCaster,
+    pbr::FogFalloff,
+    camera::primitives::MeshAabb,
     prelude::*,
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
