@@ -1,6 +1,6 @@
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
-    gltf::{Gltf, GltfMesh},
+    gltf::{Gltf, GltfMesh, GltfMaterial},
     prelude::*,
     render::{
         mesh::VertexAttributeValues,
@@ -50,7 +50,7 @@ impl OakPrimitives {
         files: &[Handle<Gltf>; 4],
         gltfs: &Assets<Gltf>,
         gltf_meshes: &Assets<GltfMesh>,
-        materials: &Assets<StandardMaterial>,
+        materials: &Assets<GltfMaterial>,
     ) -> Option<Self> {
         let mut leaves = Vec::with_capacity(4);
         let mut wood = Vec::with_capacity(3);
@@ -222,7 +222,7 @@ pub(super) fn request_assets(mut commands: Commands, assets: Res<AssetServer>) {
         ("models/hero_oak/bark/metallic-roughness.ktx2", false),
     ]
     .map(|(path, is_srgb)| {
-        assets.load_with_settings(path, move |settings: &mut ImageLoaderSettings| {
+        assets.load_builder().with_settings(move |settings: &mut ImageLoaderSettings| {
             settings.is_srgb = is_srgb;
             settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,
@@ -232,7 +232,7 @@ pub(super) fn request_assets(mut commands: Commands, assets: Res<AssetServer>) {
                 mipmap_filter: ImageFilterMode::Linear,
                 ..default()
             });
-        })
+        }).load(path)
     });
     commands.insert_resource(HeroOakAssets(Some(OakFiles { lods, bark })));
 }
@@ -243,6 +243,7 @@ pub(super) fn finish_loading(
     mut models: ResMut<ForestModels>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    gltf_materials: Res<Assets<GltfMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -255,7 +256,7 @@ pub(super) fn finish_loading(
         matches!(assets.load_state(file.id()), LoadState::Failed(_))
             || matches!(
                 assets.get_recursive_dependency_load_state(file.id()),
-                Some(RecursiveDependencyLoadState::Failed)
+                Some(RecursiveDependencyLoadState::Failed(_))
             )
     }) {
         warn!("Hero Oak failed to load. Keeping the procedural oak meshes.");
@@ -288,7 +289,7 @@ pub(super) fn finish_loading(
     } else {
         return;
     };
-    models.hero_oak = OakPrimitives::resolve(&files.lods, &gltfs, &gltf_meshes, &materials)
+    models.hero_oak = OakPrimitives::resolve(&files.lods, &gltfs, &gltf_meshes, &gltf_materials)
         .and_then(|parts| {
             parts.build(
                 &mut meshes,
