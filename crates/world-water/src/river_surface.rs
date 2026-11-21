@@ -3,11 +3,18 @@ use std::{fs, path::Path};
 use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
-    render::{render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
+    reflect::TypePath,
+    render::alpha::AlphaMode,
+    render::{
+        render_asset::RenderAssetUsages,
+        render_resource::{AsBindGroup, PrimitiveTopology},
+    },
 };
 
 use world_core::{
     coordinates::terrain_aligned_direction,
+    planet::RADIUS,
+    SurfaceHeights,
     planet::{
         BAKED_WATER_MESH_HEADER, LAKE_SURFACE_PATH, RIVER_REACH_VERTICES, RIVER_SURFACE_PATH,
     },
@@ -17,19 +24,40 @@ use world_core::{
 #[derive(Component)]
 pub(super) struct RiverWater;
 
+// Bevy's view globals supply animation time directly; no per-frame CPU updates.
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub(super) struct RiverMaterial {
+    #[uniform(0)]
+    pub(super) brightness: f32,
+}
+
+impl Material for RiverMaterial {
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn vertex_shader() -> bevy::render::render_resource::ShaderRef {
+        "shaders/river_water.wgsl".into()
+    }
+
+    fn fragment_shader() -> bevy::render::render_resource::ShaderRef {
+        "shaders/river_water.wgsl".into()
+    }
+}
+
 #[derive(Default, Reflect, GizmoConfigGroup)]
 pub(super) struct RiverMapLines;
 
 #[derive(Resource)]
 pub(super) struct RiverCenterlines(Vec<[Vec3; 2]>);
 
-pub(super) fn load(assets: &Path) -> Option<(Mesh, RiverCenterlines)> {
+pub(super) fn load(assets: &Path, heights: &SurfaceHeights) -> Option<(Mesh, RiverCenterlines)> {
     let positions = load_positions(&assets.join(RIVER_SURFACE_PATH), RIVER_REACH_VERTICES)?;
-    Some(river_mesh(positions))
+    Some(river_mesh(positions, heights))
 }
 
 /// Use flat lake tiles with a zero flow vector and no river-map centerlines.
-pub(super) fn load_lakes(assets: &Path) -> Option<Mesh> {
+pub(super) fn load_lakes(assets: &Path, heights: &SurfaceHeights) -> Option<Mesh> {
     let positions = load_positions(&assets.join(LAKE_SURFACE_PATH), 6)?;
     let count = positions.len();
     let mut mesh = Mesh::new(
@@ -37,12 +65,11 @@ pub(super) fn load_lakes(assets: &Path) -> Option<Mesh> {
         RenderAssetUsages::default(),
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; count]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0, 0.0, 0.0, 1.0]; count]);
-    let normals: Vec<[f32; 3]> = positions.iter()
-        .map(|point| Vec3::from_array(*point).normalize().to_array())
-        .collect();
+    let depths: Vec<[f32; 4]> = positions.iter().map(|&position| {
+        [0.0, 0.0, 0.0, water_depth(Vec3::from_array(position), heights)]
+    }).collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, depths);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     Some(mesh)
 }
 
@@ -91,7 +118,17 @@ fn load_positions(path: &Path, record_vertices: usize) -> Option<Vec<[f32; 3]>> 
     Some(positions)
 }
 
-fn river_mesh(positions: Vec<[f32; 3]>) -> (Mesh, RiverCenterlines) {
+// Height below the water surface, sampled from the actual generated terrain.
+// Fall back to a modest depth only if the height source is unavailable.
+fn water_depth(position: Vec3, heights: &SurfaceHeights) -> f32 {
+    let radial = position.as_dvec3();
+    let Some(ground) = heights.sample(radial.normalize()) else {
+        return 8.0;
+    };
+    (radial.length() - RADIUS - ground).clamp(0.0, 96.0) as f32
+}
+
+fn river_mesh(positions: Vec<[f32; 3]>, heights: &SurfaceHeights) -> (Mesh, RiverCenterlines) {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -130,14 +167,13 @@ fn river_mesh(positions: Vec<[f32; 3]>) -> (Mesh, RiverCenterlines) {
                 .copied()
                 .unwrap_or_else(|| 0.5 + offset.dot(across) / width);
             uvs.push([offset.dot(flow), bank]);
-            flow_velocities.push([velocity.x, velocity.y, velocity.z, 1.0]);
+            flow_velocities.push([
+                velocity.x, velocity.y, velocity.z,
+                water_depth(Vec3::from_array(*vertex), heights),
+            ]);
         }
     }
-    let normals: Vec<[f32; 3]> = positions.iter()
-        .map(|point| Vec3::from_array(*point).normalize().to_array())
-        .collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, flow_velocities);
     (mesh, RiverCenterlines(centerlines))
