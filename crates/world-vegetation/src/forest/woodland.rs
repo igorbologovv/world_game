@@ -8,7 +8,7 @@
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     gltf::{Gltf, GltfMesh},
-    pbr::AlphaMode,
+    render::alpha::AlphaMode,
     prelude::*,
     render::mesh::VertexAttributeValues,
 };
