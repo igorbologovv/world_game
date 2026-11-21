@@ -49,10 +49,10 @@ pub struct VegetationSettings {
 impl Default for VegetationSettings {
     fn default() -> Self {
         Self {
-            mesh_distances: [30.0, 62.0],
-            impostor_blend: [84.0, 116.0],
-            impostor_range: 400.0,
-            forest_range: 2_000.0,
+            mesh_distances: [50.0, 105.0],
+            impostor_blend: [165.0, 225.0],
+            impostor_range: 480.0,
+            forest_range: 1_250.0,
             preload_margin: 260.0,
             hysteresis: 0.10,
             transition_seconds: 0.30,
