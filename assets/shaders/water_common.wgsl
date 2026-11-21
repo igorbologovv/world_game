@@ -8,15 +8,21 @@ struct WaterVertex {
     @location(1) planet_position: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) velocity: vec3<f32>,
+    @location(4) depth_m: f32,
 }
 
 fn water_vertex(mesh: Vertex) -> WaterVertex {
     let world = get_world_from_local(mesh.instance_index) * vec4<f32>(mesh.position, 1.0);
     var velocity = vec3<f32>(0.0);
+    var depth_m = 0.0;
 #ifdef VERTEX_COLORS
     velocity = mesh.color.xyz;
+    depth_m = mesh.color.w;
 #endif
-    return WaterVertex(position_world_to_clip(world.xyz), world.xyz, mesh.position, mesh.uv, velocity);
+    return WaterVertex(
+        position_world_to_clip(world.xyz), world.xyz, mesh.position, mesh.uv,
+        velocity, depth_m,
+    );
 }
 
 fn wave_slope(position: vec3<f32>, time: f32, direction: vec3<f32>, wavelength: f32, steepness: f32) -> vec3<f32> {
