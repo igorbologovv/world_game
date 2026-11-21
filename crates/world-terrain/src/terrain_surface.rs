@@ -20,11 +20,11 @@ use crate::TerrainMaterial;
 
 const GRID: usize = 20;
 const BASE_LEVEL: u8 = 1;
-// An 18-level quadtree gives ~2 meter sampling near the observer at Mars
+// An 18-level quadtree gives ~1 meter sampling near the observer at Mars
 // radius with GRID=20; only a bounded set of chunks is kept in memory.
 const MAX_LEVEL: u8 = 18;
 const MAX_CHUNKS: usize = 960;
-const SPLITS_PER_FRAME: usize = 6;
+const SPLITS_PER_FRAME: usize = 4;
 const MERGES_PER_FRAME: usize = 8;
 // Split when local geometric error becomes visible, even on a Mars-sized
 // planet. Parent tiles remain visible until replacements are submitted.
@@ -316,6 +316,20 @@ fn ground_normal(up: DVec3, height: f64, heights: &SurfaceHeights) -> DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjacent_tiles_share_exact_radial_border_directions() {
+        for level in [4_u8, 11, 18] {
+            let left = Tile { face: 2, level, x: 0, y: 0 };
+            let right = Tile { x: 1, ..left };
+            for i in 0..=GRID {
+                let t = i as f64 / GRID as f64;
+                let a = left.direction(DVec2::new(1.0, t));
+                let b = right.direction(DVec2::new(0.0, t));
+                assert!(a.distance(b) < 1e-12, "mismatched tile border at level {level}");
+            }
+        }
+    }
 
     #[test]
     fn child_quadrants_cover_the_parent_and_share_their_edges() {
