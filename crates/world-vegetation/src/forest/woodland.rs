@@ -5,8 +5,6 @@
 //! oak variants at their deterministic world sites. The canonical placement,
 //! streaming, and existing distant-forest representation remain unchanged.
 
-use std::path::Path;
-
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     gltf::{Gltf, GltfMesh},
@@ -127,7 +125,8 @@ fn build_variant(
         let (wood, source_bark) = find_part("Bark")?;
         let (leaves, source_leaves) = find_part("Leaves")?;
         if level == 0 {
-            bark_material = Some(materials.add(materials.get(&source_bark)?.clone()));
+            let original_bark = materials.get(&source_bark)?.clone();
+            bark_material = Some(materials.add(original_bark));
         }
         let source_leaf_material = materials.get(&source_leaves)?.clone();
         let source_leaf_image = source_leaf_material.base_color_texture.as_ref()?;
