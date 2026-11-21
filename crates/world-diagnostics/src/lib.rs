@@ -25,20 +25,15 @@ impl Plugin for FrameStatsPlugin {
 fn spawn_stats(mut commands: Commands) {
     commands.spawn((
         FrameStatsText,
-        TextBundle::from_section(
-            "FPS: ... | Frame: ...",
-            TextStyle {
-                font_size: 15.0,
-                color: Color::srgb(0.95, 0.95, 0.9),
-                ..default()
-            },
-        )
-        .with_style(Style {
+        Text::new("FPS: ... | Frame: ..."),
+        TextFont { font_size: 15.0, ..default() },
+        TextColor(Color::srgb(0.95, 0.95, 0.9)),
+        Node {
             position_type: PositionType::Absolute,
             left: Val::Px(18.0),
             top: Val::Px(16.0),
             ..default()
-        }),
+        },
     ));
 }
 
@@ -48,7 +43,7 @@ fn update_stats(
     store: Res<DiagnosticsStore>,
     mut readout: Query<&mut Text, With<FrameStatsText>>,
 ) {
-    *elapsed += time.delta_seconds();
+    *elapsed += time.delta_secs();
     if *elapsed < 0.5 {
         return;
     }
@@ -61,8 +56,8 @@ fn update_stats(
         .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
         .and_then(|metric| metric.smoothed())
         .unwrap_or(0.0);
-    if let Ok(mut text) = readout.get_single_mut() {
-        text.sections[0].value = format!("FPS: {:.0}   Frame: {:.1} ms", fps, ms);
+    if let Ok(mut text) = readout.single_mut() {
+        text.0 = format!("FPS: {:.0}   Frame: {:.1} ms", fps, ms);
     }
 }
 
@@ -89,6 +84,6 @@ mod tests {
         let text = world
             .query_filtered::<&Text, With<FrameStatsText>>()
             .single(world);
-        assert_eq!(text.sections[0].value, "FPS: 10   Frame: 100.0 ms");
+        assert_eq!(text.0, "FPS: 10   Frame: 100.0 ms");
     }
 }
