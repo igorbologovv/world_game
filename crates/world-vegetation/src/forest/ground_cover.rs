@@ -17,7 +17,11 @@ use super::lod::{coverage, quantize};
 
 use super::{noise3, tangent_basis, FoliageMaterial, MeshBuilder, Random, Wind};
 
-const CELLS: f64 = 8192.0;
+// A fixed face-cell count turns 24 m patches into 827 m tiles at Mars
+// radius, making the 82 m cover-streaming range miss almost everything.
+// Keep the patch size physical rather than tying it to planet diameter.
+const PATCH_SIZE_METERS: f64 = 25.0;
+const CELLS: f64 = 2.0 * RADIUS / PATCH_SIZE_METERS;
 const FADE_START: f32 = 44.0;
 const FADE_END: f32 = 62.0;
 const PRELOAD: f64 = 82.0;
@@ -256,8 +260,10 @@ fn load_patch(key: Patch, heights: &SurfaceHeights) -> Option<(Mesh, DVec3, Quat
                     && [east, north, -east, -north].into_iter().any(|axis| {
                         heights.is_river((direction + axis * (9.0 / RADIUS)).normalize())
                     }));
-            let ground = (direction * (RADIUS + elevation)).as_vec3();
-            let cover = noise3(ground * 0.21 + Vec3::new(4.1, 11.8, -7.3));
+            // f32 planetary positions have ~0.25 m precision on a Mars-radius
+            // sphere, too coarse for the 5 m vegetation clumping field.
+            let ground = direction * (RADIUS + elevation);
+            let cover = super::forest_field(ground / 4.75, 0x216B_19CE) as f32;
             let density = (0.49 + 0.44 * wet + 1.34 * cover).clamp(0.12, 0.96);
             let position = direction * (RADIUS + elevation - 0.13);
             let root = rotation.inverse() * (position - origin).as_vec3();
@@ -462,6 +468,16 @@ impl Plant {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ground_cover_patch_size_is_local_at_mars_radius() {
+        let meters = 2.0 * RADIUS / CELLS;
+        assert!((meters - PATCH_SIZE_METERS).abs() < 0.0001);
+        let up = DVec3::new(0.2, 0.92, -0.3).normalize();
+        let patches = visible_patches(up);
+        assert!(!patches.is_empty(), "ground cover must stream near any camera location");
+        assert!(patches.len() <= MAX_PATCHES);
+    }
 
     #[test]
     fn cover_patches_are_bounded_deterministic_and_cross_cube_seams() {
