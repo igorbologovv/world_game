@@ -8,12 +8,11 @@ use bevy::{
     pbr::MaterialPlugin,
     prelude::*,
     reflect::TypePath,
+    shader::ShaderRef,
+    image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     render::{
-        render_resource::{AsBindGroup, ShaderRef, TextureFormat, TextureViewDimension},
-        texture::{
-            ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
-            ImageSamplerDescriptor,
-        },
+        render_resource::{AsBindGroup, TextureFormat, TextureViewDimension},
+
     },
 };
 use world_core::runtime::{CameraMotion, WorldMovement};
