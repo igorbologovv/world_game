@@ -514,7 +514,7 @@ pub(super) fn walk(
         }
     } else {
         map.target_zoom = (map.target_zoom - scroll * 0.10).clamp(0.0, 1.0);
-        let zoom_ease = 1.0 - (-18.0 * time.delta_seconds_f64()).exp();
+        let zoom_ease = 1.0 - (-18.0 * time.delta_secs_f64()).exp();
         map.zoom += (map.target_zoom - map.zoom) * zoom_ease;
         if (map.target_zoom - map.zoom).abs() < 0.0001 {
             map.zoom = map.target_zoom;
@@ -590,7 +590,7 @@ pub(super) fn walk(
     let movement = (forward * axis_forward + right * axis_right).normalize_or_zero();
     let sprint = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let speed_multiplier = if sprint { SPRINT_MULTIPLIER } else { 1.0 };
-    let dt = time.delta_seconds_f64().min(0.05);
+    let dt = time.delta_secs_f64().min(0.05);
     if player.flight.is_some() {
         let rise = (keys.pressed(KeyCode::Space) as i32
             - keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) as i32)
@@ -611,7 +611,7 @@ pub(super) fn walk(
         );
     } else {
         player.advance(
-            speed.meters_per_second() * time.delta_seconds_f64(),
+            speed.meters_per_second() * time.delta_secs_f64(),
             ground,
             ground_at,
             wet_at,
