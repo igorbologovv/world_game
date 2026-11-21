@@ -3,10 +3,13 @@ use std::{fs, path::Path};
 use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology},
+    shader::ShaderRef,
     reflect::TypePath,
     render::alpha::AlphaMode,
     render::{
-        render_asset::RenderAssetUsages,
+
         render_resource::{AsBindGroup, PrimitiveTopology},
     },
 };
