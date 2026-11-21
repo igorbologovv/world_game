@@ -5,10 +5,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy::{ecs::system::EntityCommands, prelude::*};
-use bevy_terrain::big_space::{BigSpaceCommands, BigSpacePlugin, GridCell};
+use bevy::{ecs::system::{EntityCommands, SystemParam}, prelude::*};
+use big_space::prelude::{BigSpaceCommands, BigSpaceDefaultPlugins, Grid};
 
-pub use bevy_terrain::big_space::{GridTransform, ReferenceFrame, ReferenceFrames};
+pub use big_space::prelude::{CellCoord as GridCell, CellTransform as GridTransform, Grid as ReferenceFrame};
+/// Single-planet compatibility adapter for the new BigSpace Grid API.
+/// All world objects belong to the same planet-root Grid.
+#[derive(SystemParam)]
+pub struct ReferenceFrames<'w, 's> {
+    root: Res<'w, PlanetRoot>,
+    grids: Query<'w, 's, &'static Grid>,
+}
+
+impl ReferenceFrames<'_, '_> {
+    /// Return the planet's high-precision coordinate grid.
+    pub fn parent_frame(&self, _child: Entity) -> Option<&Grid> {
+        self.grids.get(self.root.entity()).ok()
+    }
+}
 
 use crate::SurfaceHeights;
 
@@ -115,7 +129,7 @@ impl WorldSpacePlugin {
 
 impl Plugin for WorldSpacePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(BigSpacePlugin::default())
+        app.add_plugins(BigSpaceDefaultPlugins)
             .insert_resource(self.assets.clone())
             .add_systems(Startup, prepare_world.in_set(WorldReady));
     }
@@ -124,6 +138,6 @@ impl Plugin for WorldSpacePlugin {
 fn prepare_world(mut commands: Commands, assets: Res<WorldAssets>) {
     commands.insert_resource(SurfaceHeights::load(assets.directory()));
     let mut root = Entity::PLACEHOLDER;
-    commands.spawn_big_space(ReferenceFrame::default(), |frame| root = frame.id());
+    commands.spawn_big_space(Grid::default(), |frame| root = frame.id());
     commands.insert_resource(PlanetRoot(root));
 }
