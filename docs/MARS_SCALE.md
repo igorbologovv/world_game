@@ -117,3 +117,18 @@ above are **required verification**, not claimed to have passed here.
   ground collision and vegetation queries share the result.
 - A local-region continuity/relief regression test has been added.
   **Cargo and gameplay validation remain outstanding**.
+
+## Forest distribution smoothing
+
+- The Palm Coast starting glade is 55 m rather than 240 m in radius.
+- The old 78 km and 8.4 km multiplied forest masks produced abrupt,
+  multi-kilometer zones of completely zero vegetation. New 22 km / 3.8 km /
+  620 m continuous fields provide distinct woodland regions, clearings and
+  grove patches, but retain sparse background trees on climate-eligible land.
+  Higher altitudes and unsuitable climates may remain naturally treeless.
+- Distant batched forests remain visible up to 2.1 km rather than 1.25 km,
+  avoiding apparently empty near valleys.
+- Important: the streaming, sampling, and visibility budgets are still
+  bounded. This change does not keep all planetary trees in memory.
+- This is a procedural distribution change, not a final biome/ecology system.
+  Verify appearance and GPU cost in the client before merging.
