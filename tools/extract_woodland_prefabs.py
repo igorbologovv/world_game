@@ -127,7 +127,7 @@ def automatic_tree_pairs(limit):
     # Pair by hierarchy, never by nearest position in the scene.
     bark = [
         obj for obj in bpy.data.objects
-        if re.fullmatch(r"Bark(?:\\.\\d+)?(?:_\\d+)?", obj.name)
+        if obj.name == "Bark" or obj.name.startswith(("Bark.", "Bark_"))
     ]
     trees = []
     for trunk in bark:
