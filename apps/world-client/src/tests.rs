@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use bevy::{
     diagnostic::DiagnosticsPlugin,
     gizmos::GizmoPlugin,
@@ -9,7 +7,7 @@ use bevy::{
         ButtonState, InputPlugin,
     },
     render::{primitives::Aabb, render_resource::Shader, texture::ImagePlugin},
-    scene::{SceneInstance, ScenePlugin, SceneSpawner},
+    scene::ScenePlugin,
     window::PrimaryWindow,
 };
 use world_core::{
@@ -80,31 +78,13 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     assert!(position.normalize().abs_diff_eq(spawn, 1e-6));
     assert!((position.length() - RADIUS - ground - 0.38).abs() < 0.02);
 
-    let wait_started = Instant::now();
-    loop {
-        let world = app.world_mut();
-        let mut scenes = world.query::<(&Name, &SceneInstance, &Parent)>();
-        let spawner = world.resource::<SceneSpawner>();
-        if let Some((_, instance, parent)) = scenes.iter(world).find(|(name, instance, _)| {
-            name.as_str() == "Low Poly Tree Scene Free" && spawner.instance_is_ready(***instance)
-        }) {
-            assert_eq!(parent.get(), root);
-            assert_eq!(
-                spawner
-                    .iter_instance_entities(**instance)
-                    .filter(|entity| world.get::<Handle<Mesh>>(*entity).is_some())
-                    .count(),
-                6
-            );
-            break;
-        }
-        assert!(
-            wait_started.elapsed() < Duration::from_secs(10),
-            "starter scene failed to load"
-        );
-        app.update();
-        std::thread::sleep(Duration::from_millis(4));
-    }
+    // The imported demonstration is an asset source, not a second terrain tile.
+    assert_eq!(
+        world.query::<&Name>().iter(world)
+            .filter(|name| name.as_str() == "Low Poly Tree Scene Free")
+            .count(),
+        0,
+    );
 
     for (key_code, logical_key, expected) in [
         (
