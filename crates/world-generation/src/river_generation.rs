@@ -190,7 +190,7 @@ fn open_diagonal_channels(
     area: &[f32],
     lakes: &[bool],
 ) -> usize {
-    let is_channel = |cell: usize| !lakes[cell] && heights[cell] > SEA_LEVEL
+    let is_channel = |cell: usize| !lakes[cell]
         && outlets[cell] != NO_OUTLET && area[cell] >= RIVER_AREA;
     let mut smoothing = vec![0.0_f32; heights.len()];
     let mut count = 0;
