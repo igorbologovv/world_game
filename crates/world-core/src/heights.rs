@@ -93,7 +93,7 @@ impl SurfaceHeights {
             return 0.0;
         }
         let Some(map) = &self.rivers else {
-            return false;
+            return 0.0;
         };
         let (face, uv) = surface_uv(direction);
         let uv = height_source_uv(uv, DVec2::splat(f64::from(HEIGHT_MAP_SIZE)));
