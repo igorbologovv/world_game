@@ -1,7 +1,7 @@
 use bevy::{
     prelude::*,
     render::{
-        render_asset::RenderAssetUsages,
+        ,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
         texture::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     },
@@ -144,8 +144,10 @@ pub(super) fn import_mipmapped(
     {
         return source.clone();
     }
-    let pixels = image
-        .data
+    let Some(source_bytes) = image.data.as_ref() else {
+        return source.clone();
+    };
+    let pixels = source_bytes
         .chunks_exact(4)
         .map(|p| [p[0], p[1], p[2], p[3]])
         .collect();
@@ -221,7 +223,7 @@ pub(super) fn mipmapped(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    image.data = data;
+    image.data = Some(data);
     image.texture_descriptor.mip_level_count = levels;
     let address = if repeat {
         ImageAddressMode::Repeat
@@ -292,7 +294,7 @@ mod tests {
             let image = canopy_texture(species);
             let texture = &image.texture_descriptor;
             let pixels = (texture.size.width * texture.size.height) as usize;
-            let opaque = image.data[..pixels * 4]
+            let opaque = image.data.as_ref().unwrap()[..pixels * 4]
                 .chunks_exact(4)
                 .filter(|p| p[3] >= 100)
                 .count();
@@ -305,7 +307,7 @@ mod tests {
                     ((texture.size.width >> level) * (texture.size.height >> level) * 4) as usize
                 })
                 .sum::<usize>();
-            assert_eq!(image.data.len(), mip_bytes);
+            assert_eq!(image.data.as_ref().unwrap().len(), mip_bytes);
         }
     }
 }
