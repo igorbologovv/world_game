@@ -136,7 +136,7 @@ struct BatchFade {
 
 impl MaterialExtension for BatchFade {
     fn fragment_shader() -> ShaderRef {
-        "shaders/woodland_fern_batch.wgsl".into()
+        "shaders/woodland_fern_batch.wesl".into()
     }
 }
 type BatchMaterial = ExtendedMaterial<StandardMaterial, BatchFade>;
