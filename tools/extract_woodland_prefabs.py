@@ -31,6 +31,7 @@ def args():
     p.add_argument("--list", action="store_true", help="Inspect actual imported object names; never export")
     p.add_argument("--water-report", action="store_true", help="Inspect pond/water source materials and their textures")
     p.add_argument("--roots", nargs="+", help="Explicit root names to export (as printed by --list)")
+    p.add_argument("--auto-trees", type=int, default=0, help="Export this many tallest distinct Bark+Leaves pairs")
     p.add_argument("--lod-ratios", type=float, nargs=3, default=(1.0, 0.45, 0.18))
     return p.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
 
@@ -71,12 +72,9 @@ def inspect():
     return roots
 
 
-def export_one(name, output, ratios):
-    source_root = bpy.data.objects.get(name)
-    if source_root is None:
-        raise ValueError(f"Unknown root {name!r}; inspect --list")
-    group = objects_under(source_root)
-    meshes = [obj for obj in group if obj.type == "MESH"]
+def export_one(name, roots, output, ratios):
+    group = [obj for root in roots for obj in objects_under(root)]
+    meshes = list({obj.name: obj for obj in group if obj.type == "MESH"}.values())
     if not meshes:
         raise ValueError(f"{name!r} has no meshes")
     if EXCLUDE.search(name):
@@ -119,10 +117,56 @@ def export_one(name, output, ratios):
 
 
 
+
+def automatic_tree_pairs(limit):
+    # The original Sketchfab source contains paired Bark/Leaves meshes as
+    # separate objects. Do NOT infer prefab trees from flattened scene.glb.
+    bark = [obj for obj in bpy.data.objects
+            if re.match(r"^Bark(?:\\.\\d+)?(?:_\\d+)?$", obj.name)]
+    leaves = [obj for obj in bpy.data.objects
+              if re.match(r"^Leaves(?:\\.\\d+)?(?:_\\d+)?$", obj.name)]
+    def center(root):
+        group = [o for o in objects_under(root) if o.type == "MESH"]
+        if not group:
+            return None
+        lo, hi = bounds(group)
+        return (lo + hi) / 2, hi.y - lo.y
+    trees = [(obj, *center(obj)) for obj in bark if center(obj)]
+    trees.sort(key=lambda item: (-item[2], item[0].name))
+    unused = {obj.name: obj for obj in leaves}
+    result = []
+    for trunk, point, height in trees:
+        if len(result) == limit:
+            break
+        if height < 2.0 or not unused:
+            continue
+        candidates = []
+        for candidate in unused.values():
+            info = center(candidate)
+            if info is None:
+                continue
+            leaf_center, _ = info
+            delta = (leaf_center - point)
+            candidates.append((delta.x * delta.x + delta.z * delta.z, candidate.name, candidate))
+        if not candidates:
+            break
+        dist, _, crown = min(candidates, key=lambda item: (item[0], item[1]))
+        if dist > max(3.0, height * 0.55) ** 2:
+            continue
+        unused.pop(crown.name)
+        result.append((trunk, crown))
+    if len(result) < limit:
+        print(f"WARNING: only {len(result)} valid Bark/Leaves pairs found (requested {limit})")
+    if not result:
+        raise RuntimeError("No paired tree objects found; run --list to inspect imported names")
+    return result
+
 def water_report():
     report = []
+    water_objects = [obj for obj in bpy.data.objects if re.search(r"(water|pond|lake|river)", obj.name, re.I)]
+    water_materials = {slot.material.name for obj in water_objects for slot in obj.material_slots if slot.material}
     for mat in bpy.data.materials:
-        if not re.search(r"(water|pond|lake|river|liquid)", mat.name, re.I):
+        if mat.name not in water_materials and not re.search(r"(water|pond|lake|river|liquid)", mat.name, re.I):
             continue
         nodes = mat.node_tree.nodes if mat.use_nodes and mat.node_tree else []
         textures = []
@@ -152,6 +196,12 @@ def main():
     if options.water_report:
         print(json.dumps({"water_materials": water_report()}, indent=2))
         return
+    if options.auto_trees > 0:
+        pairs = automatic_tree_pairs(options.auto_trees)
+        done = [export_one(f"woodland_tree_{i:02}", [bark, leaves], options.output, options.lod_ratios)
+                for i, (bark, leaves) in enumerate(pairs)]
+        print(json.dumps(done, indent=2))
+        return
     if options.list or not options.roots:
         print(json.dumps(inspect(), indent=2))
         if not options.list:
@@ -159,7 +209,8 @@ def main():
         return
     if any(r <= 0 or r > 1 for r in options.lod_ratios):
         raise ValueError("LOD ratios must be in (0,1]")
-    done = [export_one(name, options.output, options.lod_ratios) for name in options.roots]
+    done = [export_one(name, [bpy.data.objects[name]], options.output, options.lod_ratios)
+            for name in options.roots]
     print(json.dumps(done, indent=2))
     print("Review exports in Blender before using as runtime vegetation assets.")
 
