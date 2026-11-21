@@ -3,7 +3,7 @@ import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_loca
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
-import bevy_pbr::render::pbr_functions::{calculate_view, apply_pbr_lighting, main_pass_post_lighting_processing};
+import bevy_pbr::render::pbr_functions::main_pass_post_lighting_processing;
 
 struct ProxyCoverage {
     leaf: vec4<f32>,
@@ -30,7 +30,6 @@ struct ProxyOutput {
     @location(0) world: vec4<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) up: vec3<f32>,
     @location(4) @interpolate(flat) mask: vec2<f32>,
 }
 
@@ -66,7 +65,7 @@ fn vertex(mesh: ProxyVertex) -> ProxyOutput {
     let world = transform * vec4<f32>(local, 1.0);
     // Suppress whole trees already covered by a finer representation before rasterization.
     let clip = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), position_world_to_clip(world.xyz), mask.y > mask.x);
-    return ProxyOutput(clip, world, normal, up, mesh.uv, mask);
+    return ProxyOutput(clip, world, normal, mesh.uv, mask);
 }
 
 @fragment
@@ -83,21 +82,11 @@ fn fragment(in: ProxyOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // The portrait atlas stores albedo, not a separate dark, baked-light
-    // version of the tree. Light this representation through the SAME Bevy
-    // PBR pipeline as the nearby leaves and the distant canopy terrain.
-    // The billboard normal is camera-facing, so bias it toward the radial
-    // up vector: tree crowns receive stable top lighting as the view moves.
-    let crown_normal = normalize(in.up * 0.78 + in.normal * 0.22);
+    let sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
+    let shade = 0.61 + 0.37 * abs(dot(normalize(in.normal), sun));
     var pbr = pbr_input_new();
     pbr.material.flags |= STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
-    pbr.material.base_color = vec4<f32>(texel.rgb, 1.0);
-    pbr.material.perceptual_roughness = 0.84;
     pbr.frag_coord = in.position;
     pbr.world_position = in.world;
-    pbr.world_normal = crown_normal;
-    pbr.N = crown_normal;
-    pbr.V = calculate_view(in.world, pbr.is_orthographic);
-    let lit = apply_pbr_lighting(pbr);
-    return main_pass_post_lighting_processing(pbr, lit);
+    return main_pass_post_lighting_processing(pbr, vec4<f32>(texel.rgb * shade, 1.0));
 }
