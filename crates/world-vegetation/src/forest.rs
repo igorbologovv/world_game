@@ -19,7 +19,7 @@ use bevy::{
     render::{
         mesh::Indices,
         primitives::Aabb,
-        render_asset::RenderAssetUsages,
+        ,
         render_resource::{AsBindGroup, PrimitiveTopology, ShaderRef},
         view::VisibilitySystems,
     },
@@ -100,10 +100,10 @@ impl ModelLod {
         meshes: &mut Assets<Mesh>,
     ) -> Self {
         let wood = wood.map(|mesh| WoodLod {
-            bounds: mesh.compute_aabb().expect("trunks contain vertices"),
+            bounds: mesh.get_aabb().expect("trunks contain vertices"),
             mesh: meshes.add(mesh),
         });
-        let foliage_bounds = foliage.compute_aabb().expect("canopies contain vertices");
+        let foliage_bounds = foliage.get_aabb().expect("canopies contain vertices");
         Self::from_parts(wood, meshes.add(foliage), foliage_material, foliage_bounds)
     }
 
@@ -183,18 +183,12 @@ impl Plugin for ProceduralForestPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             MaterialPlugin::<FoliageMaterial> {
-                prepass_enabled: false,
-                shadows_enabled: false,
                 ..default()
             },
             MaterialPlugin::<lod::BarkMaterial> {
-                prepass_enabled: false,
-                shadows_enabled: false,
                 ..default()
             },
             MaterialPlugin::<proxy::ProxyMaterial> {
-                prepass_enabled: false,
-                shadows_enabled: false,
                 ..default()
             },
         ))
