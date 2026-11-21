@@ -232,10 +232,10 @@ fn spawn_argument_selects_a_known_region() {
 fn palm_build_uses_its_checkout_assets_when_launched_from_an_older_directory() {
     let checkout = Path::new(WORKSPACE_ROOT).join("assets");
     let older = WorldAssets::new(checkout.join("models"));
-    let chosen = prefer_checkout_palm_assets(older.clone(), &checkout, false);
+    let chosen = prefer_checkout_assets(older.clone(), &checkout, false);
     assert_eq!(chosen.directory(), checkout);
     assert!(chosen.directory().join(PALM_MESH).is_file());
 
-    let override_assets = prefer_checkout_palm_assets(older.clone(), &checkout, true);
+    let override_assets = prefer_checkout_assets(older.clone(), &checkout, true);
     assert_eq!(override_assets.directory(), older.directory());
 }
