@@ -6,7 +6,7 @@ mod player;
 mod trip;
 
 use bevy::{prelude::*, transform::TransformSystems};
-use big_space::prelude::{CellCoord, FloatingOrigin};
+use big_space::prelude::FloatingOrigin;
 use camera::{camera_controller, DebugCameraController};
 use world_core::{
     planet::{ExplorerSpawn, RADIUS},
