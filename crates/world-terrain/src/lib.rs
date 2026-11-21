@@ -153,7 +153,7 @@ fn valid_detail_pair(albedo: &Image, normal_roughness: &Image) -> bool {
 
 impl Material for TerrainMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/spherical.wgsl".into()
+        "shaders/spherical.wesl".into()
     }
 }
 
