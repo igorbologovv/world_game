@@ -34,6 +34,20 @@ pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) ->
     let ground = value_noise(point / 260.0, 0x5E80_5E91) * 7.5;
     let micro = value_noise(point / 48.0, 0x24AB_920C) * 1.2;
 
+    // Independent, physically local mountain systems. The old 1024² atlas
+    // contains no useful sub-kilometer geometry on a Mars-sized planet.
+    // These ridges are constructed from high-frequency ridged noise and
+    // nested spurs rather than merely raising the existing heightmap.
+    let highland_regions = smoothstep(
+        -0.32, 0.13,
+        value_noise(point / 94_000.0, 0x47D9_A3B1),
+    );
+    let spur = (1.0 - value_noise(point / 9_000.0, 0xF812_9C54).abs()).powi(3);
+    let crags = (1.0 - value_noise(point / 2_800.0, 0x33F0_5E6A).abs()).powi(4);
+    let ravines = (1.0 - value_noise(point / 1_050.0, 0xC78D_2A19).abs()).powi(3);
+    let local_mountains = highland_regions
+        * (spur * 1_420.0 + crags * 360.0 + ravines * 75.0);
+
     // The previous 100 km map is intentionally left in charge of the
     // coastline and lakes until water gets its own regional mesh pipeline.
     // Mountains only begin inland; beach-scale dunes remain near shore.
@@ -56,8 +70,14 @@ pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) ->
         value_noise(point / 1_300.0, 0x28EA_4B13).max(0.0) * 125.0
         + value_noise(point / 360.0, 0xA13D_72C0).max(0.0) * 22.0
     );
+    // Mountains also appear on moderate highlands (hundreds of meters
+    // above sea level), rather than only as faraway continental features.
+    // Keep existing sea-level assets aligned by tapering relief smoothly
+    // to zero at the waterline.
+    let highland = smoothstep(55.0, 240.0, base_height);
     (ridge + valleys + foothills + rolling + slopes + ground + micro)
         * inland * river
+        + local_mountains * highland * river
         + (coastal_hills + dunes) * river
 }
 
@@ -142,6 +162,27 @@ mod tests {
             }
         }
         assert!(maximum - minimum > 600.0, "insufficient mountains: {minimum}..{maximum}");
+    }
+
+    #[test]
+    fn local_mountain_detail_changes_at_kilometer_distances() {
+        let center = DVec3::new(-0.35, 0.83, 0.44).normalize();
+        let east = center.cross(DVec3::Y).normalize();
+        let north = east.cross(center);
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        for x in -8..=8 {
+            for y in -8..=8 {
+                let up = (center
+                    + east * (f64::from(x) * 1_500.0 / RADIUS)
+                    + north * (f64::from(y) * 1_500.0 / RADIUS))
+                    .normalize();
+                let height = detail(up, 850.0, 0.0);
+                minimum = minimum.min(height);
+                maximum = maximum.max(height);
+            }
+        }
+        assert!(maximum - minimum > 120.0, "local highlands have no meaningful relief");
     }
 
     #[test]
