@@ -95,7 +95,7 @@ fn install_world(app: &mut App, assets: WorldAssets, region: Region) {
     if region.id == PALM_COAST_REGION.id {
         app.insert_resource(ForestClearing {
             direction: terrain_aligned_direction(region.spawn.direction),
-            radius: 240.0,
+            radius: 55.0,
         });
     }
     let mut player = PlayerPlugin::new(region.spawn);
