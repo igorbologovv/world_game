@@ -152,12 +152,23 @@ def automatic_tree_pairs(limit):
     return result
 
 def water_report():
+    """Report actual source material properties without assuming water object names.
+
+    The Blender glTF importer can rename Water to Object_####, while the
+    material name remains material_3. Include all materials so a missing
+    name match is visible instead of silently producing an empty report.
+    """
     report = []
-    water_objects = [obj for obj in bpy.data.objects if re.search(r"(water|pond|lake|river)", obj.name, re.I)]
-    water_materials = {slot.material.name for obj in water_objects for slot in obj.material_slots if slot.material}
-    for mat in bpy.data.materials:
-        if mat.name not in water_materials and not re.search(r"(water|pond|lake|river|liquid)", mat.name, re.I):
+    usage = {}
+    for obj in bpy.data.objects:
+        if obj.type != "MESH":
             continue
+        for slot in obj.material_slots:
+            if slot.material is None:
+                continue
+            usage.setdefault(slot.material.name, []).append(obj.name)
+
+    for mat in sorted(bpy.data.materials, key=lambda item: item.name):
         nodes = mat.node_tree.nodes if mat.use_nodes and mat.node_tree else []
         textures = []
         for node in nodes:
@@ -168,13 +179,40 @@ def water_report():
                     "path": bpy.path.abspath(node.image.filepath),
                     "size": list(node.image.size),
                 })
+
+        pbr = next((node for node in nodes if node.type == "BSDF_PRINCIPLED"), None)
+        def input_value(name):
+            if pbr is None:
+                return None
+            socket = pbr.inputs.get(name)
+            if socket is None:
+                return None
+            value = socket.default_value
+            if hasattr(value, "to_list"):
+                return list(value)
+            if isinstance(value, (float, int, bool, str)):
+                return value
+            try:
+                return list(value)
+            except TypeError:
+                return str(value)
+
+        users = usage.get(mat.name, [])
         report.append({
             "material": mat.name,
-            "blend_method": str(getattr(mat, "surface_render_method", "unknown")),
+            "mesh_users": len(users),
+            "mesh_examples": users[:12],
+            "base_color": input_value("Base Color"),
+            "alpha": input_value("Alpha"),
+            "roughness": input_value("Roughness"),
+            "metallic": input_value("Metallic"),
+            "transmission_weight": input_value("Transmission Weight"),
+            "surface_render_method": str(getattr(mat, "surface_render_method", "unknown")),
+            "blend_method": str(getattr(mat, "blend_method", "unknown")),
             "textures": textures,
-            "note": "Static glTF material data is not a dynamic river shader.",
         })
     return report
+
 
 def main():
     options = args()
