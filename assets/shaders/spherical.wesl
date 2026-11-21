@@ -124,12 +124,20 @@ fn biome_surface(
         * (1.0 - savanna)
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
-    // A forest biome is defined by climate, independent of whether individual
-    // trees are spawned or how steep a particular slope happens to be.
-    // Actual tree placement has its own density, treeline and slope tests.
+    // Use the climatic envelope of *all* supported trees, not just the
+    // rain/temperate/boreal sub-biomes. Acacia, pine and warm coastal trees
+    // can grow where the old narrow forest mask was zero, leaving mountains
+    // behind visible stands inexplicably pale.
+    //
+    // Habitat describes the whole landscape; sparse individual placements,
+    // local grove noise, streaming range and slope do not define its color.
     let forest = max(max(rainforest, temperate_forest), max(boreal_forest, savanna * 0.48));
-    let alpine = 1.0 - smoothstep(1750.0, 2900.0, height);
-    let forest_landcover = forest * alpine * (1.0 - snow);
+    let tree_habitat = smoothstep(0.12, 0.23, temperature)
+        * smoothstep(0.16, 0.33, tree_moisture)
+        * (1.0 - smoothstep(0.91, 0.96, latitude));
+    let alpine = 1.0 - smoothstep(2400.0, 2900.0, height);
+    let forest_landcover = max(forest, tree_habitat * 0.92) * alpine
+        * (1.0 - snow);
     var canopy = mix(vec3<f32>(0.063, 0.119, 0.035), vec3<f32>(0.039, 0.095, 0.043), boreal_forest);
     canopy = mix(canopy, vec3<f32>(0.033, 0.112, 0.036), rainforest);
     canopy = mix(canopy, vec3<f32>(0.104, 0.143, 0.049), savanna);
@@ -389,7 +397,9 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     // local placement happens to be sparse. Climate drives this factor;
     // tree density does not enter terrain shading.
     let vegetation = clamp(weights[1] + weights[2], 0.0, 1.0);
-    let forest_biome = smoothstep(0.18, 0.68, biome.forest_cover);
+    // The whole tree-compatible biome receives one continuous ground color.
+    // No fade based on distance to the camera, local density or spawned trees.
+    let forest_biome = smoothstep(0.12, 0.48, biome.forest_cover);
     let forest_ground = forest_biome * vegetation;
 
     // Keep triplanar PBR texture and real lighting. Only very broad, muted
@@ -399,13 +409,16 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         1.0 + 0.08 * regional + 0.045 * patches,
         0.92, 1.08,
     );
-    let forest_floor_color = biome.canopy_tint * (1.72 * forest_color_variation);
+    // Strong continuous forest-floor base albedo instead of a weak overlay
+    // on the pale grassy texture. Retain texture normals and physically based
+    // sunlight so hills are shaped by light, not tree-sized color blotches.
+    let forest_floor_color = biome.canopy_tint * (1.82 * forest_color_variation);
     surface.color = mix(
         surface.color,
         forest_floor_color,
-        forest_ground * 0.79,
+        forest_ground * 0.96,
     );
-    surface.roughness = mix(surface.roughness, 0.92, forest_ground * 0.63);
+    surface.roughness = mix(surface.roughness, 0.92, forest_ground * 0.78);
 
     // Non-forest biomes keep their own broad meadow/soil colors. Preserve
     // snow, beach sand and rock material weights as authored above.
@@ -434,7 +447,11 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         let tangent_offset = (surface.normal_offset - surface_normal * dot(surface_normal, surface.normal_offset)) * 0.70;
         shaded_normal = normalize(surface_normal + tangent_offset);
     }
-    let base_color = vec4<f32>(surface.color * tint, 1.0);
+    // Outside forests keep the existing large-scale tint. Inside them only
+    // subtle variation is allowed; PBR lighting supplies local brightness.
+    let forest_tint = 1.0 + 0.08 * regional + 0.045 * patches;
+    let biome_tint = mix(tint, forest_tint, forest_ground);
+    let base_color = vec4<f32>(surface.color * biome_tint, 1.0);
 
     var pbr_input: PbrInput = pbr_input_new();
     pbr_input.material.flags |= STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
