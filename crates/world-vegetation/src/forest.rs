@@ -29,7 +29,7 @@ use bevy::{
     shader::ShaderRef,
 };
 use world_core::{
-    planet::{RADIUS, SEA_LEVEL},
+    planet::{LEGACY_BAKED_RADIUS, RADIUS, SEA_LEVEL},
     runtime::WorldMovement,
     SurfaceHeights,
 };
@@ -365,7 +365,10 @@ fn tree_site(
     }
     let species = select_species(direction, ground, rng, || {
         let (east, north) = tangent_basis(direction);
-        near_sea(direction, east, north, |up| heights.sample(up))
+        // The baked coastline covers the same *angular* region as on the
+        // original 100 km planet. Use the baked height source for coast tests:
+        // sub-kilometer procedural relief is not the ocean mask.
+        near_sea(direction, east, north, |up| heights.sample_base(up))
     })?;
     let (east, north) = tangent_basis(direction);
     let offset = 4.0 / RADIUS;
@@ -399,7 +402,10 @@ fn near_sea(
     ]
     .into_iter()
     .any(|axis| {
-        sample((direction + axis * (220.0 / RADIUS)).normalize())
+        // Keep the coastline detection band proportional to the global
+        // baked terrain, while local tree spacing remains in meters.
+        let legacy_coast_angle = 220.0 / LEGACY_BAKED_RADIUS;
+        sample((direction + axis * legacy_coast_angle).normalize())
             .is_some_and(|height| height < SEA_LEVEL)
     })
 }
