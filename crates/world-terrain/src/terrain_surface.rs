@@ -18,7 +18,7 @@ use world_core::{
     SurfaceHeights,
 };
 
-use crate::TerrainMaterial;
+use crate::{canopy_image, TerrainMaterial};
 
 const GRID: usize = 20;
 const BASE_LEVEL: u8 = 1;
@@ -28,6 +28,18 @@ const MAX_LEVEL: u8 = 18;
 const MAX_CHUNKS: usize = 960;
 const MAX_JOBS: usize = 6;
 const UPLOADS_PER_FRAME: usize = 8;
+
+// R8 canopy maps are bounded and generated off-thread with the terrain mesh.
+// Small nearby tiles need few texels; broad distant tiles get more detail.
+fn canopy_resolution(level: u8) -> u32 {
+    match level {
+        0..=7 => 128,
+        8..=9 => 64,
+        10..=11 => 32,
+        12..=13 => 16,
+        _ => 8,
+    }
+}
 // Split when local geometric error becomes visible, even on a Mars-sized
 // planet. Parent tiles remain visible until replacements are submitted.
 const SPLIT_ERROR: f64 = 0.78;
@@ -96,6 +108,8 @@ struct Chunk {
     // A strong mesh handle must be explicitly released from Assets<Mesh>
     // when a tile is retired; despawning its entity alone is not enough.
     mesh: Handle<Mesh>,
+    canopy_image: Option<Handle<Image>>,
+    material: Option<Handle<TerrainMaterial>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,6 +146,8 @@ struct PreparedTile {
     anchor: DVec3,
     bounds: Aabb,
     mesh: Mesh,
+    canopy_side: u32,
+    canopy_pixels: Vec<u8>,
 }
 
 impl PreparedTile {
@@ -139,11 +155,14 @@ impl PreparedTile {
         let anchor = tile.anchor(heights);
         let mesh = build_mesh(tile, anchor, heights);
         let bounds = mesh.get_aabb().expect("terrain chunks contain a full grid");
+        let (canopy_side, canopy_pixels) = build_canopy(tile, heights);
         Self {
             tile,
             anchor,
             bounds,
             mesh,
+            canopy_side,
+            canopy_pixels,
         }
     }
 }
@@ -189,13 +208,26 @@ impl TerrainSurface {
         self.pending.push(TerrainJob { edit, task });
     }
 
-    fn retire(&mut self, tile: Tile, commands: &mut Commands, meshes: &mut Assets<Mesh>) -> Chunk {
+    fn retire(
+        &mut self,
+        tile: Tile,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<TerrainMaterial>,
+    ) -> Chunk {
         let chunk = self
             .leaves
             .remove(&tile)
             .expect("terrain edit owns its resident leaves");
         commands.entity(chunk.entity).despawn();
         meshes.remove(&chunk.mesh);
+        if let Some(image) = &chunk.canopy_image {
+            images.remove(image);
+        }
+        if let Some(material) = &chunk.material {
+            materials.remove(material);
+        }
         chunk
     }
 
@@ -285,6 +317,8 @@ pub(super) fn stream(
     mut commands: Commands,
     mut terrain: ResMut<TerrainSurface>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
     heights: Res<SurfaceHeights>,
     cameras: Query<(Entity, GridTransform), With<WorldCamera>>,
     frames: ReferenceFrames,
@@ -298,6 +332,11 @@ pub(super) fn stream(
     };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
 
+    // Chunk materials copy the current base atlas handles (including any
+    // detail textures already loaded by the startup resource).
+    let Some(template) = materials.get(&terrain.material).cloned() else {
+        return;
+    };
     let mut uploads = UPLOADS_PER_FRAME;
     let mut index = 0;
     while index < terrain.pending.len() {
@@ -324,16 +363,31 @@ pub(super) fn stream(
                 anchor,
                 bounds,
                 mesh,
+                canopy_side,
+                canopy_pixels,
             } = prepared;
             let (cell, translation) = frame.translation_to_grid(anchor);
             let mesh = meshes.add(mesh);
+            // Don't allocate any GPU coverage image or material for
+            // snowfields, oceans and other fully canopy-free tiles.
+            let (chunk_image, chunk_material, visible_material) =
+                if canopy_pixels.iter().any(|&pixel| pixel != 0) {
+                    let image = images.add(canopy_image(canopy_side, canopy_pixels));
+                    let material = materials.add(TerrainMaterial {
+                        canopy_map: image.clone(),
+                        ..template.clone()
+                    });
+                    (Some(image), Some(material.clone()), material)
+                } else {
+                    (None, None, terrain.material.clone())
+                };
             let entity = root
                 .spawn(
                     &mut commands,
                     (
                         cell,
                         Mesh3d(mesh.clone()),
-                        MeshMaterial3d(terrain.material.clone()),
+                        MeshMaterial3d(visible_material),
                         Transform::from_translation(translation),
                         bounds,
                         NotShadowCaster,
@@ -346,18 +400,24 @@ pub(super) fn stream(
                     entity,
                     anchor,
                     mesh,
+                    canopy_image: chunk_image,
+                    material: chunk_material,
                 },
             );
         }
         match edit {
             Edit::Roots => {}
             Edit::Split(parent) => {
-                let parent_chunk = terrain.retire(parent, &mut commands, &mut meshes);
+                let parent_chunk = terrain.retire(
+                    parent, &mut commands, &mut meshes, &mut images, &mut materials,
+                );
                 terrain.parents.insert(parent, parent_chunk.anchor);
             }
             Edit::Merge(parent) => {
                 for child in parent.children() {
-                    terrain.retire(child, &mut commands, &mut meshes);
+                    terrain.retire(
+                        child, &mut commands, &mut meshes, &mut images, &mut materials,
+                    );
                 }
                 terrain.parents.remove(&parent);
             }
@@ -371,7 +431,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     let mut positions = Vec::with_capacity(stride * stride + 4 * GRID);
     let mut normals = Vec::with_capacity(positions.capacity());
     let mut locations = Vec::with_capacity(positions.capacity());
-    let mut canopy = Vec::with_capacity(positions.capacity());
+    let mut surface_uvs = Vec::with_capacity(positions.capacity());
     let mut indices = Vec::with_capacity((GRID * GRID + 4 * GRID) * 6);
     let spacing = RADIUS * tile.unit() / GRID as f64;
     let normal_step = spacing.max(8.0);
@@ -383,13 +443,10 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
             positions.push((position - anchor).as_vec3().to_array());
             let planet = position.as_vec3();
             locations.push([planet.x, planet.y, planet.z, height as f32]);
-            // UV0.x is the continuous regional forest canopy independent
-            // of streamed trees, local grove gaps, and terrain elevation.
-            // Do not multiply by the old 100 km river atlas: after scaling
-            // to Mars it creates broad false holes across forested valleys.
-            // Actual water geometry draws on top of the terrain separately.
-            let canopy_region = forest_canopy_region(up, height);
-            canopy.push([canopy_region, 0.0]);
+            // UV_0 now locates this vertex within the resident canopy map.
+            // Unlike per-vertex forest values it has sufficient detail even
+            // on coarse geometry used to draw distant valleys.
+            surface_uvs.push([x as f32 / GRID as f32, y as f32 / GRID as f32]);
         }
     }
 
@@ -439,7 +496,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
         positions.push((lowered - anchor).as_vec3().to_array());
         normals.push(normals[a]);
         locations.push(locations[a]);
-        canopy.push(canopy[a]);
+        surface_uvs.push(surface_uvs[a]);
         let a = a as u16;
         indices.extend_from_slice(&[a, b, low_b, a, low_b, low_a, a, low_b, b, a, low_a, low_b]);
     }
@@ -452,9 +509,31 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     // Preserve a planet-local position across floating-origin shifts.
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, locations);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, canopy);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, surface_uvs);
     mesh.insert_indices(Indices::U16(indices));
     mesh
+}
+
+// Evaluate the coverage image separately from the geometry grid. Use the
+// inexpensive baked source height: snow and cliffs are still handled by
+// biome material weights in the shader, without running procedural height
+// sampling thousands of times per tile.
+fn build_canopy(tile: Tile, heights: &SurfaceHeights) -> (u32, Vec<u8>) {
+    let side = canopy_resolution(tile.level);
+    let mut coverage = Vec::with_capacity((side * side) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let uv = DVec2::new(
+                (f64::from(x) + 0.5) / f64::from(side),
+                (f64::from(y) + 0.5) / f64::from(side),
+            );
+            let direction = tile.direction(uv);
+            let height = heights.sample_base(direction).unwrap_or(0.0);
+            let forest = forest_canopy_region(direction, height);
+            coverage.push((forest * 255.0).round() as u8);
+        }
+    }
+    (side, coverage)
 }
 
 fn ground_normal(up: DVec3, height: f64, distance: f64, heights: &SurfaceHeights) -> DVec3 {
