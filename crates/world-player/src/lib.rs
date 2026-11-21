@@ -80,6 +80,7 @@ fn spawn(
             Transform::from_translation(translation).with_rotation(rotation),
             cell,
             FloatingOrigin,
+            DistanceFog::default(),
             DebugCameraController::default(),
             WorldCamera::Map,
         ),
