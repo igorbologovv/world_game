@@ -15,6 +15,7 @@ use bevy::{
     math::DVec3,
     pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin},
     prelude::*,
+    asset::RenderAssetUsages,
     reflect::TypePath,
     render::{
         mesh::Indices,
