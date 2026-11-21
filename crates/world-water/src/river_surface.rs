@@ -13,7 +13,7 @@ use bevy::{
 
 use world_core::{
     coordinates::terrain_aligned_direction,
-    planet::RADIUS,
+    planet::{RADIUS, LEGACY_BAKED_RADIUS},
     SurfaceHeights,
     planet::{
         BAKED_WATER_MESH_HEADER, LAKE_SURFACE_PATH, RIVER_REACH_VERTICES, RIVER_SURFACE_PATH,
@@ -112,6 +112,17 @@ fn load_positions(path: &Path, record_vertices: usize) -> Option<Vec<[f32; 3]>> 
         } else {
             let position = position.as_dvec3();
             (terrain_aligned_direction(position.normalize()) * position.length()).as_vec3()
+        };
+        // Existing water binaries were generated for the 100 km reference
+        // sphere. Until hydrology is regenerated, preserve their radial
+        // elevations while moving them onto the Mars-sized reference body.
+        // Modern assets already near RADIUS are left untouched.
+        let previous_radius = f64::from(aligned.length());
+        let aligned = if (previous_radius - LEGACY_BAKED_RADIUS).abs() < 30_000.0 {
+            (aligned.as_dvec3().normalize()
+                * (RADIUS + previous_radius - LEGACY_BAKED_RADIUS)).as_vec3()
+        } else {
+            aligned
         };
         positions.push(aligned.to_array());
     }
