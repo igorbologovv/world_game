@@ -16,10 +16,6 @@ var detail_albedo: texture_2d_array<f32>;
 var detail_normal_roughness: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(5)
 var<uniform> detail_enabled: u32;
-@group(constants::MATERIAL_BIND_GROUP) @binding(6)
-var canopy_coverage: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(7)
-var canopy_sampler: sampler;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -139,9 +135,10 @@ fn biome_surface(
     let tree_habitat = smoothstep(0.12, 0.23, temperature)
         * smoothstep(0.16, 0.33, tree_moisture)
         * (1.0 - smoothstep(0.91, 0.96, latitude));
-    let alpine = 1.0 - smoothstep(2400.0, 2900.0, height);
-    let forest_landcover = max(forest, tree_habitat * 0.92) * alpine
-        * (1.0 - snow);
+    // A wooded climatic region continues to the distant hills even when
+    // individual trees stop spawning at the alpine treeline. Actual snow,
+    // rock and shore retain their separate surface weights below.
+    let forest_landcover = max(forest, tree_habitat * 0.92) * (1.0 - snow);
     var canopy = mix(vec3<f32>(0.063, 0.119, 0.035), vec3<f32>(0.039, 0.095, 0.043), boreal_forest);
     canopy = mix(canopy, vec3<f32>(0.033, 0.112, 0.036), rainforest);
     canopy = mix(canopy, vec3<f32>(0.104, 0.143, 0.049), savanna);
@@ -395,37 +392,34 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
-    // Local tree geometry is progressively replaced by an independent,
-    // tile-resident R8 forest-coverage map. Unlike the former UV vertex mask,
-    // bilinear map sampling paints every visible pixel inside the region.
-    // Each chunk uses its own map in tile-local UV; no planet-sized atlas
-    // and no additional scene entities are required.
+    // Distant forest is represented by the color of its crowns on the
+    // *terrain itself*. The same climate field already drives the species
+    // found in this region. No per-tile GPU textures, instances, or extra
+    // sampling of the tree-placement candidates is needed.
     let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
-    let coverage = textureSample(canopy_coverage, canopy_sampler, input.uv).r;
-    let canopy_region = smoothstep(0.06, 0.45, coverage);
+    let canopy_region = smoothstep(0.10, 0.40, biome.forest_cover);
     let exposed = clamp(weights[3] + weights[4], 0.0, 1.0);
     let shoreline = 1.0 - smoothstep(1.5, 4.0, height);
     let forest_ground = canopy_region * (1.0 - exposed) * (1.0 - shoreline);
 
-    // A tree crown shrinking below a few pixels is no longer a useful
-    // silhouette. Use both true distance and the projected terrain pixel
-    // footprint to gradually hand over to the continuous canopy map.
-    let pixel_handoff = smoothstep(0.7, 3.5, footprint);
+    // Begin changing the near forest floor into a leaf-green forest canopy
+    // before individual tree impostors shrink into subpixel speckles. The
+    // screen-space footprint supplements the distance-based transition.
     let canopy_distance = max(
-        smoothstep(180.0, 850.0, distance_to_eye),
-        pixel_handoff,
+        smoothstep(200.0, 950.0, distance_to_eye),
+        smoothstep(0.7, 3.5, footprint),
     );
     let broad_variation = clamp(
-        1.0 + 0.09 * regional + 0.035 * patches,
-        0.90, 1.10,
+        1.0 + 0.08 * regional + 0.03 * patches,
+        0.92, 1.08,
     );
     let forest_floor_color = vec3<f32>(0.055, 0.142, 0.051) * broad_variation;
     let ground_blend = forest_ground * (1.0 - canopy_distance) * 0.70;
     surface.color = mix(surface.color, forest_floor_color, ground_blend);
 
-    // Fill the entire distant forest region with leaf-green albedo. Gentle
-    // broad color modulation and normal PBR lighting preserve terrain shape
-    // without leaving pale holes between individual tree impostors.
+    // Solid leaf color fills the visible forest region as the 3D tree
+    // silhouettes disappear. Geometry/normal-based sunlight and aerial
+    // perspective preserve depth without drawing distant tree objects.
     let canopy_color = vec3<f32>(0.036, 0.125, 0.046) * broad_variation;
     let canopy_blend = forest_ground * canopy_distance * 0.995;
     surface.color = mix(surface.color, canopy_color, canopy_blend);
@@ -441,7 +435,7 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         * (1.0 - canopy_region) * 0.18;
     surface.color *= mix(vec3<f32>(1.0), meadow_color, meadow_strength);
 
-    // Rock and snow are preserved from the physical material weights.
+    // Retain exposed stone and snowy/high cliffs.
     let outcrop = smoothstep(0.28, 0.64, slope + patches * 0.10)
         * smoothstep(140.0, 780.0, height)
         * (1.0 - weights[4]);
