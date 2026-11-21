@@ -14,15 +14,15 @@ mod woodland;
 use bevy::{
     math::DVec3,
     pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin},
+    camera::{primitives::{Aabb, MeshAabb}, visibility::VisibilitySystems},
+    shader::ShaderRef,
     prelude::*,
     asset::RenderAssetUsages,
     reflect::TypePath,
     render::{
         mesh::Indices,
-        primitives::Aabb,
 
-        render_resource::{AsBindGroup, PrimitiveTopology, ShaderRef},
-        view::VisibilitySystems,
+        render_resource::{AsBindGroup, PrimitiveTopology},
     },
 };
 use world_core::{planet::RADIUS, runtime::WorldMovement, SurfaceHeights};
