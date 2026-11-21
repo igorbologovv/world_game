@@ -83,9 +83,10 @@ def export_one(name, roots, output, ratios):
     if any(EXCLUDE.search(mat) for mat in material_names):
         raise ValueError(f"{name!r} contains ground/water materials {sorted(material_names)}; choose smaller roots")
     low, high = bounds(meshes)
-    if high.y - low.y < 0.5:
+    if high.z - low.z < 0.5:
         raise ValueError(f"{name!r} is too flat to be a tree")
-    position = Vector(((high.x + low.x) / 2, low.y, (high.z + low.z) / 2))
+    # Blender is Z-up; the exported glTF is converted to Y-up.
+    position = Vector(((high.x + low.x) / 2, (high.y + low.y) / 2, low.z))
     safe = re.sub(r"[^a-z0-9_-]+", "_", name.lower()).strip("_")
     destination = output / safe
     destination.mkdir(parents=True, exist_ok=True)
@@ -99,6 +100,9 @@ def export_one(name, roots, output, ratios):
             clone.parent = None
             clone.matrix_world = original.matrix_world.copy()
             clone.matrix_world.translation -= position
+            # The Rust loader consumes primitives directly and ignores glTF node transforms.
+            clone.data.transform(clone.matrix_world)
+            clone.matrix_world.identity()
             clones.append(clone)
             clone.select_set(True)
             if level and 0 < ratio < 1:
@@ -113,52 +117,38 @@ def export_one(name, roots, output, ratios):
         )
         for obj in clones:
             bpy.data.objects.remove(obj, do_unlink=True)
-    return {"source_root": name, "asset_dir": str(destination.relative_to(ROOT)), "height_m": high.y-low.y, "lods": len(ratios)}
+    return {"source_root": name, "asset_dir": str(destination.relative_to(ROOT)), "height_m": high.z-low.z, "lods": len(ratios)}
 
 
 
 
 def automatic_tree_pairs(limit):
-    # The original Sketchfab source contains paired Bark/Leaves meshes as
-    # separate objects. Do NOT infer prefab trees from flattened scene.glb.
-    bark = [obj for obj in bpy.data.objects
-            if re.match(r"^Bark(?:\\.\\d+)?(?:_\\d+)?$", obj.name)]
-    leaves = [obj for obj in bpy.data.objects
-              if re.match(r"^Leaves(?:\\.\\d+)?(?:_\\d+)?$", obj.name)]
-    def center(root):
-        group = [o for o in objects_under(root) if o.type == "MESH"]
-        if not group:
-            return None
-        lo, hi = bounds(group)
-        return (lo + hi) / 2, hi.y - lo.y
-    trees = [(obj, *center(obj)) for obj in bark if center(obj)]
-    trees.sort(key=lambda item: (-item[2], item[0].name))
-    unused = {obj.name: obj for obj in leaves}
-    result = []
-    for trunk, point, height in trees:
-        if len(result) == limit:
-            break
-        if height < 2.0 or not unused:
+    # Imported Sketchfab trees have a Bark parent with a Leaves mesh child.
+    # Pair by hierarchy, never by nearest position in the scene.
+    bark = [
+        obj for obj in bpy.data.objects
+        if re.fullmatch(r"Bark(?:\\.\\d+)?(?:_\\d+)?", obj.name)
+    ]
+    trees = []
+    for trunk in bark:
+        group = [o for o in objects_under(trunk) if o.type == "MESH"]
+        crowns = [
+            o for o in objects_under(trunk) if o.type == "MESH"
+            and any(slot.material and slot.material.name == "Leaves"
+                    for slot in o.material_slots)
+        ]
+        if not group or not crowns:
             continue
-        candidates = []
-        for candidate in unused.values():
-            info = center(candidate)
-            if info is None:
-                continue
-            leaf_center, _ = info
-            delta = (leaf_center - point)
-            candidates.append((delta.x * delta.x + delta.z * delta.z, candidate.name, candidate))
-        if not candidates:
-            break
-        dist, _, crown = min(candidates, key=lambda item: (item[0], item[1]))
-        if dist > max(3.0, height * 0.55) ** 2:
-            continue
-        unused.pop(crown.name)
-        result.append((trunk, crown))
+        low, high = bounds(group)
+        height = high.z - low.z
+        if height >= 2.0:
+            trees.append((height, trunk.name, trunk))
+    trees.sort(key=lambda item: (-item[0], item[1]))
+    result = [(trunk,) for _, _, trunk in trees[:limit]]
     if len(result) < limit:
-        print(f"WARNING: only {len(result)} valid Bark/Leaves pairs found (requested {limit})")
+        print(f"WARNING: only {len(result)} valid Bark/Leaves trees found (requested {limit})")
     if not result:
-        raise RuntimeError("No paired tree objects found; run --list to inspect imported names")
+        raise RuntimeError("No Bark/Leaves tree hierarchies found; run --list")
     return result
 
 def water_report():
@@ -198,8 +188,8 @@ def main():
         return
     if options.auto_trees > 0:
         pairs = automatic_tree_pairs(options.auto_trees)
-        done = [export_one(f"woodland_tree_{i:02}", [bark, leaves], options.output, options.lod_ratios)
-                for i, (bark, leaves) in enumerate(pairs)]
+        done = [export_one(f"woodland_tree_{i:02}", roots, options.output, options.lod_ratios)
+                for i, roots in enumerate(pairs)]
         print(json.dumps(done, indent=2))
         return
     if options.list or not options.roots:
