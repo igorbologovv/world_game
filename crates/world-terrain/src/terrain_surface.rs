@@ -207,7 +207,7 @@ impl TileContext<'_> {
         let (cell, translation) = self.frame.translation_to_grid(anchor);
         let mesh = build_mesh(tile, anchor, self.heights);
         let bounds = mesh
-            .compute_aabb()
+            .get_aabb()
             .expect("terrain chunks contain a full grid");
         let entity = commands
             .spawn((
