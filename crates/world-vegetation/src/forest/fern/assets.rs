@@ -203,7 +203,7 @@ fn combine(
         {
             return Err("has an incompatible vertex-color or double-sided material");
         }
-        if let Some(previous) = shared {
+        if let Some(previous) = shared.as_ref() {
             if !same_surface(previous, &material) {
                 return Err("parts require different PBR materials");
             }
