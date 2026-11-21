@@ -43,7 +43,7 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
 
     let position = mesh.planet_position;
     let up = normalize(position);
-    let eye = normalize(view.world_position - mesh.world_position);
+    let eye = normalize(view.world_position.xyz - mesh.world_position);
     // Short ripples only at near range; spatial derivatives suppress
     // the screen-space moire bands seen in the previous versions.
     let detail = 1.0 - smoothstep(0.45, 3.5, footprint);
