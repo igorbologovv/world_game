@@ -166,14 +166,16 @@ fn biome_surface(
     let exposed_sand = sand * (1.0 - 0.91 * coastal_forest_floor);
     let vegetated = max(soil_available - exposed_sand, 0.0);
 
-    // Values are linear PBR albedo, chosen to relate to the actual leaf
-    // palettes (jungle, oak, pine, acacia) rather than the grass texture.
+    // The far representation is the *top of the forest*, not a close-up leaf.
+    // Match the dark aggregate appearance of the mid-distance impostor forest
+    // (which already has baked ambient shade), not the bright near-leaf color.
+    // Preserve distinct biome hues; these are linear PBR albedo values.
     let total_species = rainforest + temperate_forest + boreal_forest + savanna + 0.001;
     let canopy = (
-        rainforest * vec3<f32>(0.054, 0.215, 0.055)
-        + temperate_forest * vec3<f32>(0.097, 0.247, 0.072)
-        + boreal_forest * vec3<f32>(0.061, 0.164, 0.115)
-        + savanna * vec3<f32>(0.156, 0.202, 0.063)
+        rainforest * vec3<f32>(0.019, 0.075, 0.024)
+        + temperate_forest * vec3<f32>(0.034, 0.087, 0.027)
+        + boreal_forest * vec3<f32>(0.025, 0.070, 0.041)
+        + savanna * vec3<f32>(0.065, 0.090, 0.027)
         + vec3<f32>(0.00008, 0.00020, 0.00007)
     ) / total_species;
 
@@ -431,7 +433,10 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         * biome.forest_cover;
     if forest_amount > 0.015 {
         let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
-        let cover = smoothstep(0.012, 0.79, forest_amount) * canopy.a * 0.98;
+        // Dense distant forest should read as one dark canopy. Increase
+        // coverage only where the existing biome map says trees are dense;
+        // sparse forest still reveals grass/soil, and near ground is untouched.
+        let cover = smoothstep(0.012, 0.53, forest_amount) * canopy.a * 0.98;
         surface.color = mix(surface.color, canopy.rgb, cover);
         surface.roughness = mix(surface.roughness, 0.97, cover);
         occlusion = 1.0 - cover * 0.18;
