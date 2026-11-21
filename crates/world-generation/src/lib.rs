@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! Deterministic baking of the planet's heightmaps, watersheds, rivers, and water masks.
 
+mod hydrology;
 mod river_generation;
 
 use image::{ImageBuffer, Luma};
@@ -149,11 +150,6 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let river_output = assets.join(RIVER_ATLAS_PATH);
-    let river_surface = assets.join(RIVER_SURFACE_PATH);
-    river_generation::generate(&mut heights, &mut encoded, &river_output, &river_surface)?;
-    save_heightmaps(&encoded, &height_output)?;
-
     println!();
     println!("Finding connected areas below sea level...");
 
@@ -204,6 +200,11 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
             basin_count += 1;
         }
     }
+
+    let river_output = assets.join(RIVER_ATLAS_PATH);
+    let river_surface = assets.join(RIVER_SURFACE_PATH);
+    river_generation::generate(&mut heights, &mut encoded, &ocean_mask, &river_output, &river_surface)?;
+    save_heightmaps(&encoded, &height_output)?;
 
     save_masks(&ocean_mask, &heights, &ocean_output, &basin_output)?;
 
