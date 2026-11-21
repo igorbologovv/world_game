@@ -9,7 +9,7 @@ Codex review. It does not regenerate or rewrite the checked-in world assets.
 - The six 1024² baked height faces remain a **coarse, global source** of
   continental shape, existing biome regions, and legacy water masks.
 - `SurfaceHeights::sample` adds deterministic 3D, meter-anchored multiscale
-  relief (16 km, 4 km, 900 m, 180 m, 36 m wavelengths). This is the **same**
+  relief (regional mountain ridges, valleys, rolling hills, coastal dunes and meter-scale features). This is the **same**
   height function used by terrain mesh generation, player motion, and forest
   placement; there is no visual-only displacement.
 - Detail fades near existing coastlines and river-mask coverage; underwater
@@ -24,6 +24,26 @@ Codex review. It does not regenerate or rewrite the checked-in world assets.
 - Procedural noise is independent of camera and tile ID: rebuilding the same
   coordinates gives the same height, including at cube-face boundaries.
 - The `big_space` floating origin remains in charge of render transforms.
+
+## Landscape / vegetation appearance update
+
+- Physical terrain relief now contains broad 260-km tectonic belts, 58-km
+  ridges, 21-km foothills and valleys, plus kilometer-scale terrain detail.
+  Raised coastal hills and dunes retain the baked waterline.
+- Forests use independent double-precision *physical-space* fields at
+  78-km, 8.4-km and 510-m scales: open plains, meadows and clustered groves
+  instead of blanket planting. Species and climate thresholds still apply.
+- The old terrain shader overlay that painted crowns everywhere regardless
+  of spawned trees was disabled. Real terrain is visible in cleared areas.
+- Detailed tree meshes remain visible to approximately 165–225 m, and
+  authored impostor portraits were increased to 256 px. The 600-tree
+  near-detail cap remains a hard bound.
+- The original Palm Coast look-at target came from 100-km planting and is
+  not a stable marker for one exact new tree on the 3389.5-km sphere.
+
+Performance caveat: the new CPU noise and extra close-range tree geometry
+require a real frame-time profile. Exact tree density and visual quality
+are provisional until the client has been run and inspected on Vulkan.
 
 ## Vegetation
 
