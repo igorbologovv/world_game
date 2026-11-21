@@ -9,7 +9,7 @@ use bevy::{
     reflect::TypePath,
     render::{
         mesh::MeshVertexBufferLayoutRef,
-        render_asset::RenderAssetUsages,
+        ,
         render_resource::{
             AsBindGroup, RenderPipelineDescriptor, ShaderRef, ShaderType,
             SpecializedMeshPipelineError,
@@ -47,7 +47,7 @@ impl Material for ProxyMaterial {
         "shaders/vegetation_proxy.wgsl".into()
     }
     fn specialize(
-        _: &MaterialPipeline<Self>,
+        _: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
         _: bevy::pbr::MaterialPipelineKey<Self>,
