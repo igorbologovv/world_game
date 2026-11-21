@@ -20,64 +20,32 @@ const DIRECTIONS: [(i32, i32); 8] = [
     (-1, 1),
     (1, 1),
 ];
-const NO_OUTLET: u32 = u32::MAX;
+use super::hydrology::NO_OUTLET;
 const RIVER_AREA: f32 = 390.0;
 const MASK_SIDE: u32 = (SIZE * 2) as u32;
 
 pub(super) fn generate(
     heights: &mut [f64],
     encoded: &mut [u16],
+    ocean: &[bool],
     output: &Path,
     surface_output: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let mut land: Vec<u32> = heights
-        .iter()
-        .enumerate()
-        .filter_map(|(cell, &height)| (height > SEA_LEVEL).then_some(cell as u32))
-        .collect();
-    land.sort_unstable_by_key(|&cell| encoded[cell as usize]);
-
-    let mut outlets = vec![NO_OUTLET; heights.len()];
-    let mut area = vec![0.0_f32; heights.len()];
-    for &cell in &land {
-        let cell = cell as usize;
-        let (face, x, y) = decode_index(cell);
-        let mut best_grade = 0.0;
-        for (dx, dy) in DIRECTIONS {
-            let (side, mut nx, mut ny) = neighbour(face, x, y, dx, dy);
-            if side != face {
-                nx = nx.clamp(1, SIZE - 2);
-                ny = ny.clamp(1, SIZE - 2);
-            }
-            let next = index(side, nx, ny);
-            let next_height = heights[next].max(SEA_LEVEL);
-            if next_height >= heights[cell]
-                || next_height > SEA_LEVEL
-                    && (encoded[next] >= encoded[cell] || outlets[next] == NO_OUTLET)
-            {
-                continue;
-            }
-            let distance = if dx == 0 || dy == 0 {
-                1.0
-            } else {
-                std::f64::consts::SQRT_2
-            };
-            let grade = (heights[cell] - next_height) / distance;
-            if grade > best_grade {
-                best_grade = grade;
-                outlets[cell] = next as u32;
-            }
-        }
-        if outlets[cell] != NO_OUTLET {
-            area[cell] = cell_area(x, y);
+    let drainage = super::hydrology::route(heights, ocean);
+    let outlets = &drainage.outlets;
+    let area = &drainage.accumulation;
+    let land = &drainage.order;
+    // Fill shallow numerical sinks, but retain deep basins for lake water.
+    // Flow topology is computed from the original terrain, before any carving.
+    for &cell in land {
+        let i = cell as usize;
+        if !drainage.lakes[i] && heights[i] > SEA_LEVEL && drainage.spill[i] > heights[i] {
+            heights[i] = drainage.spill[i];
+            encoded[i] = encode_height(heights[i]);
         }
     }
-    for &cell in land.iter().rev() {
-        let cell = cell as usize;
-        if outlets[cell] != NO_OUTLET {
-            area[outlets[cell] as usize] += area[cell];
-        }
-    }
+    let lake_cells = drainage.lakes.iter().filter(|&&value| value).count();
+    println!("Priority-flood drainage: {} routed land cells, {lake_cells} lake cells", land.len());
 
     let mut atlas = RgbaImage::new(3 * MASK_SIDE, 2 * MASK_SIDE);
     let mut bank_cuts = vec![0.0_f32; heights.len()];
@@ -86,9 +54,10 @@ pub(super) fn generate(
     let mut sections = 0;
     let mut mouths = 0;
     let mut seams = 0;
-    for &cell in &land {
+    for &cell in land {
         let cell = cell as usize;
-        if area[cell] < RIVER_AREA || outlets[cell] == NO_OUTLET {
+        if drainage.lakes[cell] || heights[cell] <= SEA_LEVEL
+            || area[cell] < RIVER_AREA || outlets[cell] == NO_OUTLET {
             continue;
         }
         let next = outlets[cell] as usize;
@@ -102,8 +71,9 @@ pub(super) fn generate(
             heights[cell] = (heights[cell] - f64::from(incision)).max(channel_floor);
             encoded[cell] = encode_height(heights[cell]);
         }
-        assert!(heights[cell] > heights[next]);
-        assert!(heights[next] <= SEA_LEVEL || area[next] >= area[cell]);
+        // Depression-filled routes may be flat; the downstream spill level
+        // gives the physically connected outlet, not the raw neighbor height.
+        debug_assert!(drainage.spill[cell] + 1e-9 >= drainage.spill[next]);
 
         let width = channel_width(flow);
         let from = grid_uv(x, y);
@@ -112,14 +82,20 @@ pub(super) fn generate(
         let bank_depth = ((original_height - heights[cell]) as f32) * 0.78;
         let from_direction = sphere_direction(face, from[0], from[1]);
         let to_direction = sphere_direction(next_face, to[0], to[1]);
-        let downstream_water = f64::from(water_levels[next]);
+        let downstream_water = if drainage.lakes[next] {
+            drainage.spill[next]
+        } else if water_levels[next] > 0.0 {
+            f64::from(water_levels[next])
+        } else {
+            heights[next].max(SEA_LEVEL)
+        };
         let cut = original_height - heights[cell];
         let water_depth = (0.45 + f64::from(flow.sqrt()) * 0.40)
             .min(3.5)
             .min((cut * 0.72).max(0.23));
-        let water = (heights[cell] + water_depth).max(downstream_water + 0.04);
+        let water = (heights[cell] + water_depth).max(downstream_water + 0.01);
         water_levels[cell] = water as f32;
-        assert!(water_levels[cell] > water_levels[next]);
+        debug_assert!(water > downstream_water);
         let from_up = DVec3::from_array(from_direction);
         let to_up = DVec3::from_array(to_direction);
         let to_on_face = if face == next_face {
@@ -175,7 +151,7 @@ pub(super) fn generate(
             seams += 1;
         }
         sections += 1;
-        mouths += usize::from(heights[next] <= SEA_LEVEL);
+        mouths += usize::from(ocean[next] || drainage.lakes[next]);
     }
     let mut banks = 0;
     for (cell, cut) in bank_cuts.into_iter().enumerate() {
@@ -191,7 +167,7 @@ pub(super) fn generate(
         encoded[cell] = encode_height(heights[cell]);
         banks += usize::from(encoded[cell] < old);
     }
-    let diagonal_cuts = open_diagonal_channels(heights, encoded, &land, &outlets, &area);
+    let diagonal_cuts = open_diagonal_channels(heights, encoded, land, outlets, area, &drainage.lakes);
     println!(
         "River network: {sections} downstream reaches, {mouths} outlets, {seams} face crossings, {banks} tapered bank samples, {diagonal_cuts} diagonal channel cuts"
     );
@@ -212,8 +188,10 @@ fn open_diagonal_channels(
     land: &[u32],
     outlets: &[u32],
     area: &[f32],
+    lakes: &[bool],
 ) -> usize {
-    let is_channel = |cell: usize| outlets[cell] != NO_OUTLET && area[cell] >= RIVER_AREA;
+    let is_channel = |cell: usize| !lakes[cell] && heights[cell] > SEA_LEVEL
+        && outlets[cell] != NO_OUTLET && area[cell] >= RIVER_AREA;
     let mut smoothing = vec![0.0_f32; heights.len()];
     let mut count = 0;
     for &cell in land {
