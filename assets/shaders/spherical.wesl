@@ -400,8 +400,11 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
     let canopy_region = smoothstep(0.06, 0.45, input.uv.x);
     let exposed = clamp(weights[3] + weights[4], 0.0, 1.0);
-    let beach = 1.0 - smoothstep(3.5, 22.0, height);
-    let forest_ground = canopy_region * (1.0 - exposed) * (1.0 - beach);
+    // Actual palms and jungle trees grow on low coastal ground: excluding
+    // all land below 22 m painted a huge pale hole around Palm Coast.
+    // Reserve only the immediate waterline for unpainted sand.
+    let shoreline = 1.0 - smoothstep(1.5, 4.0, height);
+    let forest_ground = canopy_region * (1.0 - exposed) * (1.0 - shoreline);
     let canopy_distance = smoothstep(180.0, 850.0, distance_to_eye);
     let broad_variation = clamp(
         1.0 + 0.09 * regional + 0.035 * patches,
