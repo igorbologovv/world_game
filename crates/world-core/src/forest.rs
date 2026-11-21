@@ -37,12 +37,17 @@ pub fn forest_canopy_region(direction: DVec3, height: f64) -> f32 {
         return 0.0;
     }
     let dir = direction.normalize().as_vec3();
+    // Regional forest landcover follows a climate zone across mountains;
+    // don't re-evaluate its existence at each local summit height.
+    // Elevation still affects individual tree placement, snowy surface
+    // materials and exposed cliffs. This only controls distant canopy color.
+    let climate_height = (height.max(0.0).min(350.0)) as f32;
     // Match the climatic inputs of select_species / spherical.wesl. This
     // evaluation is per terrain vertex, not per pixel and not per tree.
     let weather = climate_noise(dir * 5.8 + Vec3::new(17.3, -4.7, 11.8));
     let rain = climate_noise(dir * 17.0 + Vec3::new(-2.1, 9.4, 4.6));
     let moisture = (0.50 + 0.96 * weather + 0.32 * rain).clamp(0.0, 1.0);
-    let temp = (1.07 - 0.78 * dir.y.abs() - (height.max(0.0) as f32) / 16_000.0
+    let temp = (1.07 - 0.78 * dir.y.abs() - climate_height / 16_000.0
         + 0.13 * climate_noise(dir * 4.1 + Vec3::new(3.2, 18.6, -8.4)))
         .clamp(0.0, 1.0);
 
@@ -58,16 +63,17 @@ pub fn forest_canopy_region(direction: DVec3, height: f64) -> f32 {
     let acacia = fade(0.61, 0.69, temp)
         * fade(0.13, 0.22, moisture)
         * (1.0 - fade(0.64, 0.75, moisture));
-    let palm = fade(0.69, 0.77, temp) * fade(0.20, 0.30, moisture)
-        * (1.0 - fade(400.0, 550.0, height as f32));
+    let palm = fade(0.69, 0.77, temp) * fade(0.20, 0.30, moisture);
     let habitat = jungle.max(temperate).max(boreal).max(acacia).max(palm);
-    let treeline = 1.0 - fade(2_350.0, 2_750.0, height as f32);
+    // Do not apply the *tree* altitude limit to distant canopy coverage:
+    // a forested valley's green region must continue across the landscape.
+    // The shader preserves actual snow and rock using surface weights.
 
     // Do not multiply by the local density or grove mask! They determine
     // tree instances only. The distant canopy must not acquire bare holes.
     let region = forest_field(direction.normalize() * RADIUS / 22_000.0, 0xB1D2_8491);
     let regional_lightness = 0.94 + 0.06 * forest_smoothstep(-0.5, 0.3, region);
-    (habitat * treeline * regional_lightness as f32).clamp(0.0, 1.0)
+    (habitat * regional_lightness as f32).clamp(0.0, 1.0)
 }
 
 fn fade(low: f32, high: f32, value: f32) -> f32 {
@@ -166,4 +172,29 @@ pub fn forest_field(p: DVec3, seed: u64) -> f64 {
         }
     }
     value
+}
+
+// Regression: distant landcover must not become a bare hole when the same
+// forest-climate landscape climbs above the height limit for individual trees.
+#[cfg(test)]
+mod canopy_tests {
+    use super::*;
+
+    #[test]
+    fn palm_coast_canopy_persists_uphill() {
+        let direction = DVec3::new(-0.97684968336687, 0.21339114535822, 0.01512994344821);
+        let low = forest_canopy_region(direction, 300.0);
+        let high = forest_canopy_region(direction, 3_200.0);
+        assert!(low > 0.8, "Palm Coast should be woodland: {low}");
+        assert!((low - high).abs() < 0.0001, "canopy vanishes uphill: {low} vs {high}");
+        assert_eq!(forest_canopy_region(direction, 0.0), 0.0);
+    }
+
+    #[test]
+    fn placing_fewer_trees_does_not_change_regional_canopy() {
+        let direction = DVec3::new(-0.35249159, 0.82882267, 0.43451429);
+        let canopy = forest_canopy_region(direction, 700.0);
+        assert!(canopy > 0.0);
+        assert_eq!(canopy, forest_canopy_region(direction, 700.0));
+    }
 }
