@@ -16,7 +16,7 @@ pub(super) fn spawn(mut commands: Commands) {
     commands.spawn((
         Overlay,
         Text::new(""),
-        TextFont { font_size: 15.0, ..default() },
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
         TextColor(Color::srgb(0.88, 1.0, 0.85)),
         BackgroundColor(Color::srgba(0.022, 0.054, 0.032, 0.88)),
         Node {
