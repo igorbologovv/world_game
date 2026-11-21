@@ -383,12 +383,12 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
             positions.push((position - anchor).as_vec3().to_array());
             let planet = position.as_vec3();
             locations.push([planet.x, planet.y, planet.z, height as f32]);
-            // UV0.x is a *continuous canopy region* (independent of tree
-            // positions, local groves and the streaming draw range). The
-            // shader uses it to paint entire forested valleys dark green.
-            // UV0.y is reserved for future landcover variants.
-            let dry = ((175.0 - heights.river_coverage(up)) / 50.0).clamp(0.0, 1.0) as f32;
-            let canopy_region = forest_canopy_region(up, height) * dry;
+            // UV0.x is the continuous regional forest canopy independent
+            // of streamed trees, local grove gaps, and terrain elevation.
+            // Do not multiply by the old 100 km river atlas: after scaling
+            // to Mars it creates broad false holes across forested valleys.
+            // Actual water geometry draws on top of the terrain separately.
+            let canopy_region = forest_canopy_region(up, height);
             canopy.push([canopy_region, 0.0]);
         }
     }
