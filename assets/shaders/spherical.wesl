@@ -15,6 +15,8 @@ var detail_albedo: texture_2d_array<f32>;
 var detail_normal_roughness: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(5)
 var<uniform> detail_enabled: u32;
+@group(constants::MATERIAL_BIND_GROUP) @binding(6)
+var<uniform> terrain_debug_mode: u32;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -108,41 +110,62 @@ fn biome_surface(
         0.07, 0.65,
     );
 
-    // Smooth, overlapping climate zones: tropical rainforest, temperate
-    // forest, savanna, steppe, temperate grassland and polar tundra.
-    // The transition bands straddle the actual CPU tree thresholds:
-    // jungle (T > .68, M > .49), temperate (T .29-.68, M > .41),
-    // boreal (T <= .46, M > .27), and sparse acacia (T > .66, M .19-.61).
-    // Climate varies over the whole sphere; no local tree chunk is needed.
-    let rainforest = smoothstep(0.62, 0.79, temperature)
-        * smoothstep(0.43, 0.60, moisture);
-    let temperate_forest = smoothstep(0.26, 0.38, temperature)
-        * (1.0 - smoothstep(0.65, 0.74, temperature))
-        * smoothstep(0.35, 0.54, moisture);
-    let boreal_forest = smoothstep(0.12, 0.22, temperature)
-        * (1.0 - smoothstep(0.43, 0.53, temperature))
-        * smoothstep(0.22, 0.40, moisture);
-    let savanna = smoothstep(0.62, 0.75, temperature)
-        * smoothstep(0.17, 0.29, moisture)
-        * (1.0 - smoothstep(0.54, 0.67, moisture));
+    // Approximate the very same climate gates as CPU select_species()
+    // in world-vegetation/src/forest.rs. Transition bands avoid hard
+    // pixel boundaries at altitude, while grove density is sampled from
+    // precisely the same planet-centered, 260 m noise field.
+    //
+    // CPU thresholds:
+    // tropical: T > .68, M > .49, probability density * .98
+    // temperate: .29 <= T <= .68, M > .41, probability density * .94
+    // boreal: T <= .46, M > .27, probability density * .87
+    // acacia: T > .66, .19 <= M < .61, probability density * .34
+    let rainforest = smoothstep(0.655, 0.705, temperature)
+        * smoothstep(0.465, 0.525, moisture);
+    let temperate_forest = smoothstep(0.265, 0.315, temperature)
+        * (1.0 - smoothstep(0.655, 0.705, temperature))
+        * smoothstep(0.385, 0.445, moisture);
+    let boreal_forest = smoothstep(0.115, 0.155, temperature)
+        * (1.0 - smoothstep(0.435, 0.485, temperature))
+        * smoothstep(0.245, 0.295, moisture);
+    let savanna = smoothstep(0.635, 0.695, temperature)
+        * smoothstep(0.165, 0.215, moisture)
+        * (1.0 - smoothstep(0.58, 0.64, moisture));
     let steppe = (1.0 - smoothstep(0.22, 0.54, moisture))
         * (1.0 - savanna)
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
-    let forest = max(
-        max(rainforest * 0.98, temperate_forest * 0.91),
-        max(boreal_forest * 0.94, savanna * 0.36),
-    );
-    // CPU places trees from 3.5 m elevation, including low coastal groves.
-    let tree_limit = smoothstep(3.5, 9.0, height)
+
+    // CPU world radius is 100000 metres. This field stays stable during
+    // floating-origin updates and exists everywhere on the sphere.
+    let forest_position = direction * 100000.0;
+    let grove = macro_noise(forest_position / 260.0 + vec3<f32>(7.4, -12.8, 3.7));
+    let grove_density = clamp(0.82 + grove * 0.90, 0.25, 1.0);
+    let selection_probability = max(
+        max(rainforest * 0.98, temperate_forest * 0.94),
+        max(boreal_forest * 0.87, savanna * 0.34),
+    ) * grove_density;
+
+    // A stand becomes an opaque-looking crown canopy as its trees overlap.
+    // Sparse savanna keeps bare ground visible instead of becoming a forest.
+    let canopy_occupancy = smoothstep(0.075, 0.76, selection_probability);
+    let tree_limit = smoothstep(3.5, 11.0, height)
         * (1.0 - smoothstep(2200.0, 2600.0, height))
-        * (1.0 - smoothstep(0.38, 0.63, slope))
-        * (1.0 - smoothstep(0.93, 0.96, latitude));
-    // Tree-species-colored canopy, shaded below the actual leaf albedo.
-    // A dark conifer forest and a sunlit savanna must not converge to one green.
-    var canopy = mix(vec3<f32>(0.090, 0.226, 0.073), vec3<f32>(0.062, 0.166, 0.109), boreal_forest);
-    canopy = mix(canopy, vec3<f32>(0.052, 0.193, 0.057), rainforest);
-    canopy = mix(canopy, vec3<f32>(0.139, 0.191, 0.063), savanna);
+        * (1.0 - smoothstep(0.40, 0.62, slope))
+        * (1.0 - smoothstep(0.93, 0.96, latitude))
+        * (1.0 - snow);
+    let cover = canopy_occupancy * tree_limit;
+
+    // Values are linear PBR albedo, chosen to relate to the actual leaf
+    // palettes (jungle, oak, pine, acacia) rather than the grass texture.
+    let total_species = rainforest + temperate_forest + boreal_forest + savanna + 0.001;
+    let canopy = (
+        rainforest * vec3<f32>(0.054, 0.215, 0.055)
+        + temperate_forest * vec3<f32>(0.097, 0.247, 0.072)
+        + boreal_forest * vec3<f32>(0.061, 0.164, 0.115)
+        + savanna * vec3<f32>(0.156, 0.202, 0.063)
+        + vec3<f32>(0.00008, 0.00020, 0.00007)
+    ) / total_species;
 
     // Tint only the grass/dirt layers. Rock remains mineral-grey and snow
     // remains white. Triplanar PBR albedo/normal/roughness stay in use.
@@ -162,7 +185,7 @@ fn biome_surface(
             snow,
         ),
         foliage,
-        forest * tree_limit,
+        cover,
         canopy,
     );
 }
@@ -345,6 +368,16 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     let tint = 1.0 + 0.32 * regional + 0.32 * patches + 0.26 * detail;
 
     let biome = biome_surface(height, slope, direction, variation);
+    // F9: 0 = PBR scene, 1 = planetary forest-coverage map,
+    // 2 = distant canopy color map. Test from well beyond the 2 km LOD.
+    if terrain_debug_mode == 1u {
+        return FragmentOutput(vec4<f32>(vec3<f32>(biome.forest_cover), 1.0));
+    }
+    if terrain_debug_mode == 2u {
+        return FragmentOutput(vec4<f32>(
+            biome.canopy_tint * biome.forest_cover, 1.0
+        ));
+    }
     var weights = biome.weights;
     if ground_cover > 0.0 && weights[1] > 0.0 {
         // Soil shows between stands of grass. The plant streamer uses this
@@ -384,11 +417,15 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
     // Begin replacing 3D trees while the batched forest is still resident;
     // retain its color at any altitude after the tree streamer cuts off.
-    let forest_amount = smoothstep(120.0, 660.0, forest_distance)
-        * biome.forest_cover * (weights[1] + weights[2]);
+    // Tree placement does NOT depend on the grass/dirt blending weights.
+    // The canopy map must not vanish when distant mip-mapped terrain
+    // becomes sandy or rocky. Height, snow and slope were already applied
+    // to the climate-based biome.forest_cover.
+    let forest_amount = smoothstep(160.0, 920.0, forest_distance)
+        * biome.forest_cover;
     if forest_amount > 0.015 {
         let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
-        let cover = smoothstep(0.015, 0.77, forest_amount) * canopy.a * 0.96;
+        let cover = smoothstep(0.012, 0.79, forest_amount) * canopy.a * 0.98;
         surface.color = mix(surface.color, canopy.rgb, cover);
         surface.roughness = mix(surface.roughness, 0.97, cover);
         occlusion = 1.0 - cover * 0.18;
