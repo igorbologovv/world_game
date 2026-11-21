@@ -6,6 +6,7 @@ use bevy::{
     math::DVec3,
     pbr::MaterialPipeline,
     prelude::*,
+    asset::RenderAssetUsages,
     reflect::TypePath,
     render::{
         mesh::MeshVertexBufferLayoutRef,
