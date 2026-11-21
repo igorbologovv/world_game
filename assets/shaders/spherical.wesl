@@ -391,19 +391,18 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
-    // Dense distant forest canopy: from the air, individual trees merge
-    // into one continuous leaf-colored surface. Climate/biome establishes
-    // where woodland exists; the number or draw distance of tree entities
-    // never changes this ground coverage.
-    //
-    // At walking range the forest-floor PBR textures are retained. Between
-    // the near trees and the horizon we transition to a dark leaf-green
-    // canopy approximation, covering the entire wooded valley.
+    // Distant forest is a regional landcover surface, not a scatter of
+    // individual trees. The mesh's UV0.x carries the independent physical
+    // canopy region from world-core. It does not vanish as trees are culled.
+    // Keep material rock/snow exposed on genuinely steep or snowy terrain,
+    // but never mistake a wooded hillside for bare ground just because its
+    // local grass/dirt weight is small.
     let distance_to_eye = distance(input.world_position.xyz, view.world_position.xyz);
-    let vegetation = clamp(weights[1] + weights[2], 0.0, 1.0);
-    let forest_biome = smoothstep(0.018, 0.16, biome.forest_cover);
-    let forest_ground = forest_biome * vegetation;
-    let canopy_distance = smoothstep(180.0, 1050.0, distance_to_eye);
+    let canopy_region = smoothstep(0.06, 0.45, input.uv.x);
+    let exposed = clamp(weights[3] + weights[4], 0.0, 1.0);
+    let beach = 1.0 - smoothstep(3.5, 22.0, height);
+    let forest_ground = canopy_region * (1.0 - exposed) * (1.0 - beach);
+    let canopy_distance = smoothstep(180.0, 850.0, distance_to_eye);
     let broad_variation = clamp(
         1.0 + 0.09 * regional + 0.035 * patches,
         0.90, 1.10,
@@ -411,7 +410,7 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
 
     // The near-ground material is darker under a wooded canopy, but does
     // not lose its physical detail textures and normals.
-    let forest_floor_color = biome.canopy_tint * (1.16 * broad_variation);
+    let forest_floor_color = vec3<f32>(0.055, 0.142, 0.051) * broad_variation;
     let ground_blend = forest_ground * (1.0 - canopy_distance) * 0.70;
     surface.color = mix(surface.color, forest_floor_color, ground_blend);
 
@@ -419,7 +418,10 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     // detailed trees it must be dark and continuous, including spots where
     // sparse tree candidates leave holes and beyond forest impostor range.
     // Slight low-frequency variation changes lightness, not vegetation type.
-    let canopy_color = biome.canopy_tint * (1.10 * broad_variation);
+    // Fixed leaf palette is intentionally independent of biome.forest_cover:
+    // the previous climate tint yielded washed-out pale hills even where
+    // the streamed tree species clearly formed a dense dark-green stand.
+    let canopy_color = vec3<f32>(0.036, 0.125, 0.046) * broad_variation;
     let canopy_blend = forest_ground * canopy_distance * 0.995;
     surface.color = mix(surface.color, canopy_color, canopy_blend);
     surface.roughness = mix(surface.roughness, 0.93, canopy_blend);
@@ -432,7 +434,8 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         vec3<f32>(1.09, 1.05, 0.95),
         meadow,
     );
-    let meadow_strength = vegetation * (1.0 - forest_biome) * 0.18;
+    let meadow_strength = clamp(weights[1] + weights[2], 0.0, 1.0)
+        * (1.0 - canopy_region) * 0.18;
     surface.color *= mix(vec3<f32>(1.0), meadow_color, meadow_strength);
 
     // Preserve rock, snow and sand, already excluded from vegetation by
