@@ -61,7 +61,10 @@ impl SurfaceHeights {
             return Some(base);
         }
         let river = self.river_coverage(direction);
-        Some(base + terrain_detail::detail(direction, base, river))
+        // No new underwater basin is introduced before the hydrology rework.
+        // Otherwise a procedural valley could intersect an unmodified water mask.
+        let detail = terrain_detail::detail(direction, base, river);
+        Some(if base > 1.5 { (base + detail).max(1.5) } else { base })
     }
 
     /// Interpolate only the pre-baked global terrain, without procedural detail.
