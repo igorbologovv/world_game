@@ -2,9 +2,9 @@ use bevy::{
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     math::{DQuat, DVec3},
     prelude::*,
-    window::PrimaryWindow,
+    window::{CursorOptions, PrimaryWindow},
 };
-use bevy_terrain::prelude::DebugCameraController;
+use crate::camera::DebugCameraController;
 use world_core::{
     coordinates::terrain_aligned_direction,
     planet::{ExplorerSpawn, MAX_HEIGHT, RADIUS, WATER_SURFACE_ELEVATION},
@@ -333,7 +333,7 @@ pub(super) struct Boot(f32);
 pub(super) struct Destination;
 
 pub(super) fn spawn_model(
-    children: &mut ChildBuilder,
+    children: &mut bevy::ecs::relationship::RelatedSpawnerCommands<'_, ChildOf>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
@@ -361,22 +361,18 @@ pub(super) fn spawn_model(
         (head, helmet, Vec3::new(0.0, 1.93, -0.04)),
         (backpack, gear.clone(), Vec3::new(0.0, 1.22, 0.35)),
     ] {
-        children.spawn(PbrBundle {
-            mesh,
-            material,
-            transform: Transform::from_translation(location),
-            ..default()
-        });
+        children.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(location),
+        ));
     }
     for side in [-1.0, 1.0] {
         children.spawn((
             Boot(side),
-            PbrBundle {
-                mesh: boot.clone(),
-                material: gear.clone(),
-                transform: Transform::from_xyz(0.19 * side, 0.30, 0.0),
-                ..default()
-            },
+            Mesh3d(boot.clone()),
+            MeshMaterial3d(gear.clone()),
+            Transform::from_xyz(0.19 * side, 0.30, 0.0),
         ));
     }
 }
@@ -384,15 +380,15 @@ pub(super) fn spawn_model(
 pub(super) fn walk(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut wheel: EventReader<MouseWheel>,
-    mut motion: EventReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut motion: MessageReader<MouseMotion>,
     mut map: Local<MapView>,
     time: Res<Time>,
     frames: ReferenceFrames,
     surface: Res<SurfaceHeights>,
     speed: Res<TravelSpeed>,
     trip_panel: Query<&Interaction, With<TripPanelInput>>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     mut avatars: Query<
         (GridTransform, &mut Player, &mut Visibility),
         (Without<DebugCameraController>, Without<Destination>),
@@ -437,7 +433,7 @@ pub(super) fn walk(
         })
         .sum::<f64>();
     let drag: Vec2 = motion.read().map(|event| event.delta).sum();
-    let Ok(mut window) = windows.single_mut() else {
+    let Ok((mut window, mut cursor_options)) = windows.single_mut() else {
         return;
     };
     let toggle_free_camera = keys.just_pressed(KeyCode::KeyT);
@@ -453,7 +449,7 @@ pub(super) fn walk(
             *map = MapView::default();
         }
     }
-    window.cursor.visible = !(debug.enabled || toggle_free_camera);
+    cursor_options.visible = !(debug.enabled || toggle_free_camera);
     player.moving = false;
     if debug.enabled || toggle_free_camera {
         if player.grounded || player.flight.is_some() {
@@ -560,7 +556,7 @@ pub(super) fn walk(
     {
         let ray = window
             .cursor_position()
-            .and_then(|cursor| view.viewport_to_world(camera_global, cursor));
+            .and_then(|cursor| view.viewport_to_world(camera_global, cursor).ok());
         if let Some(ray) = ray {
             let origin = frame.grid_position_double(&camera.cell, &camera.transform)
                 + (ray.origin - camera_global.translation()).as_dvec3();
@@ -696,8 +692,8 @@ pub(super) fn update_controls(
             None => WALK_CONTROLS,
         }
     };
-    if label.sections[0].value != text {
-        label.sections[0].value = text.into();
+    if label.0 != text {
+        label.0 = text.into();
     }
 }
 
