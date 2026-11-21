@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{
     math::{DVec2, DVec3},
-    pbr::NotShadowCaster,
+    pbr::{NotShadowCaster, FogFalloff},
     prelude::*,
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
