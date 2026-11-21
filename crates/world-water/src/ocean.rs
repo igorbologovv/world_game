@@ -8,7 +8,7 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
     shader::ShaderRef,
     reflect::TypePath,
-    render::alpha::AlphaMode,
+    material::AlphaMode,
     render::{
 
         render_resource::{
