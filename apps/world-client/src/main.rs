@@ -115,3 +115,6 @@ fn install_world(app: &mut App, assets: WorldAssets, region: Region) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod performance;

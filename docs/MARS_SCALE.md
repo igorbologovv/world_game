@@ -1,5 +1,8 @@
 # Mars-scale planetary streaming (experimental branch)
 
+See [Mars-scale performance and rendering](MARS_PERFORMANCE.md) for the
+current streaming implementation and Vulkan validation results.
+
 This branch changes the reference planet radius from 100 km to **3,389.5 km**.
 It is deliberately separate from `master` until the Vulkan gameplay check and
 Codex review. It does not regenerate or rewrite the checked-in world assets.
