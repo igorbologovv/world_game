@@ -7,13 +7,13 @@ use std::collections::{HashMap, HashSet};
 use bevy::{
     math::DVec3,
     pbr::{
-        ExtendedMaterial, MaterialExtension, MaterialPlugin, NotShadowCaster, NotShadowReceiver,
+        ExtendedMaterial, MaterialExtension, MaterialPlugin,
     },
     prelude::*,
     asset::RenderAssetUsages,
-    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     shader::ShaderRef,
-    camera::primitives::Aabb,
+    camera::primitives::{Aabb, MeshAabb},
+    light::{NotShadowCaster, NotShadowReceiver},
     reflect::TypePath,
     render::render_resource::AsBindGroup,
 };
