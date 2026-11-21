@@ -10,7 +10,7 @@ use std::{collections::VecDeque, error::Error, fs, path::Path};
 use world_core::{
     coordinates::source_direction as sphere_direction,
     planet::{
-        encode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, RIVER_ATLAS_PATH, RIVER_SURFACE_PATH,
+        encode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, LAKE_SURFACE_PATH, RIVER_ATLAS_PATH, RIVER_SURFACE_PATH,
         SEA_LEVEL,
     },
 };
@@ -203,7 +203,8 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
 
     let river_output = assets.join(RIVER_ATLAS_PATH);
     let river_surface = assets.join(RIVER_SURFACE_PATH);
-    river_generation::generate(&mut heights, &mut encoded, &ocean_mask, &river_output, &river_surface)?;
+    let lake_surface = assets.join(LAKE_SURFACE_PATH);
+    river_generation::generate(&mut heights, &mut encoded, &ocean_mask, &river_output, &river_surface, &lake_surface)?;
     save_heightmaps(&encoded, &height_output)?;
 
     save_masks(&ocean_mask, &heights, &ocean_output, &basin_output)?;
@@ -243,6 +244,7 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
     );
     println!("  river atlas -> {}", river_output.display());
     println!("  river surface -> {}", river_surface.display());
+    println!("  inland lakes -> {}", lake_surface.display());
 
     Ok(())
 }
