@@ -43,9 +43,15 @@ pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) ->
         * (1.0 - smoothstep(45.0, 200.0, base_height))
         * (value_noise(point / 800.0, 0x7ABC_0317) * 18.0
             + value_noise(point / 110.0, 0xF0B4_219C) * 2.2);
+    // Moderate coastal hills restore local relief without moving the
+    // waterline. Their envelope vanishes at sea level, so water remains
+    // aligned with the existing baked shoreline until the hydrology upgrade.
+    let coastal_hills = smoothstep(1.5, 24.0, base_height)
+        * (1.0 - smoothstep(110.0, 300.0, base_height))
+        * value_noise(point / 2_200.0, 0x28EA_4B13).max(0.0) * 55.0;
     (ridge + valleys + foothills + rolling + slopes + ground + micro)
         * inland * river
-        + dunes * river
+        + (coastal_hills + dunes) * river
 }
 
 fn smoothstep(start: f64, end: f64, x: f64) -> f64 {
