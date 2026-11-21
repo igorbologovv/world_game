@@ -129,7 +129,9 @@ fn forest_factors(direction: DVec3, height: f64) -> (f64, f64, f64, f64) {
 }
 
 fn density(woodland: f64, clearing: f64, grove: f64, treeline: f64) -> f32 {
-    (0.025 + 0.75 * woodland * clearing * grove) as f32 * treeline as f32
+    // Denser stands in actual woodland while keeping regional meadows and
+    // clearings sparse; streaming still bounds resident tree representations.
+    (0.025 + 0.90 * woodland * clearing * grove) as f32 * treeline as f32
 }
 
 fn forest_smoothstep(a: f64, b: f64, x: f64) -> f64 {
