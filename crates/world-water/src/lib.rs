@@ -73,6 +73,22 @@ fn spawn(
         );
     }
 
+    // Inland basins are generated at their individual spill elevations and
+    // cannot be represented by the global sea-level ocean sphere.
+    if let Some(lakes) = river_surface::load_lakes(assets.directory()) {
+        root.spawn(
+            &mut commands,
+            (
+                MaterialMeshBundle {
+                    mesh: meshes.add(lakes),
+                    material: river_materials.add(river_surface::RiverMaterial { brightness: 0.93 }),
+                    ..default()
+                },
+                NotShadowCaster,
+            ),
+        );
+    }
+
     if let Some((material, patches)) = ocean::load(&mut images, &heights, assets.directory()) {
         let material = ocean_materials.add(material);
         for (mesh, bounds) in patches {
