@@ -419,14 +419,14 @@ pub(super) fn walk(
     >,
 ) {
     let Ok((camera_entity, mut camera, mut debug, view, camera_global, mut projection, mut mode)) =
-        cameras.get_single_mut()
+        cameras.single_mut()
     else {
         return;
     };
-    let Ok((mut avatar, mut player, mut visibility)) = avatars.get_single_mut() else {
+    let Ok((mut avatar, mut player, mut visibility)) = avatars.single_mut() else {
         return;
     };
-    let Ok((mut marker, mut marker_visibility)) = markers.get_single_mut() else {
+    let Ok((mut marker, mut marker_visibility)) = markers.single_mut() else {
         return;
     };
     let scroll = wheel
@@ -437,7 +437,7 @@ pub(super) fn walk(
         })
         .sum::<f64>();
     let drag: Vec2 = motion.read().map(|event| event.delta).sum();
-    let Ok(mut window) = windows.get_single_mut() else {
+    let Ok(mut window) = windows.single_mut() else {
         return;
     };
     let toggle_free_camera = keys.just_pressed(KeyCode::KeyT);
@@ -681,9 +681,9 @@ pub(super) fn update_controls(
     mut label: Query<&mut Text, With<Controls>>,
 ) {
     let (Ok(player), Ok(camera), Ok(mut label)) = (
-        player.get_single(),
-        camera.get_single(),
-        label.get_single_mut(),
+        player.single(),
+        camera.single(),
+        label.single_mut(),
     ) else {
         return;
     };
