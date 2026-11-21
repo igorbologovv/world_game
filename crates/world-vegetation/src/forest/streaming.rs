@@ -415,7 +415,7 @@ fn make_batch(
     materials: &mut Assets<ProxyMaterial>,
     material: ProxyMaterial,
 ) -> Option<Batch> {
-    let mut bounds = mesh.compute_aabb()?;
+    let mut bounds = mesh.get_aabb()?;
     // Billboards rotate on the GPU. Keep their full swept volume inside the CPU bounds.
     bounds.half_extents += 27.0;
     let (cell, translation) = frame.translation_to_grid(anchor);
@@ -477,7 +477,7 @@ fn upload(
 
 fn show_batch(
     commands: &mut Commands,
-    visibility: &mut Query<&mut Visibility, With<Handle<ProxyMaterial>>>,
+    visibility: &mut Query<&mut Visibility, With<MeshMaterial3d<ProxyMaterial>>>,
     batch: &Batch,
     visible: bool,
 ) {
@@ -509,7 +509,7 @@ pub(super) fn stream(
     mut materials: ResMut<Assets<ProxyMaterial>>,
     models: Res<ForestModels>,
     hero_loading: Res<HeroOakAssets>,
-    mut visibility: Query<&mut Visibility, With<Handle<ProxyMaterial>>>,
+    mut visibility: Query<&mut Visibility, With<MeshMaterial3d<ProxyMaterial>>>,
 ) {
     let Ok((entity, camera, view, projection)) = cameras.single() else {
         return;
