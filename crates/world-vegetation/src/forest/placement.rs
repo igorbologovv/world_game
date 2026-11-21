@@ -8,7 +8,7 @@ pub(super) const PATCH_METERS: f64 = 145.0;
 const ANGLE: f64 = PATCH_METERS / RADIUS;
 // Cap prospective sites per 145 m patch; density masks then create wide
 // genuine clearings instead of stacking dozens of trees in every patch.
-const CANDIDATES: usize = 56;
+const CANDIDATES: usize = 64;
 const GROUP: i32 = 4;
 const HALF_PI: f64 = std::f64::consts::FRAC_PI_2;
 const TAU: f64 = std::f64::consts::TAU;
