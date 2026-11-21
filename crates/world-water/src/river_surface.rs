@@ -8,10 +8,7 @@ use bevy::{
     shader::ShaderRef,
     reflect::TypePath,
     render::alpha::AlphaMode,
-    render::{
-
-        render_resource::{AsBindGroup, PrimitiveTopology},
-    },
+    render::render_resource::AsBindGroup,
 };
 
 use world_core::{
@@ -39,11 +36,11 @@ impl Material for RiverMaterial {
         AlphaMode::Blend
     }
 
-    fn vertex_shader() -> bevy::render::render_resource::ShaderRef {
+    fn vertex_shader() -> ShaderRef {
         "shaders/river_water.wgsl".into()
     }
 
-    fn fragment_shader() -> bevy::render::render_resource::ShaderRef {
+    fn fragment_shader() -> ShaderRef {
         "shaders/river_water.wgsl".into()
     }
 }
