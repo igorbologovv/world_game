@@ -10,6 +10,10 @@ use bevy::{
         ExtendedMaterial, MaterialExtension, MaterialPlugin, NotShadowCaster, NotShadowReceiver,
     },
     prelude::*,
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
+    shader::ShaderRef,
+    camera::primitives::Aabb,
     reflect::TypePath,
     render::{
         primitives::Aabb,
