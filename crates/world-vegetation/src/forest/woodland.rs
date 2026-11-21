@@ -150,7 +150,7 @@ fn build_variant(
 
         // The foliage shader expects wind weights in UV1, encoded once per
         // shared mesh. Per-tree transforms remain owned by the forest streamer.
-        let mesh = meshes.get_mut(&leaves)?;
+        let mut mesh = meshes.get_mut(&leaves)?;
         let bounds = mesh.get_aabb()?;
         let Some(VertexAttributeValues::Float32x3(points)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -164,6 +164,7 @@ fn build_variant(
         let count = weights.len();
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0; 4]; count]);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, weights);
+        drop(mesh); // Release the AssetMut guard before reading the trunk mesh.
         let wood = meshes.get(&wood).and_then(|mesh| mesh.get_aabb().map(|bounds| (wood, bounds)));
         let wood = wood.map(|(mesh, bounds)| WoodLod { mesh, bounds });
         levels.push(ModelLod::from_parts(wood, leaves, leaf_material, bounds));
