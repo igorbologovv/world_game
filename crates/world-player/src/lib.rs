@@ -5,7 +5,15 @@ mod camera;
 mod player;
 mod trip;
 
-use bevy::{prelude::*, transform::TransformSystems};
+use bevy::{
+    camera::Exposure,
+    core_pipeline::tonemapping::Tonemapping,
+    light::AtmosphereEnvironmentMapLight,
+    pbr::AtmosphereSettings,
+    post_process::bloom::Bloom,
+    prelude::*,
+    transform::TransformSystems,
+};
 use big_space::prelude::FloatingOrigin;
 use camera::{camera_controller, DebugCameraController};
 use world_core::{
@@ -73,6 +81,12 @@ fn spawn(
         &mut commands,
         (
             Camera3d::default(),
+            // Physical sky, aerial perspective and sky-derived image-based lighting.
+            AtmosphereSettings::default(),
+            AtmosphereEnvironmentMapLight::default(),
+            Exposure { ev100: 13.0 },
+            Tonemapping::AcesFitted,
+            Bloom::NATURAL,
             Projection::Perspective(PerspectiveProjection {
                 near: 0.05,
                 far: RADIUS as f32 * 20.0,
@@ -81,7 +95,6 @@ fn spawn(
             Transform::from_translation(translation).with_rotation(rotation),
             cell,
             FloatingOrigin,
-            DistanceFog::default(),
             DebugCameraController::default(),
             WorldCamera::Map,
         ),
