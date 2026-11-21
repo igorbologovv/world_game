@@ -206,7 +206,7 @@ fn setup(
 mod tests {
     use std::time::{Duration, Instant};
 
-    use bevy::{asset::AssetPlugin, render::texture::ImagePlugin};
+    use bevy::{asset::AssetPlugin, image::{CompressedImageFormats, ImageLoader, ImagePlugin}};
 
     use super::*;
 
@@ -221,6 +221,7 @@ mod tests {
             ImagePlugin::default(),
         ))
         .init_asset::<TerrainMaterial>()
+        .register_asset_loader(ImageLoader::new(CompressedImageFormats::empty()))
         .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>));
         app.finish();
         app.cleanup();

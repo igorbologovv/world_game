@@ -1,14 +1,19 @@
 use bevy::{
+    camera::primitives::Aabb,
     diagnostic::DiagnosticsPlugin,
     gizmos::GizmoPlugin,
     gltf::GltfPlugin,
+    image::{CompressedImageFormats, ImageLoader, ImagePlugin},
     input::{
         keyboard::{Key, KeyboardInput},
         ButtonState, InputPlugin,
     },
-    render::{primitives::Aabb, render_resource::Shader, texture::ImagePlugin},
+    light::atmosphere::ScatteringMedium,
+    mesh::MeshPlugin,
     scene::ScenePlugin,
+    shader::Shader,
     window::PrimaryWindow,
+    world_serialization::WorldSerializationPlugin,
 };
 use world_core::{
     coordinates::terrain_aligned_direction,
@@ -26,17 +31,20 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     app.add_plugins((
         MinimalPlugins,
         asset_plugin(&assets),
+        WorldSerializationPlugin,
         ScenePlugin,
         ImagePlugin::default(),
+        MeshPlugin,
         GltfPlugin::default(),
         InputPlugin,
         DiagnosticsPlugin,
     ))
-    .init_asset::<Mesh>()
     .init_asset::<StandardMaterial>()
     .init_asset::<Shader>()
+    .init_asset::<ScatteringMedium>()
+    .register_asset_loader(ImageLoader::new(CompressedImageFormats::empty()))
     // GLB scene cloning also runs in this headless app.
-    .register_type::<Parent>()
+    .register_type::<ChildOf>()
     .register_type::<Children>()
     .register_type::<Aabb>()
     .register_type::<Visibility>()
@@ -56,19 +64,23 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     let world = app.world_mut();
     let root = world.resource::<PlanetRoot>().entity();
     assert!(world.get::<ReferenceFrame>(root).is_some());
-    let (camera, parent) = world.query::<(&WorldCamera, &Parent)>().single(world);
-    assert_eq!((*camera, parent.get()), (WorldCamera::Map, root));
+    let (camera, parent) = world
+        .query::<(&WorldCamera, &ChildOf)>()
+        .single(world)
+        .unwrap();
+    assert_eq!((*camera, parent.parent()), (WorldCamera::Map, root));
     let parent = world
-        .query_filtered::<&Parent, With<Explorer>>()
-        .single(world);
-    assert_eq!(parent.get(), root);
+        .query_filtered::<&ChildOf, With<Explorer>>()
+        .single(world)
+        .unwrap();
+    assert_eq!(parent.parent(), root);
 
     let spawn = terrain_aligned_direction(STARTER_REGION.spawn.direction);
     let ground = world.resource::<SurfaceHeights>().sample(spawn).unwrap();
     assert!(ground > WATER_SURFACE_ELEVATION);
     let (cell, transform) = {
         let mut explorers = world.query_filtered::<GridTransform, With<Explorer>>();
-        let explorer = explorers.single_mut(world);
+        let explorer = explorers.single_mut(world).unwrap();
         (*explorer.cell, *explorer.transform)
     };
     let position = world
@@ -80,7 +92,9 @@ fn client_plugins_share_the_planet_and_starting_camera() {
 
     // The imported demonstration is an asset source, not a second terrain tile.
     assert_eq!(
-        world.query::<&Name>().iter(world)
+        world
+            .query::<&Name>()
+            .iter(world)
             .filter(|name| name.as_str() == "Low Poly Tree Scene Free")
             .count(),
         0,
@@ -95,14 +109,19 @@ fn client_plugins_share_the_planet_and_starting_camera() {
         (KeyCode::Escape, Key::Escape, WorldCamera::Map),
         (KeyCode::KeyT, Key::Character("t".into()), WorldCamera::Free),
     ] {
-        app.world_mut().send_event(KeyboardInput {
+        app.world_mut().write_message(KeyboardInput {
             key_code,
             logical_key,
             state: ButtonState::Pressed,
             window,
+            text: None,
+            repeat: false,
         });
         app.update();
         let world = app.world_mut();
-        assert_eq!(*world.query::<&WorldCamera>().single(world), expected);
+        assert_eq!(
+            *world.query::<&WorldCamera>().single(world).unwrap(),
+            expected
+        );
     }
 }

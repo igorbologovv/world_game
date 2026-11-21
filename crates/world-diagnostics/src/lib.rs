@@ -83,7 +83,8 @@ mod tests {
         let world = app.world_mut();
         let text = world
             .query_filtered::<&Text, With<FrameStatsText>>()
-            .single(world);
+            .single(world)
+            .unwrap();
         assert_eq!(text.0, "FPS: 10   Frame: 100.0 ms");
     }
 }
