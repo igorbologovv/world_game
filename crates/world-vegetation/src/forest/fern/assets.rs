@@ -5,10 +5,8 @@ use bevy::{
     pbr::gltf::standard_material_from_gltf_material,
     prelude::*,
     asset::RenderAssetUsages,
-    render::{
-        mesh::VertexAttributeValues, primitives::Aabb,
-        render_resource::PrimitiveTopology,
-    },
+    camera::primitives::{Aabb, MeshAabb},
+    mesh::{VertexAttributeValues, PrimitiveTopology},
 };
 
 use crate::forest::{textures, MeshBuilder};
