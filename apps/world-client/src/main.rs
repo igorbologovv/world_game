@@ -12,6 +12,7 @@ use world_vegetation::ProceduralForestPlugin;
 use world_water::WaterPlugin;
 
 const PALM_MESH: &str = "models/vegetation/coconut_palm/tree_lod0.glb";
+const TERRAIN_SHADER: &str = "shaders/spherical.wesl";
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 fn main() {
@@ -25,10 +26,14 @@ fn main() {
         "Starter River"
     };
     let workspace = Path::new(WORKSPACE_ROOT);
-    let assets = prefer_checkout_palm_assets(
+    let assets = prefer_checkout_assets(
         WorldAssets::resolve(workspace),
         &workspace.join("assets"),
         std::env::var_os("BEVY_ASSET_ROOT").is_some(),
+    );
+    eprintln!(
+        "world-client: loading shader {}",
+        assets.directory().join(TERRAIN_SHADER).display()
     );
     let mut app = App::new();
     app.add_plugins(
@@ -64,17 +69,16 @@ fn spawn_region(mut args: impl Iterator<Item = String>) -> Option<Region> {
     }
 }
 
-fn prefer_checkout_palm_assets(
+fn prefer_checkout_assets(
     assets: WorldAssets,
     checkout: &Path,
     explicit_override: bool,
 ) -> WorldAssets {
-    // Launching this build from an older checkout can find its terrain assets
-    // before finding this checkout's vegetation.
-    if !explicit_override
-        && !assets.directory().join(PALM_MESH).is_file()
-        && checkout.join(PALM_MESH).is_file()
-    {
+    // Development builds must load the shader and world data from the checkout
+    // they were compiled from. A working directory with its own assets/ may
+    // otherwise shadow the fixed shader with a stale copy. Explicit external
+    // asset roots still take precedence for packaged builds and testing.
+    if !explicit_override && checkout.join(TERRAIN_SHADER).is_file() {
         WorldAssets::new(checkout.to_path_buf())
     } else {
         assets
