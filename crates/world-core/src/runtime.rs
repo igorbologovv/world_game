@@ -80,8 +80,9 @@ impl PlanetRoot {
 
     /// Spawn a floating-origin child at the planet origin with a custom bundle.
     pub fn spawn<'a>(&self, commands: &'a mut Commands, bundle: impl Bundle) -> EntityCommands<'a> {
-        let mut child = commands.spawn((SpatialBundle::default(), GridCell::default()));
-        child.insert(bundle).set_parent(self.0);
+        // Bevy 0.20 has no SpatialBundle; transform/visibility use required components.
+        let mut child = commands.spawn((Transform::default(), Visibility::default(), GridCell::default()));
+        child.insert(bundle).set_parent_in_place(self.0);
         child
     }
 }
