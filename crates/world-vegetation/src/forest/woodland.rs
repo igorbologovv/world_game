@@ -9,8 +9,9 @@ use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
     gltf::{Gltf, GltfMesh, GltfMaterial},
     pbr::gltf::standard_material_from_gltf_material,
-    render::alpha::AlphaMode,
+    material::AlphaMode,
     prelude::*,
+    camera::primitives::MeshAabb,
     mesh::VertexAttributeValues,
 };
 
