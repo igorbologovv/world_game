@@ -51,11 +51,11 @@ impl Default for Wind {
 
 impl MaterialExtension for Wind {
     fn vertex_shader() -> ShaderRef {
-        "shaders/foliage.wgsl".into()
+        "shaders/foliage.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/vegetation_fade.wgsl".into()
+        "shaders/vegetation_fade.wesl".into()
     }
 }
 
