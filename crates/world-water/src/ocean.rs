@@ -206,7 +206,7 @@ pub(super) fn cull_patches(
     frames: ReferenceFrames,
     mut patches: Query<(&OceanPatch, &mut Visibility)>,
 ) {
-    let Ok((entity, camera)) = cameras.get_single() else {
+    let Ok((entity, camera)) = cameras.single() else {
         return;
     };
     let Some(frame) = frames.parent_frame(entity) else {
