@@ -387,7 +387,7 @@ pub(super) fn walk(
     frames: ReferenceFrames,
     surface: Res<SurfaceHeights>,
     speed: Res<TravelSpeed>,
-    trip_panel: Query<&Interaction, With<TripPanelInput>>,
+    trip_panel: Query<&bevy::picking::hover::Hovered, With<TripPanelInput>>,
     mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     mut avatars: Query<
         (GridTransform, &mut Player, &mut Visibility),
@@ -552,7 +552,7 @@ pub(super) fn walk(
         && mouse.just_pressed(MouseButton::Left)
         && trip_panel
             .iter()
-            .all(|interaction| *interaction == Interaction::None)
+            .all(|hovered| !hovered.get())
     {
         let ray = window
             .cursor_position()
