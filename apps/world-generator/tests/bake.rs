@@ -42,6 +42,6 @@ fn generator_bakes_legacy_assets_in_its_working_directory() {
     check("world/river_surface.bin");
     let lake_mesh = assets.join("world/lake_surface.bin");
     let bytes = fs::read(&lake_mesh).expect("missing inland-lake surface output");
-    // One lake rectangle uses the same 30-vertex unindexed record as a reach.
-    assert_eq!(bytes.len() % (30 * 3 * 4), 0, "invalid lake surface records");
+    // One lake tile is two triangles, six unindexed vertices.
+    assert_eq!(bytes.len() % (6 * 3 * 4), 0, "invalid lake surface records");
 }
