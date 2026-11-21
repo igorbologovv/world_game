@@ -42,6 +42,23 @@ cd ~/world-bevy20
 cargo tree -i bevy_app@0.14.2
 ```
 
+## Изолированная копия terrain — подтверждённая причина и следующий этап
+
+`cargo tree -i bevy_app@0.14.2` показал точную цепочку: `world_game -> ../bevy_terrain -> bevy 0.14.2 / big_space 0.7.0`. Локальный `~/bevy_terrain` также имеет изменённый `examples/spherical.rs` и неотслеживаемые `assets/terrains/`, `assets/textures/`; **оригинал не менять и не чистить**.
+
+Для перехода существует `big_space 0.14.0-rc.0`, рассчитанный на API Bevy 0.20 (исходный Cargo.toml зависит от `bevy_* 0.20.0-rc.2`). Однако API `big_space` существенно изменился с 0.7: `BigSpacePlugin`, `ReferenceFrame`, `GridCell` и `GridTransform` нельзя механически перенести — нужно отдельно мигрировать `bevy_terrain/src/big_space.rs` и пользовательские системы позиционирования.
+
+Для безопасного начала:
+
+```sh
+cd ~/world-bevy20
+git pull --ff-only origin migration/bevy-0.20
+bash tools/setup_bevy20_terrain.sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo check -p world-core
+```
+
+Скрипт создаёт `~/bevy_terrain-020` как отдельный Git worktree, указывает **только миграционную** игру на него и обновляет версии зависимостей этой копии. Ожидаются ошибки несовместимых API. Из-за прежних Btrfs ENOSPC и двух версий Bevy не запускать полную сборку до локализации ошибок `bevy_terrain`; не удалять общую папку `target`.
+
 ## Критические блокеры
 
 1. **Локальная зависимость `../bevy_terrain`.** Исходники этого отдельного проекта отсутствуют в репозитории. Плагин предоставляет `big_space::{GridTransform, ReferenceFrame, ReferenceFrames, BigSpacePlugin, GridCell}`, `DebugCameraController`, собственные системы floating origin и terrain. Его надо портировать и компилировать с Bevy 0.20 *раньше* перехода остальных крейтов. Просто изменить номер версии нельзя.
