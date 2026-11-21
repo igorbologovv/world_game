@@ -34,7 +34,7 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
         let blend = 1.0 - abs(phase * 0.25 - 1.0);
         let first = position - mesh.velocity * phase;
         let second = position - mesh.velocity * other;
-        slope = mix(current_slope(second), current_slope(first), blend) * detail * 0.30;
+        slope = mix(current_slope(second), current_slope(first), blend) * detail * 0.18;
         let foam_axis = vec3<f32>(0.78, 0.17, -0.47);
         let broken_water = mix(sin(dot(second, foam_axis)), sin(dot(first, foam_axis)), blend);
         let fast = smoothstep(1.4, 4.5, length(mesh.velocity));
@@ -42,8 +42,8 @@ fn fragment(mesh: WaterVertex) -> @location(0) vec4<f32> {
     }
     // Share the woodland pond palette across rivers and still inland lakes.
     // Bank tint is intentionally subtle, preserving the calm mint-water look.
-    let surface = mix(vec3<f32>(0.16, 0.43, 0.46), vec3<f32>(0.29, 0.56, 0.52), bank);
-    let color = water_light(surface, up, water_normal(up, slope), eye, 0.14)
+    let surface = mix(vec3<f32>(0.065, 0.22, 0.22), vec3<f32>(0.13, 0.33, 0.30), bank);
+    let color = water_light(surface, up, water_normal(up, slope), eye, 0.32)
         * river_brightness;
     return vec4<f32>(mix(color, vec3<f32>(0.76, 0.90, 0.87), foam), 1.0);
 }
