@@ -22,6 +22,8 @@ pub const RIVER_ATLAS_PATH: &str = "world/river_atlas.png";
 pub const OCEAN_ATLAS_PATH: &str = "world/ocean_atlas.png";
 /// River mesh path relative to the game assets.
 pub const RIVER_SURFACE_PATH: &str = "world/river_surface.bin";
+/// Generated inland lake meshes at their individual spill elevations.
+pub const LAKE_SURFACE_PATH: &str = "world/lake_surface.bin";
 /// Number of unindexed vertices per reach in the legacy river mesh.
 pub const RIVER_REACH_VERTICES: usize = 30;
 
