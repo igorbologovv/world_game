@@ -3,20 +3,18 @@
 // Bevy 0.14's ShaderType derive emits unused layout-check functions.
 #![allow(dead_code)]
 use bevy::{
+    asset::RenderAssetUsages,
     math::DVec3,
     pbr::MaterialPipeline,
     prelude::*,
-    shader::ShaderRef,
-    asset::RenderAssetUsages,
     reflect::TypePath,
     render::{
         mesh::MeshVertexBufferLayoutRef,
-
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderType,
-            SpecializedMeshPipelineError,
+            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
         },
     },
+    shader::ShaderRef,
 };
 
 use super::{impostor, placement::Site, MeshBuilder, Species};
@@ -81,7 +79,7 @@ impl ProxyMesh {
             .with_scale(Vec3::splat(height));
         let start = self.geometry.positions.len() as u32;
         let up = transform.up().into();
-        let half_width = half_width(site.species) * height * 1.16;
+        let half_width = half_width(site.species, site.variant) * height * 1.16;
         for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
             let side = (x * 2.0 - 1.0) * half_width;
             let position = transform.transform_point(Vec3::Y * y * 1.07) + Vec3::X * side;
@@ -108,12 +106,14 @@ impl ProxyMesh {
     }
 }
 
-pub(super) fn half_width(species: Species) -> f32 {
-    match species {
-        Species::Oak => 0.37,
-        Species::Pine => 0.24,
-        Species::Acacia => 0.50,
-        Species::Jungle => 0.32,
+pub(super) fn half_width(species: Species, variant: usize) -> f32 {
+    match (species, variant) {
+        (Species::Oak, _) => 0.37,
+        (Species::Pine, _) => 0.24,
+        (Species::Acacia, _) => 0.50,
+        (Species::Jungle, 1) => 0.65,
+        (Species::Jungle, _) => 0.32,
+        (Species::Palm, _) => 0.53,
     }
 }
 

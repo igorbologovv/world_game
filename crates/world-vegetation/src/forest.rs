@@ -5,27 +5,34 @@ mod ground_cover;
 mod hero_oak;
 mod impostor;
 mod lod;
+mod palm;
 mod placement;
 mod proxy;
 mod streaming;
 mod textures;
-mod woodland;
+mod tree_assets;
 
 use bevy::{
+    asset::RenderAssetUsages,
+    camera::{
+        primitives::{Aabb, MeshAabb},
+        visibility::VisibilitySystems,
+    },
     math::DVec3,
     pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin},
-    camera::{primitives::{Aabb, MeshAabb}, visibility::VisibilitySystems},
-    shader::ShaderRef,
     prelude::*,
-    asset::RenderAssetUsages,
     reflect::TypePath,
     render::{
         mesh::Indices,
-
         render_resource::{AsBindGroup, PrimitiveTopology},
     },
+    shader::ShaderRef,
 };
-use world_core::{planet::RADIUS, runtime::WorldMovement, SurfaceHeights};
+use world_core::{
+    planet::{RADIUS, SEA_LEVEL},
+    runtime::WorldMovement,
+    SurfaceHeights,
+};
 
 pub use fern::FernSettings;
 pub use lod::VegetationSettings;
@@ -66,10 +73,24 @@ enum Species {
     Pine = 1,
     Acacia = 2,
     Jungle = 3,
+    Palm = 4,
 }
 
 impl Species {
-    const ALL: [Self; 4] = [Self::Oak, Self::Pine, Self::Acacia, Self::Jungle];
+    const ALL: [Self; 5] = [
+        Self::Oak,
+        Self::Pine,
+        Self::Acacia,
+        Self::Jungle,
+        Self::Palm,
+    ];
+
+    const fn variants(self) -> usize {
+        match self {
+            Self::Palm => 1,
+            _ => VARIANTS,
+        }
+    }
 
     fn colors(self) -> ([f32; 3], [f32; 3]) {
         match self {
@@ -77,6 +98,7 @@ impl Species {
             Self::Pine => ([0.30, 0.20, 0.13], [0.13, 0.34, 0.23]),
             Self::Acacia => ([0.34, 0.25, 0.15], [0.42, 0.55, 0.19]),
             Self::Jungle => ([0.29, 0.20, 0.14], [0.14, 0.48, 0.17]),
+            Self::Palm => ([0.39, 0.30, 0.22], [0.22, 0.49, 0.13]),
         }
     }
 }
@@ -134,6 +156,7 @@ struct ForestModels {
     variants: Vec<Vec<VariantModels>>,
     bark_material: Handle<StandardMaterial>,
     hero_oak: Option<hero_oak::HeroOak>,
+    portraits: impostor::Portraits,
 }
 
 impl ForestModels {
@@ -152,7 +175,10 @@ impl ForestModels {
             return (&hero.lods[level], &hero.bark);
         }
         let model = &self.variants[species as usize][variant];
-        (&model.lods[level], model.bark.as_ref().unwrap_or(&self.bark_material))
+        (
+            &model.lods[level],
+            model.bark.as_ref().unwrap_or(&self.bark_material),
+        )
     }
 }
 
@@ -183,15 +209,9 @@ pub struct ProceduralForestPlugin;
 impl Plugin for ProceduralForestPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            MaterialPlugin::<FoliageMaterial> {
-                ..default()
-            },
-            MaterialPlugin::<lod::BarkMaterial> {
-                ..default()
-            },
-            MaterialPlugin::<proxy::ProxyMaterial> {
-                ..default()
-            },
+            MaterialPlugin::<FoliageMaterial> { ..default() },
+            MaterialPlugin::<lod::BarkMaterial> { ..default() },
+            MaterialPlugin::<proxy::ProxyMaterial> { ..default() },
         ))
         .add_plugins(fern::FernPlugin)
         .init_resource::<VegetationSettings>()
@@ -204,7 +224,7 @@ impl Plugin for ProceduralForestPlugin {
             (
                 build_models,
                 hero_oak::request_assets,
-                woodland::request_assets,
+                tree_assets::request_assets,
                 ground_cover::build_material,
                 debug::spawn,
             ),
@@ -212,7 +232,11 @@ impl Plugin for ProceduralForestPlugin {
         .add_systems(Update, ground_cover::stream.after(WorldMovement))
         .add_systems(
             Update,
-            (hero_oak::finish_loading, woodland::finish_loading, streaming::stream)
+            (
+                hero_oak::finish_loading,
+                tree_assets::finish_loading,
+                streaming::stream,
+            )
                 .chain()
                 .after(WorldMovement),
         )
@@ -243,8 +267,8 @@ fn build_models(
     for species in Species::ALL {
         let foliage_image = images.add(textures::canopy_texture(species));
         let foliage_material = foliage_materials.add(cutout_material(foliage_image));
-        let mut species_variants = Vec::with_capacity(VARIANTS);
-        for variant in 0..VARIANTS {
+        let mut species_variants = Vec::with_capacity(species.variants());
+        for variant in 0..species.variants() {
             let mut lods = Vec::with_capacity(3);
             for level in 0..3 {
                 let (wood, leaves) = generate_tree(species, variant as u64, level);
@@ -263,6 +287,7 @@ fn build_models(
         variants,
         bark_material,
         hero_oak: None,
+        portraits: default(),
     });
 }
 
@@ -338,7 +363,10 @@ fn tree_site(
     if !(3.5..=2600.0).contains(&ground) || heights.is_river(direction) {
         return None;
     }
-    let species = select_species(direction, ground, rng)?;
+    let species = select_species(direction, ground, rng, || {
+        let (east, north) = tangent_basis(direction);
+        near_sea(direction, east, north, |up| heights.sample(up))
+    })?;
     let (east, north) = tangent_basis(direction);
     let offset = 4.0 / RADIUS;
     let rise = |axis: DVec3| {
@@ -350,7 +378,38 @@ fn tree_site(
     (rise(east).hypot(rise(north)) <= 4.0 * 0.58).then_some((ground, species))
 }
 
-fn select_species(direction: DVec3, height: f64, random: &mut Random) -> Option<Species> {
+fn near_sea(
+    direction: DVec3,
+    east: DVec3,
+    north: DVec3,
+    sample: impl Fn(DVec3) -> Option<f64>,
+) -> bool {
+    let diagonal = std::f64::consts::FRAC_1_SQRT_2;
+    let east_north = (east + north) * diagonal;
+    let east_south = (east - north) * diagonal;
+    [
+        east,
+        -east,
+        north,
+        -north,
+        east_north,
+        -east_north,
+        east_south,
+        -east_south,
+    ]
+    .into_iter()
+    .any(|axis| {
+        sample((direction + axis * (220.0 / RADIUS)).normalize())
+            .is_some_and(|height| height < SEA_LEVEL)
+    })
+}
+
+fn select_species(
+    direction: DVec3,
+    height: f64,
+    random: &mut Random,
+    coastal: impl FnOnce() -> bool,
+) -> Option<Species> {
     let dir = direction.as_vec3();
     let latitude = dir.y.abs();
     let weather = noise3(dir * 5.8 + Vec3::new(17.3, -4.7, 11.8));
@@ -364,9 +423,27 @@ fn select_species(direction: DVec3, height: f64, random: &mut Random) -> Option<
     // forest clearings and densely packed stands.
     let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
     let density = (0.82 + grove * 0.90).clamp(0.25, 1.0);
+    species_for_climate(latitude, temp, moisture, height, density, random, coastal)
+}
+
+fn species_for_climate(
+    latitude: f32,
+    temp: f32,
+    moisture: f32,
+    height: f64,
+    density: f32,
+    random: &mut Random,
+    coastal: impl FnOnce() -> bool,
+) -> Option<Species> {
     let roll = random.unit();
     if height > 2_600.0 || latitude > 0.96 || temp < 0.13 {
         return None;
+    }
+    let tropical_palm = temp > 0.78 && moisture > 0.50 && height <= 420.0 && roll < density * 0.22;
+    let coastal_palm =
+        || temp > 0.70 && moisture > 0.25 && height <= 45.0 && roll < density * 0.58 && coastal();
+    if tropical_palm || coastal_palm() {
+        return Some(Species::Palm);
     }
     if temp > 0.68 && moisture > 0.49 && roll < density * 0.98 {
         return Some(Species::Jungle);
@@ -374,7 +451,7 @@ fn select_species(direction: DVec3, height: f64, random: &mut Random) -> Option<
     if temp > 0.66 && (0.19..0.61).contains(&moisture) && roll < density * 0.34 {
         return Some(Species::Acacia);
     }
-    if temp > 0.29 && moisture > 0.41 && roll < density * 0.94 {
+    if (0.29..=0.68).contains(&temp) && moisture > 0.41 && roll < density * 0.94 {
         return if random.unit() < 0.77 {
             Some(Species::Oak)
         } else {
@@ -605,10 +682,14 @@ fn tree_height(species: Species, variant: u64) -> f32 {
         Species::Pine => 19.0 + offset,
         Species::Acacia => 11.5 + offset,
         Species::Jungle => 25.0 + offset,
+        Species::Palm => 12.0,
     }
 }
 
 fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, MeshBuilder) {
+    if species == Species::Palm {
+        return palm::procedural(lod);
+    }
     let mut wood = MeshBuilder::default();
     let mut leaves = MeshBuilder::default();
     let (bark, green) = species.colors();
@@ -622,12 +703,14 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         Species::Oak => 0.65,
         Species::Pine => 0.44,
         Species::Acacia => 0.52,
+        Species::Palm => unreachable!(),
     };
     let trunk_length = match species {
         Species::Pine => height * 0.92,
         Species::Jungle => height * 0.78,
         Species::Oak => height * 0.72,
         Species::Acacia => height * 0.57,
+        Species::Palm => unreachable!(),
     };
     let trunk_segments = [7, 5, 3][lod];
     let lean = match species {
@@ -635,6 +718,7 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         Species::Jungle => 0.82,
         Species::Oak => 1.11,
         Species::Acacia => 1.75,
+        Species::Palm => unreachable!(),
     };
     let turn = rng.range(0.0, std::f32::consts::TAU);
     let trunk = |t: f32| {
@@ -724,6 +808,7 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
                 height * 0.34 * (1.0 - 0.39 * t),
                 5,
             ),
+            Species::Palm => unreachable!(),
         };
         for branch in 0..branches {
             let mut rng = Random::new(seed ^ (((tier * 8 + branch + 1) as u64) * 331_792_583));
@@ -847,6 +932,7 @@ fn leaf_cluster(
             Species::Acacia => (0.54, 0.21),
             Species::Jungle => (1.18, 0.47),
             Species::Oak => (0.79, 0.32),
+            Species::Palm => unreachable!(),
         };
         let size = rng.range(0.73, 1.30)
             * if lod == 2 {
@@ -870,6 +956,43 @@ fn leaf_cluster(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palms_favor_tropical_lowlands_and_warm_coasts() {
+        // This seed produces a site within even the sparsest eligible groves.
+        let pick = |temp, moisture, height, coastal| {
+            species_for_climate(
+                0.2,
+                temp,
+                moisture,
+                height,
+                1.0,
+                &mut Random::new(0),
+                || coastal,
+            )
+        };
+        assert_eq!(pick(0.88, 0.72, 200.0, false), Some(Species::Palm));
+        assert_eq!(pick(0.75, 0.31, 12.0, true), Some(Species::Palm));
+        assert_eq!(pick(0.75, 0.31, 12.0, false), Some(Species::Acacia));
+        assert_eq!(pick(0.88, 0.72, 900.0, false), Some(Species::Jungle));
+        assert_eq!(pick(0.40, 0.65, 12.0, true), Some(Species::Oak));
+        assert_eq!(pick(0.26, 0.42, 12.0, true), Some(Species::Pine));
+        assert_eq!(pick(0.86, 0.10, 12.0, true), None);
+    }
+
+    #[test]
+    fn shore_probe_detects_sea_level_water_on_the_diagonals() {
+        let (east, north) = tangent_basis(DVec3::Y);
+        assert!(near_sea(DVec3::Y, east, north, |up| Some(
+            if up.dot(east) > 0.001 && up.dot(north) > 0.001 {
+                -5.0
+            } else {
+                8.0
+            }
+        )));
+        assert!(!near_sea(DVec3::Y, east, north, |_| Some(8.0)));
+        assert!(!near_sea(DVec3::Y, east, north, |_| None));
+    }
 
     #[test]
     fn spherical_horizon_rejects_the_far_side() {

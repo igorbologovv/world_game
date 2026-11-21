@@ -5,10 +5,10 @@ use std::{
 };
 
 use bevy::{
-    math::DVec3,
-    light::NotShadowCaster,
-    prelude::*,
     camera::primitives::{Aabb, MeshAabb},
+    light::NotShadowCaster,
+    math::DVec3,
+    prelude::*,
     tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
 };
 use world_core::{
@@ -109,9 +109,8 @@ pub(super) struct ForestStream {
     retiring_batches: Vec<Entity>,
     atlas: Option<Handle<Image>>,
     atlas_task: Option<Task<Image>>,
-    // Bake a procedural atlas immediately; refresh the same image asset if Hero Oak loads.
-    atlas_has_hero: bool,
-    atlas_task_has_hero: bool,
+    atlas_revision: (bool, usize),
+    atlas_task_revision: (bool, usize),
     next_debug_log: f64,
     next_plan: f64,
     last_eye: Option<DVec3>,
@@ -531,20 +530,21 @@ pub(super) fn stream(
     let forest_range = settings.forest_range.clamp(range + 220.0, 3_000.0);
     let preload = settings.preload_margin.clamp(90.0, 420.0);
     let step = fade_step(&time, &settings);
-    // A missing or endlessly pending optional Hero Oak must never block
-    // procedural forest streaming. Start with a procedural atlas and replace
-    // its contents when the authored Hero Oak becomes available.
+    // Keep the atlas handle and UV layout stable while new portraits arrive.
     let oak = models
         .hero_oak
         .as_ref()
-        .and_then(|hero| images.get(&hero.impostor_image))
-        .cloned();
-    let needs_initial_atlas = forest.atlas.is_none();
-    let needs_hero_refresh = oak.is_some() && !forest.atlas_has_hero;
-    if forest.atlas_task.is_none() && (needs_initial_atlas || needs_hero_refresh) {
-        forest.atlas_task_has_hero = oak.is_some();
-        forest.atlas_task =
-            Some(AsyncComputeTaskPool::get().spawn(async move { impostor::bake(oak.as_ref()) }));
+        .and_then(|hero| images.get(&hero.impostor_image));
+    let revision = (oak.is_some(), models.portraits.revision);
+    if forest.atlas_task.is_none() && (forest.atlas.is_none() || forest.atlas_revision != revision)
+    {
+        let oak = oak.cloned();
+        let portraits = models.portraits.clone();
+        forest.atlas_task_revision = revision;
+        forest.atlas_task = Some(
+            AsyncComputeTaskPool::get()
+                .spawn(async move { impostor::bake(oak.as_ref(), &portraits) }),
+        );
     }
     if let Some(image) = forest
         .atlas_task
@@ -562,9 +562,8 @@ pub(super) fn stream(
         } else {
             forest.atlas = Some(images.add(image));
         }
-        forest.atlas_has_hero = forest.atlas_task_has_hero;
+        forest.atlas_revision = forest.atlas_task_revision;
         forest.atlas_task = None;
-        info!("Forest atlas ready (Hero Oak included: {})", forest.atlas_has_hero);
     }
 
     forest.plan(
@@ -721,16 +720,13 @@ pub(super) fn stream(
     let now = time.elapsed_secs_f64();
     if now >= forest.next_debug_log {
         forest.next_debug_log = now + 5.0;
-        let (sampled, placements) = forest
-            .nodes
-            .values()
-            .flat_map(|node| &node.leaves)
-            .fold((0_usize, 0_usize), |(sampled, placements), leaf| {
-                match leaf.sites.as_ref() {
-                    Some(sites) => (sampled + 1, placements + sites.len()),
-                    None => (sampled, placements),
-                }
-            });
+        let (sampled, placements) = forest.nodes.values().flat_map(|node| &node.leaves).fold(
+            (0_usize, 0_usize),
+            |(sampled, placements), leaf| match leaf.sites.as_ref() {
+                Some(sites) => (sampled + 1, placements + sites.len()),
+                None => (sampled, placements),
+            },
+        );
         let altitude = eye.length() - RADIUS - heights.sample(up).unwrap_or(0.0);
         info!(
             "Forest stream: nodes={} sampled_patches={} tree_sites={} parents={} impostors={} detail_entities={} jobs={} atlas={} atlas_baking={} hero_pending={} altitude={:.1}m",
@@ -765,8 +761,7 @@ mod tests {
         let parent = app.world_mut().spawn_empty().id();
         let child = app
             .world_mut()
-            .spawn(Visibility::Inherited)
-            .set_parent(parent)
+            .spawn((Visibility::Inherited, ChildOf(parent)))
             .id();
         app.insert_resource(Fixture {
             state: MeshState::Ready(Batch {
@@ -788,7 +783,7 @@ mod tests {
         );
 
         app.update();
-        assert!(app.world().get_entity(child).is_none());
+        assert!(app.world().get_entity(child).is_err());
         assert!(app
             .world()
             .get::<Children>(parent)

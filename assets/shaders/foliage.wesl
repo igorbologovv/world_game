@@ -1,5 +1,5 @@
 import bevy_pbr::render::forward_io::{Vertex, VertexOutput, decompress_vertex};
-import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_local_to_world};
+import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_local_to_world, mesh_tangent_local_to_world};
 import bevy_pbr::render::mesh_view_bindings::globals;
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 
@@ -25,6 +25,8 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
     output.uv = mesh.uv;
     output.uv_b = mesh.uv_b;
     output.color = mesh.color;
+@if(VERTEX_TANGENTS)
+    output.world_tangent = mesh_tangent_local_to_world(world, mesh.tangent, mesh.instance_index);
 @if(VERTEX_OUTPUT_INSTANCE_INDEX)
     output.instance_index = mesh.instance_index;
 

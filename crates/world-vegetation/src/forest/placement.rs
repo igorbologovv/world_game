@@ -2,7 +2,7 @@
 use bevy::{math::DVec3, prelude::*};
 use world_core::{coordinates::terrain_aligned_direction, planet::RADIUS, SurfaceHeights};
 
-use super::{hero_oak, tree_height, tree_site, Random, Species, VARIANTS};
+use super::{hero_oak, tree_height, tree_site, Random, Species};
 
 pub(super) const PATCH_METERS: f64 = 145.0;
 const ANGLE: f64 = PATCH_METERS / RADIUS;
@@ -80,13 +80,13 @@ impl PatchKey {
                     (f64::from(self.1) + rng.unit64()) * step,
                 ));
                 let (ground, species) = tree_site(heights, up, &mut rng)?;
-                let variant = rng.next_u32() as usize % VARIANTS;
+                let variant = rng.next_u32() as usize % species.variants();
                 let scale = rng.range(0.84, 1.28);
                 let yaw = rng.range(0.0, std::f32::consts::TAU);
-                let sink = if species == Species::Oak {
-                    hero_oak::ROOT_SINK * f64::from(scale)
-                } else {
-                    1.6
+                let sink = match (species, variant) {
+                    (Species::Oak, _) => hero_oak::ROOT_SINK * f64::from(scale),
+                    (Species::Palm, _) | (Species::Jungle, 1) => 0.35 * f64::from(scale),
+                    _ => 1.6,
                 };
                 Some(Site {
                     position: up * (RADIUS + ground - sink),

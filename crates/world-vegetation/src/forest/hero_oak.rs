@@ -333,7 +333,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bevy::{
-        asset::AssetPlugin, gltf::GltfPlugin, render::texture::ImagePlugin, scene::ScenePlugin,
+        asset::AssetPlugin, gltf::GltfPlugin, image::{CompressedImageFormats, ImageLoader, ImagePlugin}, scene::ScenePlugin,
+    world_serialization::WorldSerializationPlugin,
     };
 
     use super::*;
@@ -347,10 +348,12 @@ mod tests {
                 file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into(),
                 ..default()
             },
-            ScenePlugin,
+            WorldSerializationPlugin,
+        ScenePlugin,
             ImagePlugin::default(),
             GltfPlugin::default(),
         ))
+        .register_asset_loader(ImageLoader::new(CompressedImageFormats::empty()))
         .init_asset::<Mesh>()
         .init_asset::<StandardMaterial>()
         .init_asset::<FoliageMaterial>()
@@ -358,6 +361,7 @@ mod tests {
             variants: Vec::new(),
             bark_material: Handle::default(),
             hero_oak: None,
+            portraits: default(),
         })
         .add_systems(Startup, request_assets)
         .add_systems(Update, finish_loading);

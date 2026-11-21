@@ -1,11 +1,8 @@
 use bevy::{
-    prelude::*,
-    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     asset::RenderAssetUsages,
-    render::{
-
-        render_resource::{Extent3d, TextureDimension, TextureFormat},
-    },
+    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
+    prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
 use super::{Random, Species, FOLIAGE_CUTOFF};
@@ -91,6 +88,9 @@ fn paint_leaf(
                     envelope * (0.035 + 0.22 * (along * 31.0 + lateral * 3.0).cos().max(0.0))
                 }
                 Species::Jungle => envelope.powf(0.82) * (0.32 - 0.11 * along),
+                Species::Palm => {
+                    envelope * (0.05 + 0.24 * (along * 48.0 - lateral.abs() * 6.0).sin().abs())
+                }
             };
             let alpha = ((width - lateral.abs()) * length * SWATCH as f32 + 0.5).clamp(0.0, 1.0);
             if alpha == 0.0 {

@@ -29,10 +29,10 @@ impostor transition distances.
   detail trees. Impostor coverage stays available when a detail request is
   waiting for that budget.
 - `lod` owns projected-size selection, reversible transitions, and the shared
-  material palette. Shared mesh and material handles allow Bevy 0.14 to batch
+  material palette. Shared mesh and material handles allow Bevy 0.20 to batch
   matching detailed instances on supported render backends.
-- `impostor` bakes mipmapped portraits from the existing procedural tree
-  meshes and reuses the exported Hero Oak silhouette. `proxy` merges one
+- `impostor` packs the procedural and authored portraits and the exported
+  Hero Oak silhouette into one mipmapped atlas. `proxy` merges one
   camera-facing cutout per tree into a chunk. The parent forest batch aggregates
   the same cutouts from multiple child chunks into one draw. It uses the same
   tree roots and silhouettes during the handoff.
@@ -54,6 +54,47 @@ normals across each UV seam. The loader prepares tangents once and uses the
 bark embedded in the GLBs if the standalone maps are unavailable or incompatible.
 See the [terrain material baker](../world-terrain/README.md) for the source
 pack and rebuild command.
+
+## Streamed tree assets
+
+| Model | Placement | Mesh triangles LOD0 / LOD1 / LOD2 | Source textures |
+| --- | --- | ---: | --- |
+| Coconut Palm (*Cocos nucifera*) | Hot, humid lowlands and warm coasts | 5,092 / 2,304 / 1,010 | Five `Tree_0Mat`–`Tree_4Mat` sets with base color, normal, and metallic-roughness. `Tree_2Mat` is the cutout frond material. |
+| Tree (part9), unnamed broadleaf | One warm, humid jungle variant | 5,358 / 3,129 / 2,465 | `bark8` base color and normal, plus four cutout base-color maps (`tree4_leaf_small1`, `tree4_leaf_small2`, `tree5_leaf_small3`, and `trees_bushes_0001_a_1`). |
+| Woodland trees 00 and 01, stylized deciduous trees | Two temperate oak variants | 4,599 / 2,068 / 827 each | Shared `Bark` base color, normal, and metallic-roughness, and `Leaves` base color and normal. |
+
+The source exports identify the palm. The broadleaf and woodland sources give
+no botanical species. The oak and jungle assignments reflect their shapes
+and gameplay biomes. Hero Oak retains its existing variant. Procedural pines
+and acacias still fill cool forest and warm, drier sites respectively.
+
+Potential coastal palms sample terrain in eight directions up to 220 m away.
+A probe below the sea datum classifies a warm site within 45 m of sea level as
+coastal. Tropical groves use the forest's temperature and moisture fields and
+may extend up to 420 m elevation. All sites still use the shared height, river,
+and slope checks and the same deterministic patch seeds.
+
+The assets under `assets/models/vegetation/` are standalone glTF meshes with
+shared external textures across the three LODs. Each tree has one bark mesh and
+one foliage mesh per LOD. The loader supplies each tree's portrait to the
+existing atlas, so parent and child batches use the authored silhouette with
+the same grid-relative root. The procedural versions cover sites while the
+authored assets load.
+
+Export with Blender and Pillow. The first command extracts the two woodland
+intermediates from the original scene. The second packs the runtime models.
+
+```sh
+blender -b --python-exit-code 1 --python tools/extract_woodland_prefabs.py -- \
+  --auto-trees 2 --output "$PWD/target/woodland_raw"
+blender -b --python-exit-code 1 --python tools/build_tree_prefabs.py -- \
+  --woodland-input "$PWD/target/woodland_raw"
+```
+
+The runtime assets are adaptations of **Coconut Palm** by evolveduk,
+**Tree (part9)** by YN14R, and **Low Poly Tree Scene Free** by Nicholas-3D.
+The adaptations separate trees from source scenes, normalize their geometry,
+simplify LODs, and repack textures. [Coconut Palm](https://sketchfab.com/3d-models/coconut-palm-26e787f2ff2e4c0fb004c3b0210805a3), [Tree (part9)](https://sketchfab.com/3d-models/tree-part9-6fbd1594b62b4f94951dcca9e74a7347), [Low Poly Tree Scene Free](https://sketchfab.com/3d-models/low-poly-tree-scene-free-89daa5e21f0d4f08a59dba0d566e88bd), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## Woodland Fern
 
