@@ -346,13 +346,10 @@ fn make_chunk(
             commands,
             (
                 cell,
-                MaterialMeshBundle {
-                    mesh: meshes.add(mesh),
-                    material: material.clone(),
-                    transform: Transform::from_translation(translation),
-                    visibility: Visibility::Hidden,
-                    ..default()
-                },
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(material.clone()),
+                Transform::from_translation(translation),
+                Visibility::Hidden,
                 bounds,
                 NotShadowCaster,
                 NotShadowReceiver,
@@ -457,7 +454,7 @@ fn stream(
     );
     let start = world.retiring.len().saturating_sub(RETIREMENTS_PER_FRAME);
     for entity in world.retiring.drain(start..) {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 
     let h = settings.hysteresis.clamp(0.0, 0.25);
@@ -648,14 +645,11 @@ fn spawn_detail(
         commands,
         (
             cell,
-            MaterialMeshBundle {
-                mesh: mesh.clone(),
-                material,
-                transform: Transform::from_translation(translation)
-                    .with_rotation(plant.rotation)
-                    .with_scale(Vec3::splat(plant.scale)),
-                ..default()
-            },
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material),
+            Transform::from_translation(translation)
+                .with_rotation(plant.rotation)
+                .with_scale(Vec3::splat(plant.scale)),
             *bounds,
             NotShadowCaster,
             NotShadowReceiver,
