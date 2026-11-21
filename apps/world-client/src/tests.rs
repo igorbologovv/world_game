@@ -86,6 +86,25 @@ fn client_plugins_share_the_planet_and_starting_camera() {
         .single(world)
         .unwrap();
     assert!(spawn.dot((sun.rotation * Vec3::Z).as_dvec3()) > 0.60);
+    let size = UVec2::new(800, 600);
+    {
+        let mut cameras = world.query_filtered::<&mut Camera, With<WorldCamera>>();
+        let mut view = cameras.single_mut(world).unwrap();
+        view.computed.target_info = Some(RenderTargetInfo {
+            physical_size: size,
+            scale_factor: 1.0,
+        });
+        view.computed.clip_from_view = PerspectiveProjection::default().get_clip_from_view();
+    }
+    app.update();
+    let world = app.world_mut();
+    assert!(
+        world
+            .query::<(&Text, &Visibility)>()
+            .iter(world)
+            .any(|(text, visibility)| text.0 == "Coconut palm"
+                && *visibility == Visibility::Inherited)
+    );
 
     // The imported demonstration is an asset source, not a second terrain tile.
     assert_eq!(
@@ -117,7 +136,6 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     // Aim a headless map view at the old starter region, then use the normal input path.
     let target = terrain_aligned_direction(STARTER_REGION.spawn.direction);
     let target_ground = world.resource::<SurfaceHeights>().sample(target).unwrap();
-    let size = UVec2::new(800, 600);
     world
         .get_mut::<Window>(window)
         .unwrap()
@@ -208,4 +226,16 @@ fn spawn_argument_selects_a_known_region() {
         STARTER_REGION.id
     );
     assert!(parse(&["--spawn", "unknown"]).is_none());
+}
+
+#[test]
+fn palm_build_uses_its_checkout_assets_when_launched_from_an_older_directory() {
+    let checkout = Path::new(WORKSPACE_ROOT).join("assets");
+    let older = WorldAssets::new(checkout.join("models"));
+    let chosen = prefer_checkout_palm_assets(older.clone(), &checkout, false);
+    assert_eq!(chosen.directory(), checkout);
+    assert!(chosen.directory().join(PALM_MESH).is_file());
+
+    let override_assets = prefer_checkout_palm_assets(older.clone(), &checkout, true);
+    assert_eq!(override_assets.directory(), older.directory());
 }

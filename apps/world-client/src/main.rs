@@ -1,3 +1,5 @@
+mod palm_guide;
+
 use std::path::Path;
 
 use bevy::{asset::AssetPlugin, prelude::*};
@@ -9,6 +11,7 @@ use world_terrain::TerrainPlugin;
 use world_vegetation::ProceduralForestPlugin;
 use world_water::WaterPlugin;
 
+const PALM_MESH: &str = "models/vegetation/coconut_palm/tree_lod0.glb";
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 fn main() {
@@ -21,7 +24,12 @@ fn main() {
     } else {
         "Starter River"
     };
-    let assets = WorldAssets::resolve(Path::new(WORKSPACE_ROOT));
+    let workspace = Path::new(WORKSPACE_ROOT);
+    let assets = prefer_checkout_palm_assets(
+        WorldAssets::resolve(workspace),
+        &workspace.join("assets"),
+        std::env::var_os("BEVY_ASSET_ROOT").is_some(),
+    );
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -36,6 +44,12 @@ fn main() {
                 ..default()
             }),
     );
+    if region.id == PALM_COAST_REGION.id && !assets.directory().join(PALM_MESH).is_file() {
+        warn!(
+            "Coconut palm model missing from {}",
+            assets.directory().display()
+        );
+    }
     install_world(&mut app, assets, region);
     app.run();
 }
@@ -50,6 +64,23 @@ fn spawn_region(mut args: impl Iterator<Item = String>) -> Option<Region> {
     }
 }
 
+fn prefer_checkout_palm_assets(
+    assets: WorldAssets,
+    checkout: &Path,
+    explicit_override: bool,
+) -> WorldAssets {
+    // Launching this build from an older checkout can find its terrain assets
+    // before finding this checkout's vegetation.
+    if !explicit_override
+        && !assets.directory().join(PALM_MESH).is_file()
+        && checkout.join(PALM_MESH).is_file()
+    {
+        WorldAssets::new(checkout.to_path_buf())
+    } else {
+        assets
+    }
+}
+
 fn asset_plugin(assets: &WorldAssets) -> AssetPlugin {
     AssetPlugin {
         file_path: assets.directory().to_string_lossy().into_owned(),
@@ -61,6 +92,7 @@ fn install_world(app: &mut App, assets: WorldAssets, region: Region) {
     let mut player = PlayerPlugin::new(region.spawn);
     if region.id == PALM_COAST_REGION.id {
         player = player.with_first_person_view();
+        palm_guide::install(app);
     }
     app.add_plugins((
         WorldSpacePlugin::new(assets),
