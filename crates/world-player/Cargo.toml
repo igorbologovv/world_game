@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 bevy.workspace = true
 world-core = { workspace = true, features = ["runtime"] }
-bevy_terrain.workspace = true
+big_space.workspace = true
 
 [dev-dependencies]
 world-regions.workspace = true
