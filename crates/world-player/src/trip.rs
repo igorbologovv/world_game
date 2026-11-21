@@ -1,4 +1,9 @@
-use bevy::{prelude::*, ui::FocusPolicy};
+use bevy::{
+    picking::hover::Hovered,
+    prelude::*,
+    ui::{FocusPolicy, Pressed},
+    ui_widgets::{Activate, Button},
+};
 use crate::camera::DebugCameraController;
 
 use crate::player::Player;
@@ -55,7 +60,7 @@ pub(super) fn spawn(mut commands: Commands) {
             },
             BackgroundColor(Color::srgba(0.06, 0.10, 0.14, 0.93)),
             FocusPolicy::Block,
-            Interaction::None,
+            Hovered::default(),
             TripPanelInput,
         ))
         .with_children(|panel| {
@@ -89,7 +94,8 @@ fn speed_button(
     adjustment: isize,
 ) {
     builder.spawn((
-        Button::default(),
+        Button,
+        Hovered::default(),
         Node {
             width: Val::Px(36.0),
             height: Val::Px(32.0),
@@ -97,26 +103,23 @@ fn speed_button(
             align_items: AlignItems::Center,
             ..default()
         },
-        BackgroundColor(button_color(Interaction::None).0),
+        button_color(false, false),
         SpeedButton(adjustment),
         TripPanelInput,
     ))
+    .observe(move |_: On<Activate>, mut speed: ResMut<TravelSpeed>| {
+        speed.adjust(adjustment);
+    })
     .with_children(|button| {
         button.spawn(label(symbol, 19.0));
     });
 }
 
+// Keyboard shortcuts use the same travel speed resource as button activation.
 pub(super) fn change_speed(
     keys: Res<ButtonInput<KeyCode>>,
     mut speed: ResMut<TravelSpeed>,
-    mut buttons: Query<(&Interaction, &SpeedButton, &mut BackgroundColor), Changed<Interaction>>,
 ) {
-    for (interaction, button, mut color) in &mut buttons {
-        *color = button_color(*interaction);
-        if *interaction == Interaction::Pressed {
-            speed.adjust(button.0);
-        }
-    }
     if keys.any_just_pressed([KeyCode::Minus, KeyCode::NumpadSubtract]) {
         speed.adjust(-1);
     }
@@ -125,11 +128,26 @@ pub(super) fn change_speed(
     }
 }
 
-fn button_color(interaction: Interaction) -> BackgroundColor {
-    BackgroundColor(match interaction {
-        Interaction::Pressed => Color::srgb(0.16, 0.34, 0.41),
-        Interaction::Hovered => Color::srgb(0.21, 0.36, 0.44),
-        Interaction::None => Color::srgb(0.12, 0.23, 0.30),
+// In Bevy 0.20, ui_widgets::Button emits Activate and tracks Pressed,
+// while the picking backend updates Hovered (including hovered descendants).
+pub(super) fn style_buttons(
+    mut buttons: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor), With<SpeedButton>>,
+) {
+    for (hovered, pressed, mut color) in &mut buttons {
+        let next = button_color(hovered.get(), pressed);
+        if color.0 != next.0 {
+            *color = next;
+        }
+    }
+}
+
+fn button_color(hovered: bool, pressed: bool) -> BackgroundColor {
+    BackgroundColor(if pressed {
+        Color::srgb(0.16, 0.34, 0.41)
+    } else if hovered {
+        Color::srgb(0.21, 0.36, 0.44)
+    } else {
+        Color::srgb(0.12, 0.23, 0.30)
     })
 }
 
