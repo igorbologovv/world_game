@@ -441,7 +441,7 @@ fn forest_density(direction: DVec3, height: f64) -> f32 {
     let p = direction.normalize() * RADIUS;
     // Kilometer-sized fields and glades cut broad, traversable open areas.
     let region = forest_field(p / 78_000.0, 0xB1D2_8491);
-    let meadow = forest_field(p / 8_400.0, 0x9284_F5E3);
+    let meadow = forest_field(p / 8_400.0, 0x9284_F505);
     let stand = forest_field(p / 510.0, 0x61A7_96F4);
     let open = forest_smoothstep(-0.34, 0.18, region)
         * forest_smoothstep(-0.26, 0.24, meadow);
