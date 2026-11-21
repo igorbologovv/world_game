@@ -1,7 +1,7 @@
-import super::vegetation_dither::vegetation_threshold
-import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput}
-import bevy_pbr::render::pbr_fragment::pbr_input_from_standard_material
-import bevy_pbr::render::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing}
+import super::vegetation_dither::vegetation_threshold;
+import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
+import bevy_pbr::render::pbr_fragment::pbr_input_from_standard_material;
+import bevy_pbr::render::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing};
 
 // Two independent fern coverage intervals are packed per vec4.
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> masks: array<vec4<f32>, 8>;
