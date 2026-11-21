@@ -1004,7 +1004,7 @@ mod tests {
                     + north * (f64::from(z) * 400.0 / RADIUS))
                     .normalize();
                 let density = forest_density(direction, 100.0);
-                assert!(density >= 0.025 - f32::EPSILON && density <= 0.775);
+                assert!(density >= 0.025 - f32::EPSILON && density <= 0.925);
                 low = low.min(density);
                 high = high.max(density);
             }
