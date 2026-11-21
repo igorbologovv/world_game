@@ -1,5 +1,5 @@
 use bevy::{prelude::*, ui::FocusPolicy};
-use bevy_terrain::prelude::DebugCameraController;
+use crate::camera::DebugCameraController;
 
 use crate::player::Player;
 
@@ -43,76 +43,67 @@ pub(super) struct TripReadout;
 pub(super) fn spawn(mut commands: Commands) {
     commands
         .spawn((
-            NodeBundle {
-                style: Style {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    padding: UiRect::all(Val::Px(12.0)),
-                    width: Val::Px(258.0),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(10.0),
-                    ..default()
-                },
-                background_color: BackgroundColor(Color::srgba(0.06, 0.10, 0.14, 0.93)),
-                focus_policy: FocusPolicy::Block,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(16.0),
+                right: Val::Px(16.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                width: Val::Px(258.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(10.0),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.06, 0.10, 0.14, 0.93)),
+            FocusPolicy::Block,
             Interaction::None,
             TripPanelInput,
         ))
         .with_children(|panel| {
             panel.spawn((label("No destination", 16.0), TripReadout));
-            panel
-                .spawn(NodeBundle {
-                    style: Style {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::SpaceBetween,
-                        column_gap: Val::Px(6.0),
-                        ..default()
-                    },
-                    ..default()
-                })
-                .with_children(|controls| {
-                    speed_button(controls, "−", -1);
-                    controls.spawn((label("1× · 7 m/s", 15.0), SpeedReadout));
-                    speed_button(controls, "+", 1);
-                });
+            panel.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                column_gap: Val::Px(6.0),
+                ..default()
+            })
+            .with_children(|controls| {
+                speed_button(controls, "−", -1);
+                controls.spawn((label("1× · 7 m/s", 15.0), SpeedReadout));
+                speed_button(controls, "+", 1);
+            });
         });
 }
 
-fn label(value: &str, font_size: f32) -> TextBundle {
-    TextBundle::from_section(
-        value,
-        TextStyle {
-            font_size,
-            color: Color::srgb(0.92, 0.95, 0.98),
-            ..default()
-        },
+fn label(value: &str, font_size: f32) -> impl Bundle {
+    (
+        Text::new(value),
+        TextFont { font_size: FontSize::Px(font_size), ..default() },
+        TextColor(Color::srgb(0.92, 0.95, 0.98)),
     )
 }
 
-fn speed_button(builder: &mut ChildBuilder, symbol: &str, adjustment: isize) {
-    builder
-        .spawn((
-            ButtonBundle {
-                style: Style {
-                    width: Val::Px(36.0),
-                    height: Val::Px(32.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                background_color: button_color(Interaction::None),
-                ..default()
-            },
-            SpeedButton(adjustment),
-            TripPanelInput,
-        ))
-        .with_children(|button| {
-            button.spawn(label(symbol, 19.0));
-        });
+fn speed_button(
+    builder: &mut bevy::ecs::relationship::RelatedSpawnerCommands<'_, ChildOf>,
+    symbol: &str,
+    adjustment: isize,
+) {
+    builder.spawn((
+        Button,
+        Node {
+            width: Val::Px(36.0),
+            height: Val::Px(32.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(button_color(Interaction::None).0),
+        SpeedButton(adjustment),
+        TripPanelInput,
+    ))
+    .with_children(|button| {
+        button.spawn(label(symbol, 19.0));
+    });
 }
 
 pub(super) fn change_speed(
@@ -169,11 +160,11 @@ pub(super) fn update(
         None => "No destination".to_string(),
     };
     let mut trip_text = trip_text.single_mut();
-    if trip_text.sections[0].value != trip {
-        trip_text.sections[0].value = trip;
+    if trip_text.0 != trip {
+        trip_text.0 = trip;
     }
     if speed.is_changed() {
-        speed_text.single_mut().sections[0].value =
+        speed_text.single_mut().0 =
             format!("{}× · {:.1} m/s", MULTIPLIERS[speed.0], meters_per_second);
     }
 }
