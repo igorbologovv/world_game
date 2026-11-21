@@ -204,10 +204,17 @@ pub fn generate_world(assets: &Path) -> Result<(), Box<dyn Error>> {
     let river_output = assets.join(RIVER_ATLAS_PATH);
     let river_surface = assets.join(RIVER_SURFACE_PATH);
     let lake_surface = assets.join(LAKE_SURFACE_PATH);
-    river_generation::generate(&mut heights, &mut encoded, &ocean_mask, &river_output, &river_surface, &lake_surface)?;
+    let elevated_lakes = river_generation::generate(
+        &mut heights,
+        &mut encoded,
+        &ocean_mask,
+        &river_output,
+        &river_surface,
+        &lake_surface,
+    )?;
     save_heightmaps(&encoded, &height_output)?;
 
-    save_masks(&ocean_mask, &heights, &ocean_output, &basin_output)?;
+    save_masks(&ocean_mask, &elevated_lakes, &heights, &ocean_output, &basin_output)?;
 
     println!();
     println!("WORLD SUMMARY");
@@ -339,6 +346,7 @@ fn save_heightmaps(encoded: &[u16], output: &Path) -> Result<(), Box<dyn Error>>
 
 fn save_masks(
     ocean_mask: &[bool],
+    elevated_lakes: &[bool],
     heights: &[f64],
     ocean_output: &Path,
     basin_output: &Path,
@@ -359,7 +367,7 @@ fn save_masks(
                 if ocean_mask[i] {
                     ocean.put_pixel(x, y, Luma([255]));
                     atlas.put_pixel(atlas_x + x, atlas_y + y, Luma([255]));
-                } else if heights[i] < SEA_LEVEL {
+                } else if heights[i] < SEA_LEVEL && !elevated_lakes[i] {
                     lakes.put_pixel(x, y, Luma([255]));
                     atlas.put_pixel(atlas_x + x, atlas_y + y, Luma([192]));
                 }
