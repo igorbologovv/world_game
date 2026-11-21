@@ -12,7 +12,7 @@ use bevy::{
 
 use world_core::{
     coordinates::terrain_aligned_direction,
-    planet::{RIVER_REACH_VERTICES, RIVER_SURFACE_PATH},
+    planet::{LAKE_SURFACE_PATH, RIVER_REACH_VERTICES, RIVER_SURFACE_PATH},
     runtime::{Explorer, WorldCamera},
 };
 
@@ -43,7 +43,15 @@ pub(super) struct RiverMapLines;
 pub(super) struct RiverCenterlines(Vec<[Vec3; 2]>);
 
 pub(super) fn load(assets: &Path) -> Option<(Mesh, RiverCenterlines)> {
-    let path = assets.join(RIVER_SURFACE_PATH);
+    load_mesh(assets.join(RIVER_SURFACE_PATH))
+}
+
+/// Lake surfaces share the river water material but have zero flow velocity.
+pub(super) fn load_lakes(assets: &Path) -> Option<Mesh> {
+    load_mesh(assets.join(LAKE_SURFACE_PATH)).map(|(mesh, _)| mesh)
+}
+
+fn load_mesh(path: std::path::PathBuf) -> Option<(Mesh, RiverCenterlines)> {
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -51,7 +59,7 @@ pub(super) fn load(assets: &Path) -> Option<(Mesh, RiverCenterlines)> {
             return None;
         }
     };
-    if bytes.is_empty() || bytes.len() % (12 * RIVER_REACH_VERTICES) != 0 {
+    if bytes.len() % (12 * RIVER_REACH_VERTICES) != 0 {
         warn!("Invalid river surface geometry in {}", path.display());
         return None;
     }
