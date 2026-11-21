@@ -193,17 +193,16 @@ impl Portrait {
                         indices.map(|i| Vec4::from_array(mesh.colors[i]).truncate()),
                         weights,
                     );
-                    let normal = self.rotation
-                        * blend(indices.map(|i| Vec3::from_array(mesh.normals[i])), weights)
-                            .normalize_or_zero();
-                    let shade = 0.76 + 0.38 * normal.dot(Vec3::new(-0.4, 0.72, 0.55)).abs();
+                    // Portraits are *albedo*, not pre-lit photographs.
+                    // The proxy shader applies the same scene PBR sunlight
+                    // as the detailed trees. Baking directional shadows into
+                    // the atlas would double-darken the middle-distance forest.
                     let rgb = color
                         * Vec3::new(
                             (f32::from(texel[0]) / 255.0).powi(2),
                             (f32::from(texel[1]) / 255.0).powi(2),
                             (f32::from(texel[2]) / 255.0).powi(2),
-                        )
-                        * shade;
+                        );
                     self.color[index] = [
                         (rgb.x.clamp(0.0, 1.0).sqrt() * 255.0) as u8,
                         (rgb.y.clamp(0.0, 1.0).sqrt() * 255.0) as u8,
