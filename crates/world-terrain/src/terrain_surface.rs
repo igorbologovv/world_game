@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use bevy::{
     math::{DVec2, DVec3},
     light::NotShadowCaster,
-    pbr::FogFalloff,
     camera::primitives::MeshAabb,
     prelude::*,
     asset::RenderAssetUsages,
@@ -303,29 +302,6 @@ fn ground_normal(up: DVec3, height: f64, heights: &SurfaceHeights) -> DVec3 {
     let slope_x = (sample(east) - sample(-east)) / 16.0;
     let slope_y = (sample(north) - sample(-north)) / 16.0;
     (up - east * slope_x - north * slope_y).normalize()
-}
-
-pub(super) fn atmosphere(
-    mut cameras: Query<(Entity, GridTransform, &mut Camera, &mut DistanceFog), With<WorldCamera>>,
-    frames: ReferenceFrames,
-) {
-    let Ok((entity, transform, mut camera, mut fog)) = cameras.single_mut() else {
-        return;
-    };
-    let Some(frame) = frames.parent_frame(entity) else {
-        return;
-    };
-    let eye = frame.grid_position_double(&transform.cell, &transform.transform);
-    let altitude = (eye.length() - RADIUS).max(0.0) as f32;
-    let space = ((altitude - 3_000.0) / 40_000.0).clamp(0.0, 1.0);
-    let sky = Vec3::new(0.57, 0.72, 0.82).lerp(Vec3::new(0.026, 0.035, 0.066), space);
-    camera.clear_color = ClearColorConfig::Custom(Color::srgb(sky.x, sky.y, sky.z));
-    let haze = 1.0 - ((altitude - 1_400.0) / 10_000.0).clamp(0.0, 1.0);
-    fog.color = Color::srgba(0.59, 0.72, 0.81, 0.65 * haze);
-    fog.falloff = FogFalloff::Linear {
-        start: 100.0 + altitude * 0.7,
-        end: 1150.0 + altitude * 4.0,
-    };
 }
 
 #[cfg(test)]
