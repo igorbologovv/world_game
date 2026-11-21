@@ -37,11 +37,11 @@ impl Material for RiverMaterial {
     }
 
     fn vertex_shader() -> ShaderRef {
-        "shaders/river_water.wgsl".into()
+        "shaders/river_water.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/river_water.wgsl".into()
+        "shaders/river_water.wesl".into()
     }
 }
 
