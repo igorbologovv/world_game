@@ -52,7 +52,7 @@ impl Default for VegetationSettings {
             mesh_distances: [50.0, 105.0],
             impostor_blend: [165.0, 225.0],
             impostor_range: 480.0,
-            forest_range: 1_250.0,
+            forest_range: 2_100.0,
             preload_margin: 260.0,
             hysteresis: 0.10,
             transition_seconds: 0.30,
