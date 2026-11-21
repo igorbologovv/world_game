@@ -111,8 +111,6 @@ impl Plugin for FernPlugin {
         app.init_resource::<FernSettings>()
             .init_resource::<FernWorld>()
             .add_plugins(MaterialPlugin::<BatchMaterial> {
-                prepass_enabled: false,
-                shadows_enabled: false,
                 ..default()
             })
             .add_systems(Startup, assets::request)
@@ -333,7 +331,7 @@ fn make_chunk(
         return None;
     }
     let mesh = batch_mesh(&models.cards, origin, &plants);
-    let bounds = mesh.compute_aabb()?;
+    let bounds = mesh.get_aabb()?;
     let (cell, translation) = frame.translation_to_grid(origin);
     let material = materials.add(BatchMaterial {
         base: models.card_material.clone(),
@@ -539,7 +537,7 @@ fn stream(
                             slot.mask = mask;
                             let material =
                                 shared_material(&mut world.materials, &mut materials, models, mask);
-                            commands.entity(slot.entity).insert(material);
+                            commands.entity(slot.entity).insert(MeshMaterial3d(material));
                         }
                     }
                     (None, Some(mask)) if spawns > 0 => {
