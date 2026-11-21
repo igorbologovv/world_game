@@ -514,7 +514,7 @@ pub(super) fn stream(
     hero_loading: Res<HeroOakAssets>,
     mut visibility: Query<&mut Visibility, With<Handle<ProxyMaterial>>>,
 ) {
-    let Ok((entity, camera, view, projection)) = cameras.get_single() else {
+    let Ok((entity, camera, view, projection)) = cameras.single() else {
         return;
     };
     let Some(frame) = frames.parent_frame(entity) else {
@@ -553,7 +553,7 @@ pub(super) fn stream(
         eye,
         up,
         forward,
-        time.elapsed_seconds_f64(),
+        time.elapsed_secs_f64(),
         forest_range + preload,
         &heights,
     );
