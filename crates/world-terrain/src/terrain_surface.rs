@@ -20,10 +20,14 @@ use crate::TerrainMaterial;
 
 const GRID: usize = 20;
 const BASE_LEVEL: u8 = 1;
-const MAX_LEVEL: u8 = 11;
-const MAX_CHUNKS: usize = 640;
-const SPLITS_PER_FRAME: usize = 3;
-const MERGES_PER_FRAME: usize = 5;
+// An 18-level quadtree gives ~2 meter sampling near the observer at Mars
+// radius with GRID=20; only a bounded set of chunks is kept in memory.
+const MAX_LEVEL: u8 = 18;
+const MAX_CHUNKS: usize = 960;
+const SPLITS_PER_FRAME: usize = 6;
+const MERGES_PER_FRAME: usize = 8;
+// Split when local geometric error becomes visible, even on a Mars-sized
+// planet. Parent tiles remain visible until replacements are submitted.
 const SPLIT_ERROR: f64 = 0.78;
 const MERGE_ERROR: f64 = 0.49;
 
@@ -86,6 +90,9 @@ impl Tile {
 struct Chunk {
     entity: Entity,
     anchor: DVec3,
+    // A strong mesh handle must be explicitly released from Assets<Mesh>
+    // when a tile is retired; despawning its entity alone is not enough.
+    mesh: Handle<Mesh>,
 }
 
 #[derive(Resource)]
@@ -102,9 +109,10 @@ impl TerrainSurface {
         }
     }
 
-    fn retire(&mut self, tile: Tile, commands: &mut Commands) {
+    fn retire(&mut self, tile: Tile, commands: &mut Commands, meshes: &mut Assets<Mesh>) {
         if let Some(chunk) = self.leaves.remove(&tile) {
             commands.entity(chunk.entity).despawn();
+            meshes.remove(&chunk.mesh);
         }
     }
 }
@@ -167,7 +175,7 @@ pub(super) fn stream(
     for (_, parent) in merges.into_iter().take(MERGES_PER_FRAME) {
         let replacement = context.spawn(parent, &mut commands, &mut meshes);
         for child in parent.children() {
-            terrain.retire(child, &mut commands);
+            terrain.retire(child, &mut commands, &mut meshes);
         }
         terrain.leaves.insert(parent, replacement);
     }
@@ -191,7 +199,7 @@ pub(super) fn stream(
             let replacement = context.spawn(child, &mut commands, &mut meshes);
             terrain.leaves.insert(child, replacement);
         }
-        terrain.retire(tile, &mut commands);
+        terrain.retire(tile, &mut commands, &mut meshes);
     }
 }
 
@@ -210,10 +218,11 @@ impl TileContext<'_> {
         let bounds = mesh
             .get_aabb()
             .expect("terrain chunks contain a full grid");
+        let mesh = meshes.add(mesh);
         let entity = commands
             .spawn((
                 cell,
-                Mesh3d(meshes.add(mesh)),
+                Mesh3d(mesh.clone()),
                 MeshMaterial3d(self.material.clone()),
                 Transform::from_translation(translation),
                 bounds,
@@ -221,7 +230,7 @@ impl TileContext<'_> {
             ))
             .id();
         commands.entity(self.root).add_child(entity);
-        Chunk { entity, anchor }
+        Chunk { entity, anchor, mesh }
     }
 }
 
@@ -323,7 +332,7 @@ mod tests {
             assert_eq!(center, top_right.direction(DVec2::Y));
             assert_eq!(center, bottom_left.direction(DVec2::X));
             assert_eq!(center, bottom_right.direction(DVec2::ZERO));
-            assert!(root.error(center * 400_000.0, center * RADIUS) < SPLIT_ERROR);
+            assert!(root.error(center * (RADIUS + 300_000.0), center * RADIUS) < SPLIT_ERROR);
             assert!(root.error(center * (RADIUS + 2.2), center * RADIUS) > SPLIT_ERROR);
         }
     }
