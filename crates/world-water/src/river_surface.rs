@@ -4,10 +4,10 @@ use bevy::{
     gizmos::config::GizmoConfigGroup,
     prelude::*,
     asset::RenderAssetUsages,
-    mesh::{Indices, PrimitiveTopology},
+    mesh::PrimitiveTopology,
     shader::ShaderRef,
     reflect::TypePath,
-    render::alpha::AlphaMode,
+    material::AlphaMode,
     render::render_resource::AsBindGroup,
 };
 
