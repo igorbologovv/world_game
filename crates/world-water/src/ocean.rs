@@ -4,7 +4,6 @@ use bevy::{
     math::{DVec2, DVec3},
     prelude::*,
     reflect::TypePath,
-    render::alpha::AlphaMode,
     render::{
         mesh::Indices,
         render_asset::RenderAssetUsages,
@@ -38,10 +37,6 @@ pub(super) struct OceanMaterial {
 }
 
 impl Material for OceanMaterial {
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
-    }
-
     fn vertex_shader() -> ShaderRef {
         "shaders/ocean.wgsl".into()
     }
