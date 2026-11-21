@@ -1,7 +1,7 @@
-import bevy_pbr::render::forward_io::{Vertex, VertexOutput}
-import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_local_to_world}
-import bevy_pbr::render::mesh_view_bindings::globals
-import bevy_pbr::render::view_transformations::position_world_to_clip
+import bevy_pbr::render::forward_io::{Vertex, VertexOutput, decompress_vertex};
+import bevy_pbr::render::mesh_functions::{get_world_from_local, mesh_normal_local_to_world};
+import bevy_pbr::render::mesh_view_bindings::globals;
+import bevy_pbr::render::view_transformations::position_world_to_clip;
 
 @vertex
 fn vertex(vertex_in: Vertex) -> VertexOutput {
@@ -29,7 +29,7 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
     output.instance_index = mesh.instance_index;
 
 @if(VISIBILITY_RANGE_DITHER)
-    output.visibility_range_dither = bevy_pbr::mesh_functions::get_visibility_range_dither_level(mesh.instance_index, world[3]);
+    output.visibility_range_dither = bevy_pbr::render::mesh_functions::get_visibility_range_dither_level(mesh.instance_index, world[3]);
 
     return output;
 }
