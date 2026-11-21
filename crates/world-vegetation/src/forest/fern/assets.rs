@@ -4,7 +4,7 @@ use bevy::{
     gltf::{Gltf, GltfMesh, GltfNode},
     prelude::*,
     render::{
-        mesh::VertexAttributeValues, primitives::Aabb, render_asset::RenderAssetUsages,
+        mesh::VertexAttributeValues, primitives::Aabb, ,
         render_resource::PrimitiveTopology,
     },
 };
@@ -124,7 +124,7 @@ pub(super) fn finish(
             let mut mesh = geometry.finish();
             mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
             let bounds = mesh
-                .compute_aabb()
+                .get_aabb()
                 .ok_or("Woodland Fern mesh has no bounds")?;
             detail.push((meshes.add(mesh), bounds));
         }
