@@ -17,7 +17,8 @@ use super::lod::{coverage, quantize};
 
 use super::{noise3, tangent_basis, FoliageMaterial, MeshBuilder, Random, Wind};
 
-const CELLS: f64 = 8192.0;
+const PATCH_SIZE_METERS: f64 = 25.0;
+const CELLS: f64 = 2.0 * RADIUS / PATCH_SIZE_METERS;
 const FADE_START: f32 = 44.0;
 const FADE_END: f32 = 62.0;
 const PRELOAD: f64 = 82.0;

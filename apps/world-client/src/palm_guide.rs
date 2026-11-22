@@ -1,41 +1,28 @@
-use bevy::{
-    camera::CameraUpdateSystems, math::DVec3, prelude::*, transform::TransformSystems,
-    ui::UiSystems,
-};
-use world_core::{
-    coordinates::terrain_aligned_direction,
-    planet::RADIUS,
-    runtime::{GridTransform, ReferenceFrames, WorldCamera, WorldReady},
-    SurfaceHeights,
-};
-use world_regions::PALM_COAST_REGION;
+use bevy::{camera::CameraUpdateSystems, prelude::*, transform::TransformSystems, ui::UiSystems};
+use world_core::runtime::WorldCamera;
+use world_vegetation::CoconutPalm;
 
 pub(super) fn install(app: &mut App) {
-    app.add_systems(Startup, spawn.after(WorldReady))
-        .add_systems(
-            PostUpdate,
-            guide
-                .after(TransformSystems::Propagate)
-                .after(CameraUpdateSystems)
-                .before(UiSystems::Layout),
-        );
+    app.add_systems(Startup, spawn).add_systems(
+        PostUpdate,
+        guide
+            .after(TransformSystems::Propagate)
+            .after(CameraUpdateSystems)
+            .before(UiSystems::Layout),
+    );
 }
 
 #[derive(Component)]
-struct PalmGuide(DVec3);
+struct PalmGuide;
 
-const LABEL_WIDTH: f32 = 130.0;
+const LABEL_WIDTH: f32 = 146.0;
 const LABEL_HEIGHT: f32 = 29.0;
 
-fn spawn(mut commands: Commands, heights: Res<SurfaceHeights>) {
-    // The authored heading points at a canonical streamed palm site.
-    let up = terrain_aligned_direction(PALM_COAST_REGION.spawn.look_at);
-    let Some(ground) = heights.sample(up) else {
-        return;
-    };
+fn spawn(mut commands: Commands) {
     commands.spawn((
-        PalmGuide(up * (RADIUS + ground + 5.4)),
+        PalmGuide,
         Text::new("Coconut palm"),
+        TextLayout::no_wrap(),
         TextFont {
             font_size: FontSize::Px(16.0),
             ..default()
@@ -57,17 +44,11 @@ fn spawn(mut commands: Commands, heights: Res<SurfaceHeights>) {
 }
 
 fn guide(
-    frames: ReferenceFrames,
-    cameras: Query<(
-        Entity,
-        &Camera,
-        &GlobalTransform,
-        GridTransform,
-        &WorldCamera,
-    )>,
-    mut label: Query<(&PalmGuide, &mut Node, &mut Visibility)>,
+    cameras: Query<(&Camera, &GlobalTransform, &WorldCamera)>,
+    palms: Query<&GlobalTransform, With<CoconutPalm>>,
+    mut label: Query<(&mut Node, &mut Visibility), With<PalmGuide>>,
 ) {
-    let (Ok((entity, camera, global, grid, mode)), Ok((palm, mut node, mut visibility))) =
+    let (Ok((camera, global, mode)), Ok((mut node, mut visibility))) =
         (cameras.single(), label.single_mut())
     else {
         return;
@@ -76,16 +57,24 @@ fn guide(
         if *mode != WorldCamera::FirstPerson {
             return None;
         }
-        let frame = frames.parent_frame(entity)?;
-        let offset = palm.0 - frame.grid_position_double(&grid.cell, &grid.transform);
-        if offset.length_squared() > 90.0_f64.powi(2) {
-            return None;
-        }
-        let point = camera
-            .world_to_viewport(global, global.translation() + offset.as_vec3())
-            .ok()?;
         let viewport = camera.logical_viewport_rect()?;
-        viewport.contains(point).then_some((point, viewport))
+        // The marker follows the real Mars-scale instance in floating-origin
+        // render space. The old 100 km landmark can be hundreds of meters off.
+        palms
+            .iter()
+            .filter_map(|palm| {
+                let distance = global.translation().distance_squared(palm.translation());
+                if distance > 150.0_f32.powi(2) {
+                    return None;
+                }
+                let point = palm.transform_point(Vec3::Y * 5.4);
+                let projected = camera.world_to_viewport(global, point).ok()?;
+                viewport
+                    .contains(projected)
+                    .then_some((distance, projected))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, point)| (point, viewport))
     })();
     if let Some((point, viewport)) = position {
         let limit = (viewport.max - Vec2::new(LABEL_WIDTH, LABEL_HEIGHT)).max(viewport.min);

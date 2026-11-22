@@ -17,6 +17,8 @@ var detail_normal_roughness: texture_2d_array<f32>;
 var<uniform> detail_enabled: u32;
 @group(2) @binding(6)
 var<uniform> terrain_debug_mode: u32;
+@group(2) @binding(7)
+var<uniform> planet_radius: f32;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -136,9 +138,8 @@ fn biome_surface(
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
 
-    // CPU world radius is 100000 metres. This field stays stable during
-    // floating-origin updates and exists everywhere on the sphere.
-    let forest_position = direction * 100000.0;
+    // Evaluate the grove field in planet-centered meters, as tree placement does.
+    let forest_position = direction * planet_radius;
     let grove = macro_noise(forest_position / 260.0 + vec3<f32>(7.4, -12.8, 3.7));
     let grove_density = clamp(0.82 + grove * 0.90, 0.25, 1.0);
     let selection_probability = max(
@@ -479,12 +480,12 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         // Preserve detailed terrain within 650 m even while inspecting
         // the planet-wide map. Fade the diagnostic in gradually rather
         // than painting the nearby soil a flat green or gray.
-        var diagnostic = biome.canopy_tint * biome.forest_cover;
+        var debug_color = biome.canopy_tint * biome.forest_cover;
         if terrain_debug_mode == 1u {
-            diagnostic = vec3<f32>(biome.forest_cover);
+            debug_color = vec3<f32>(biome.forest_cover);
         }
         let diagnostic_blend = smoothstep(650.0, 1450.0, forest_distance);
-        final_color = mix(final_color, vec4<f32>(diagnostic, 1.0), diagnostic_blend);
+        final_color = mix(final_color, vec4<f32>(debug_color, 1.0), diagnostic_blend);
     }
     return FragmentOutput(final_color);
 }

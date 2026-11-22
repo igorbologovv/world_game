@@ -1,5 +1,7 @@
 use std::{fs, path::PathBuf, process::Command};
 
+use world_core::planet::{MAX_HEIGHT, MIN_HEIGHT, RADIUS};
+
 struct OutputDirectory(PathBuf);
 
 impl Drop for OutputDirectory {
@@ -54,9 +56,14 @@ fn generator_bakes_connected_water_in_its_working_directory() {
     for reach in rivers.chunks_exact(30 * 12) {
         let start = radius(&reach[6 * 12..7 * 12]);
         let end = (radius(&reach[12..24]) + radius(&reach[5 * 12..6 * 12])) * 0.5;
-        assert!((90_000.0..110_000.0).contains(&start));
-        assert!((90_000.0..110_000.0).contains(&end));
-        assert!(start + 0.02 >= end, "uphill river reach");
+        let altitude_range = (RADIUS + MIN_HEIGHT)..=(RADIUS + MAX_HEIGHT);
+        assert!(altitude_range.contains(&start));
+        assert!(altitude_range.contains(&end));
+        // Both radii came from f32 coordinates in the baked format.
+        assert!(
+            start + RADIUS * f64::from(f32::EPSILON) >= end,
+            "uphill river reach"
+        );
     }
     let lake_mesh = assets.join("world/lake_surface.bin");
     let bytes = fs::read(&lake_mesh).expect("missing inland-lake surface output");

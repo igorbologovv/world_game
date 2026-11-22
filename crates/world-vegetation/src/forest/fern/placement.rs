@@ -15,7 +15,7 @@ use crate::forest::{noise3, tangent_basis, Random};
 
 pub(super) const MAX_PLANTS: usize = 16;
 pub(super) const PATCH_ALLOWANCE: f64 = 40.0;
-const CELLS: f64 = 4096.0;
+const CELLS: f64 = 2.0 * RADIUS / 48.0;
 const SHADE_REACH: f64 = 14.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]

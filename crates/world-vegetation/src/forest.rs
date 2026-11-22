@@ -29,7 +29,7 @@ use bevy::{
     shader::ShaderRef,
 };
 use world_core::{
-    planet::{RADIUS, SEA_LEVEL},
+    planet::{LEGACY_BAKED_RADIUS, RADIUS, SEA_LEVEL},
     runtime::WorldMovement,
     SurfaceHeights,
 };
@@ -185,7 +185,7 @@ impl ForestModels {
 /// Reserve space for an authored scene among the procedurally placed trees.
 ///
 /// Insert before the forest starts streaming. All generated tree LODs honor it.
-#[derive(Resource)]
+#[derive(Clone, Copy, Resource)]
 pub struct ForestClearing {
     /// Terrain-aligned unit radial direction at the clearing center.
     pub direction: DVec3,
@@ -199,6 +199,10 @@ impl ForestClearing {
         radial.distance_squared(self.direction) * RADIUS.powi(2) < self.radius.powi(2)
     }
 }
+
+/// The root of a resident, individually streamed coconut palm.
+#[derive(Component)]
+pub struct CoconutPalm;
 
 /// Stream deterministic foliage around the world camera.
 ///
@@ -365,7 +369,7 @@ fn tree_site(
     }
     let species = select_species(direction, ground, rng, || {
         let (east, north) = tangent_basis(direction);
-        near_sea(direction, east, north, |up| heights.sample(up))
+        near_sea(direction, east, north, |up| heights.sample_base(up))
     })?;
     let (east, north) = tangent_basis(direction);
     let offset = 4.0 / RADIUS;
@@ -399,7 +403,9 @@ fn near_sea(
     ]
     .into_iter()
     .any(|axis| {
-        sample((direction + axis * (220.0 / RADIUS)).normalize())
+        // The baked coastline occupies the same angular region at either radius.
+        let coastal_angle = 220.0 / LEGACY_BAKED_RADIUS;
+        sample((direction + axis * coastal_angle).normalize())
             .is_some_and(|height| height < SEA_LEVEL)
     })
 }

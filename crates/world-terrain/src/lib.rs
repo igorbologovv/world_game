@@ -51,6 +51,8 @@ struct TerrainMaterial {
     // F9 cycles normal terrain, forest density and canopy color.
     #[uniform(6)]
     terrain_debug_mode: u32,
+    #[uniform(7)]
+    planet_radius: f32,
 }
 
 impl TerrainMaterial {
@@ -79,6 +81,7 @@ impl TerrainMaterial {
             normal_roughness,
             detail_enabled: 0,
             terrain_debug_mode: 0,
+            planet_radius: RADIUS as f32,
         }
     }
 }
@@ -94,7 +97,7 @@ fn toggle_canopy_debug(
     let Some(terrain) = terrain else {
         return;
     };
-    if let Some(material) = materials.get_mut(&terrain.material) {
+    if let Some(mut material) = materials.get_mut(&terrain.material) {
         material.terrain_debug_mode = (material.terrain_debug_mode + 1) % 3;
         info!(
             "Planet forest diagnostic: {} (F9 to cycle)",

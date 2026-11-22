@@ -1,21 +1,15 @@
 use std::path::Path;
 
 use bevy::{
-    math::{DVec2, DVec3},
-    prelude::*,
     asset::RenderAssetUsages,
     image::ImageSampler,
-    mesh::{Indices, PrimitiveTopology},
-    shader::ShaderRef,
-    reflect::TypePath,
     material::AlphaMode,
-    render::{
-
-        render_resource::{
-            AsBindGroup, Extent3d, TextureDimension, TextureFormat,
-        },
-
-    },
+    math::{DVec2, DVec3},
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+    reflect::TypePath,
+    render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat},
+    shader::ShaderRef,
 };
 use world_core::{
     coordinates::{cube_direction, height_source_uv},
@@ -26,7 +20,8 @@ use world_core::{
 
 const WATER_RADIUS: f64 = RADIUS + WATER_SURFACE_ELEVATION;
 const PATCHES_PER_FACE: u32 = 8;
-// 384 intervals across a face keep the mesh within one meter of the water sphere.
+// Ocean vertices lie on the water sphere. Between vertices the triangles
+// approximate its surface, including a few meters of chord sag at Mars scale.
 const SEGMENTS: u32 = 48;
 // The previous sRGB texture classified a pixel as water at 0.25 linear.
 const MIN_WATER: u8 = 137;
@@ -37,7 +32,7 @@ const DEPTH_RANGE: f64 = 96.0;
 pub(super) struct OceanMaterial {
     #[texture(0)]
     #[sampler(1)]
-    mask: Handle<Image>,
+    pub(super) mask: Handle<Image>,
 }
 
 impl Material for OceanMaterial {
@@ -62,10 +57,9 @@ pub(super) struct OceanPatch {
 }
 
 pub(super) fn load(
-    images: &mut Assets<Image>,
     heights: &SurfaceHeights,
     assets: &Path,
-) -> Option<(OceanMaterial, Vec<(Mesh, OceanPatch)>)> {
+) -> Option<(Image, Vec<(Mesh, OceanPatch)>)> {
     let path = assets.join(OCEAN_ATLAS_PATH);
     let mask = match image::open(&path) {
         Ok(mask) => mask.into_luma8(),
@@ -132,12 +126,7 @@ pub(super) fn load(
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::linear();
-    Some((
-        OceanMaterial {
-            mask: images.add(image),
-        },
-        patches,
-    ))
+    Some((image, patches))
 }
 
 fn encode_depth(depth: f64) -> u8 {
@@ -185,7 +174,7 @@ fn build_patch(
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -239,7 +228,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn patch_triangles_face_outward_and_stay_above_sea_level() {
+    fn patch_triangles_face_outward_with_vertices_on_the_mars_water_datum() {
         // The corrected cube projection stretches vertices most near corners.
         let patch_size = 1.0 / f64::from(PATCHES_PER_FACE);
         for face in 0..6 {
@@ -263,8 +252,12 @@ mod tests {
                 let a = point(triangle[0]);
                 let b = point(triangle[1]);
                 let c = point(triangle[2]);
-                let normal = (b - a).cross(c - a).normalize();
-                assert!(normal.dot(a) > RADIUS);
+                let normal = (b - a).cross(c - a);
+                assert!(normal.dot(a) > 0.0);
+                let tolerance = WATER_RADIUS * f64::from(f32::EPSILON);
+                assert!([a, b, c]
+                    .iter()
+                    .all(|point| { (point.length() - WATER_RADIUS).abs() < tolerance }));
             }
         }
     }

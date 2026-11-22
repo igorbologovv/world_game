@@ -20,7 +20,7 @@ use world_core::runtime::{
 use super::{
     placement::{PatchKey, Site},
     streaming::ForestStream,
-    FoliageMaterial, ForestModels, Species,
+    CoconutPalm, FoliageMaterial, ForestModels, Species,
 };
 
 const STEPS: f32 = 12.0;
@@ -271,6 +271,9 @@ pub(super) fn spawn_tree(
         ),
     );
     tree.insert(cell);
+    if site.species == Species::Palm {
+        tree.insert(CoconutPalm);
+    }
     let mut slots = [(Entity::PLACEHOLDER, Entity::PLACEHOLDER); 2];
     tree.with_children(|children| {
         for slot in &mut slots {

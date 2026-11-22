@@ -1,6 +1,8 @@
 # Planetary world
 
-Bevy 0.20 client and offline generator for the spherical world.
+Bevy 0.20 client and offline generator for a planet with a 3,389.5 km reference radius.
+The runtime adds meter-scale terrain relief to the continental heightmaps and
+reprojects the shipped 100 km river and lake meshes to the current radius.
 
 ```sh
 cargo run --locked -p world-client

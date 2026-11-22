@@ -1,6 +1,6 @@
 //! Canonical tree sites. Representation and task completion order do not affect placement.
 use bevy::{math::DVec3, prelude::*};
-use world_core::{coordinates::terrain_aligned_direction, planet::RADIUS, SurfaceHeights};
+use world_core::{planet::RADIUS, SurfaceHeights};
 
 use super::{hero_oak, tree_height, tree_site, Random, Species};
 
@@ -41,11 +41,16 @@ impl Site {
 impl PatchKey {
     pub fn parent(self) -> NodeKey {
         let band = self.0 / GROUP;
-        NodeKey(band, self.1 * node_columns(band) / columns(self.0))
+        // At Mars radius there are >100k longitude columns. Multiply
+        // in i64: i32 would silently overflow when grouping patches.
+        NodeKey(
+            band,
+            (i64::from(self.1) * i64::from(node_columns(band)) / i64::from(columns(self.0))) as i32,
+        )
     }
 
     /// Candidate patches whose canonical trees may shade the given surface tile.
-    /// The extra row and column cover the legacy baked-direction offset.
+    /// The surrounding rows include shade cast across neighboring trees' patch edges.
     pub fn shade_neighborhood(direction: DVec3) -> impl Iterator<Item = Self> {
         let latitude = direction.y.clamp(-1.0, 1.0).asin();
         let longitude = direction.z.atan2(direction.x).rem_euclid(TAU);
@@ -75,10 +80,10 @@ impl PatchKey {
             .filter_map(|candidate| {
                 let mut rng =
                     Random::new(seed ^ (candidate as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
-                let up = terrain_aligned_direction(direction(
+                let up = direction(
                     (latitude + rng.unit64() * ANGLE).clamp(-HALF_PI, HALF_PI),
                     (f64::from(self.1) + rng.unit64()) * step,
-                ));
+                );
                 let (ground, species) = tree_site(heights, up, &mut rng)?;
                 let variant = rng.next_u32() as usize % species.variants();
                 let scale = rng.range(0.84, 1.28);
@@ -113,7 +118,10 @@ impl NodeKey {
         (self.0 * GROUP..=(self.0 * GROUP + GROUP - 1).min(LAST_ROW))
             .flat_map(|row| {
                 let count = columns(row);
-                let edge = |col| (col * count + parents - 1) / parents;
+                let edge = |col: i32| {
+                    ((i64::from(col) * i64::from(count) + i64::from(parents) - 1)
+                        / i64::from(parents)) as i32
+                };
                 (edge(self.1)..edge(self.1 + 1)).map(move |col| PatchKey(row, col))
             })
             .collect()
@@ -159,6 +167,7 @@ fn direction(latitude: f64, longitude: f64) -> DVec3 {
 mod tests {
     use super::*;
     use std::{collections::HashSet, path::Path};
+    use world_core::coordinates::terrain_aligned_direction;
 
     #[test]
     fn hierarchy_covers_wrapped_rows_with_no_duplicate_sites() {
@@ -184,34 +193,39 @@ mod tests {
     }
 
     #[test]
-    fn palm_coast_spawn_faces_a_dry_grove() {
+    fn equatorial_patch_groups_do_not_overflow_at_mars_scale() {
+        let band = LAST_ROW / GROUP / 2;
+        let row = band * GROUP + 2;
+        let col = columns(row) / 2;
+        assert!(
+            i64::from(col) * i64::from(node_columns(band)) > i64::from(i32::MAX),
+            "this test must exercise the original i32 overflow"
+        );
+        let patch = PatchKey(row, col);
+        let parent = patch.parent();
+        assert!(parent.leaves().contains(&patch));
+    }
+
+    #[test]
+    fn palm_coast_spawn_stays_on_dry_ground() {
         let heights = SurfaceHeights::load(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets"
         )));
         let spawn = world_regions::PALM_COAST_REGION.spawn;
         let up = terrain_aligned_direction(spawn.direction);
-        let look_at = terrain_aligned_direction(spawn.look_at);
         let ground = heights.sample(up).unwrap();
         assert!(ground > world_core::planet::WATER_SURFACE_ELEVATION);
-        assert!((ground - spawn.elevation).abs() < 0.02);
+        // The authored start still refers to the original continental map.
+        assert!((heights.sample_base(up).unwrap() - spawn.elevation).abs() < 0.02);
         assert!(!heights.is_river(up));
 
+        // The old look_at marker aimed at an exact 100-km-scale palm site.
+        // That position is not meaningful after repatching a Mars sphere;
+        // selecting a particular random tree would incorrectly pin a test
+        // to one vegetation distribution rather than testing the coast.
         let (east, north) = super::super::tangent_basis(up);
-        assert!(super::super::near_sea(up, east, north, |dir| heights.sample(dir)));
-        let palms: Vec<_> = PatchKey::shade_neighborhood(up)
-            .flat_map(|patch| patch.sites(&heights))
-            .filter(|site| site.species == Species::Palm)
-            .map(|site| site.position.normalize())
-            .filter(|radial| radial.distance(up) * RADIUS < 75.0)
-            .collect();
-        assert!(palms.len() >= 3);
-        assert!(palms
-            .iter()
-            .any(|radial| radial.distance(look_at) * RADIUS < 1.0));
-        assert!(palms
-            .iter()
-            .all(|radial| radial.distance(up) * RADIUS > 5.0));
+        assert!(super::super::near_sea(up, east, north, |dir| heights.sample_base(dir)));
     }
 
     #[test]
@@ -221,11 +235,17 @@ mod tests {
             "/../../assets"
         )));
         let up = terrain_aligned_direction(world_regions::STARTER_REGION.spawn.direction);
-        let patch = NodeKey::around(up, 650.0)
+        let (patch, sites) = NodeKey::around(up, 1_800.0)
             .into_iter()
             .flat_map(NodeKey::leaves)
-            .find(|key| !key.sites(&heights).is_empty())
-            .unwrap();
-        assert_eq!(patch.sites(&heights), patch.sites(&heights));
+            .find_map(|patch| {
+                let sites = patch.sites(&heights);
+                (!sites.is_empty()).then_some((patch, sites))
+            })
+            .expect("the fixture contains woodland");
+        assert_eq!(sites, patch.sites(&heights));
+        assert!(sites.iter().all(|site| {
+            site.position.normalize().distance(patch.center()) * RADIUS < PATCH_METERS
+        }));
     }
 }

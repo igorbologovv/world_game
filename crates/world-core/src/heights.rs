@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use bevy_ecs::prelude::Resource;
 use bevy_math::{DVec2, DVec3};
@@ -6,15 +6,18 @@ use bevy_math::{DVec2, DVec3};
 use crate::{
     coordinates::{height_source_uv, surface_uv},
     planet::{decode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, RIVER_ATLAS_PATH},
+    terrain_detail,
 };
 
 type HeightFace = image::ImageBuffer<image::Luma<u16>, Vec<u16>>;
 
 /// Read-only height and river coverage queries shared by simulation and rendering.
-#[derive(Resource)]
+///
+/// Clones share the immutable raster data with streaming workers.
+#[derive(Clone, Resource)]
 pub struct SurfaceHeights {
-    faces: Option<[HeightFace; 6]>,
-    rivers: Option<image::GrayImage>,
+    faces: Option<Arc<[HeightFace; 6]>>,
+    rivers: Option<Arc<image::GrayImage>>,
 }
 
 impl SurfaceHeights {
@@ -46,24 +49,26 @@ impl SurfaceHeights {
                 image::GrayImage::from_raw(width, height, coverage)
             });
         Self {
-            faces: faces.and_then(|faces| faces.try_into().ok()),
-            rivers,
+            faces: faces.and_then(|faces| faces.try_into().ok()).map(Arc::new),
+            rivers: rivers.map(Arc::new),
         }
     }
 
     /// Sample elevation in meters above the reference sphere along a radial direction.
     pub fn sample(&self, direction: DVec3) -> Option<f64> {
-        if direction == DVec3::ZERO || !direction.is_finite() {
-            return None;
+        let (face, uv) = face_uv(direction)?;
+        let base = sample_height(&self.faces.as_ref()?[face], uv);
+        if base <= 1.5 || self.faces.as_ref()?[0].width() != HEIGHT_MAP_SIZE {
+            return Some(base);
         }
-        let (face, uv) = surface_uv(direction);
-        let image = &self.faces.as_ref()?[face];
-        let dimensions = DVec2::new(f64::from(image.width()), f64::from(image.height()));
-        let uv = height_source_uv(uv, dimensions);
-        let height = bilinear(uv, image.width(), image.height(), |x, y| {
-            f64::from(image.get_pixel(x, y).0[0])
-        });
-        Some(decode_height(height))
+        Some((base + terrain_detail::detail(direction, base, self.river_at(face, uv))).max(1.5))
+    }
+
+    /// Interpolate only the pre-baked global terrain, without procedural detail.
+    /// Hydrology still uses these values until the regional water rebuild.
+    pub fn sample_base(&self, direction: DVec3) -> Option<f64> {
+        let (face, uv) = face_uv(direction)?;
+        Some(sample_height(&self.faces.as_ref()?[face], uv))
     }
 
     /// Borrow a complete legacy height face if it matches the requested square resolution.
@@ -72,24 +77,41 @@ impl SurfaceHeights {
         (image.dimensions() == (side, side)).then_some(image.as_raw().as_slice())
     }
 
-    /// Query river coverage at a terrain-aligned radial direction.
-    pub fn is_river(&self, direction: DVec3) -> bool {
-        if direction == DVec3::ZERO || !direction.is_finite() {
-            return false;
-        }
+    /// Bilinearly sampled legacy river mask, in 0..=255 coverage units.
+    /// This can smoothly suppress additional terrain detail near baked channels.
+    pub fn river_coverage(&self, direction: DVec3) -> f64 {
+        face_uv(direction).map_or(0.0, |(face, uv)| self.river_at(face, uv))
+    }
+
+    fn river_at(&self, face: usize, uv: DVec2) -> f64 {
         let Some(map) = &self.rivers else {
-            return false;
+            return 0.0;
         };
-        let (face, uv) = surface_uv(direction);
         let uv = height_source_uv(uv, DVec2::splat(f64::from(HEIGHT_MAP_SIZE)));
         let side = map.width() / 3;
         let x_offset = (face as u32 % 3) * side;
         let y_offset = (face as u32 / 3) * side;
-        let coverage = bilinear(uv, side, side, |x, y| {
+        bilinear(uv, side, side, |x, y| {
             f64::from(map.get_pixel(x + x_offset, y + y_offset).0[0])
-        });
-        coverage >= 156.0
+        })
     }
+
+    /// Query river coverage at a terrain-aligned radial direction.
+    pub fn is_river(&self, direction: DVec3) -> bool {
+        self.river_coverage(direction) >= 156.0
+    }
+}
+
+fn face_uv(direction: DVec3) -> Option<(usize, DVec2)> {
+    (direction != DVec3::ZERO && direction.is_finite()).then(|| surface_uv(direction))
+}
+
+fn sample_height(image: &HeightFace, uv: DVec2) -> f64 {
+    let dimensions = DVec2::new(f64::from(image.width()), f64::from(image.height()));
+    let uv = height_source_uv(uv, dimensions);
+    decode_height(bilinear(uv, image.width(), image.height(), |x, y| {
+        f64::from(image.get_pixel(x, y).0[0])
+    }))
 }
 
 fn bilinear(uv: DVec2, width: u32, height: u32, sample: impl Fn(u32, u32) -> f64) -> f64 {
@@ -121,10 +143,10 @@ mod tests {
             }
         }
         let heights = SurfaceHeights {
-            faces: Some(std::array::from_fn(|face| {
+            faces: Some(Arc::new(std::array::from_fn(|face| {
                 HeightFace::from_pixel(2, 2, image::Luma([20_000 + face as u16]))
-            })),
-            rivers: Some(rivers),
+            }))),
+            rivers: Some(Arc::new(rivers)),
         };
 
         assert_eq!(heights.sample(DVec3::X), Some(decode_height(20_003.0)));

@@ -68,7 +68,7 @@ The generator builds without the Bevy renderer or the path crate.
 ## Spatial and scheduling contracts
 
 - **Coordinates.** Use `DVec3` for planet-centered positions in meters. The
-  reference sphere has a radius of 100,000 m. A unit radial direction identifies
+  reference sphere has a radius of 3,389,500 m. A unit radial direction identifies
   a point on the surface, and elevation is relative to the sphere. Keep
   positions in double precision through CPU placement and sampling. Use
   `ReferenceFrame::translation_to_grid` when placing entities and

@@ -120,10 +120,13 @@ pub(super) fn half_width(species: Species, variant: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use world_core::planet::RADIUS;
+
     #[test]
     fn one_site_feeds_both_batches_at_the_same_root() {
+        let anchor = DVec3::Y * RADIUS;
         let site = Site {
-            position: DVec3::Y * 100_300.0,
+            position: anchor + DVec3::Y * 300.0,
             species: Species::Oak,
             variant: 1,
             scale: 1.0,
@@ -131,8 +134,8 @@ mod tests {
         };
         let mut leaf = ProxyMesh::default();
         let mut parent = ProxyMesh::default();
-        leaf.add(site, DVec3::Y * 100_000.0, 0);
-        parent.add(site, DVec3::Y * 100_000.0, 5);
+        leaf.add(site, anchor, 0);
+        parent.add(site, anchor, 5);
         assert_eq!(leaf.sites[0], [0.0, 300.0, 0.0, 0.0]);
         assert_eq!(parent.sites[0], [0.0, 300.0, 0.0, 5.0]);
         assert_eq!(leaf.geometry.positions, parent.geometry.positions);
