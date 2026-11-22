@@ -80,6 +80,13 @@ The generator builds without the Bevy renderer or the path crate.
   Use `cube_direction` for baked tile UVs and `SurfaceHeights::sample` for a
   runtime direction. The river mask is queried from the same service.
   Generation uses the legacy scalar source mapping to preserve exact output.
+- **Forest canopy.** Vegetation publishes `world_core::canopy::ForestCanopy`
+  for the terrain material. Near the forest handoff, the atlas accumulates
+  crown area and species color from complete tree patches. Broader layers
+  estimate coverage from stratified subsets of the same candidates. Six
+  cube faces provide coverage outside the camera-centered layers. Workers
+  generate at most three layers concurrently, and terrain samples the shared
+  atlas independently of chunk size. F9 shows crown coverage and color.
 - **Startup.** The client disables Bevy's `TransformPlugin` before installing
   `WorldSpacePlugin`. In `Startup`, `WorldReady` publishes the planet's root
   frame and read-only `SurfaceHeights`. Player and water startup systems run

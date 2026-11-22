@@ -19,6 +19,24 @@ var<uniform> detail_enabled: u32;
 var<uniform> terrain_debug_mode: u32;
 @group(constants::MATERIAL_BIND_GROUP) @binding(7)
 var<uniform> planet_radius: f32;
+@group(constants::MATERIAL_BIND_GROUP) @binding(8)
+var canopy_atlas: texture_2d_array<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(9)
+var canopy_sampler: sampler;
+
+struct CanopyCascade {
+    east: vec4<f32>,
+    north: vec4<f32>,
+    center: vec4<f32>,
+}
+
+const CANOPY_CASCADES = 6u;
+struct CanopyLayout {
+    cascades: array<CanopyCascade, CANOPY_CASCADES>,
+    fade: vec4<f32>,
+}
+@group(constants::MATERIAL_BIND_GROUP) @binding(10)
+var<uniform> canopy_layout: CanopyLayout;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -61,8 +79,6 @@ fn filtered_noise(position: vec3<f32>, strength: f32) -> f32 {
 struct BiomeSurface {
     weights: array<f32, 5>,
     vegetation_tint: vec3<f32>,
-    forest_cover: f32,
-    canopy_tint: vec3<f32>,
 }
 
 fn biome_surface(
@@ -112,24 +128,12 @@ fn biome_surface(
         0.07, 0.65,
     );
 
-    // Approximate the very same climate gates as CPU select_species()
-    // in world-vegetation/src/forest.rs. Transition bands avoid hard
-    // pixel boundaries at altitude, while grove density is sampled from
-    // precisely the same planet-centered, 260 m noise field.
-    //
-    // CPU thresholds:
-    // tropical: T > .68, M > .49, probability density * .98
-    // temperate: .29 <= T <= .68, M > .41, probability density * .94
-    // boreal: T <= .46, M > .27, probability density * .87
-    // acacia: T > .66, .19 <= M < .61, probability density * .34
+    // Climate still tints the soil and grass beneath the separately sampled crowns.
     let rainforest = smoothstep(0.655, 0.705, temperature)
         * smoothstep(0.465, 0.525, moisture);
     let temperate_forest = smoothstep(0.265, 0.315, temperature)
         * (1.0 - smoothstep(0.655, 0.705, temperature))
         * smoothstep(0.385, 0.445, moisture);
-    let boreal_forest = smoothstep(0.115, 0.155, temperature)
-        * (1.0 - smoothstep(0.435, 0.485, temperature))
-        * smoothstep(0.245, 0.295, moisture);
     let savanna = smoothstep(0.635, 0.695, temperature)
         * smoothstep(0.165, 0.215, moisture)
         * (1.0 - smoothstep(0.58, 0.64, moisture));
@@ -137,36 +141,6 @@ fn biome_surface(
         * (1.0 - savanna)
         * smoothstep(0.25, 0.51, temperature);
     let tundra = 1.0 - smoothstep(0.18, 0.40, temperature);
-
-    // Evaluate the grove field in planet-centered meters, as tree placement does.
-    let forest_position = direction * planet_radius;
-    let grove = macro_noise(forest_position / 260.0 + vec3<f32>(7.4, -12.8, 3.7));
-    let grove_density = clamp(0.82 + grove * 0.90, 0.25, 1.0);
-    let selection_probability = max(
-        max(rainforest * 0.98, temperate_forest * 0.94),
-        max(boreal_forest * 0.87, savanna * 0.34),
-    ) * grove_density;
-
-    // A stand becomes an opaque-looking crown canopy as its trees overlap.
-    // Sparse savanna keeps bare ground visible instead of becoming a forest.
-    let canopy_occupancy = smoothstep(0.075, 0.76, selection_probability);
-    let tree_limit = smoothstep(3.5, 11.0, height)
-        * (1.0 - smoothstep(2200.0, 2600.0, height))
-        * (1.0 - smoothstep(0.40, 0.62, slope))
-        * (1.0 - smoothstep(0.93, 0.96, latitude))
-        * (1.0 - snow);
-    let cover = canopy_occupancy * tree_limit;
-
-    // Values are linear PBR albedo, chosen to relate to the actual leaf
-    // palettes (jungle, oak, pine, acacia) rather than the grass texture.
-    let total_species = rainforest + temperate_forest + boreal_forest + savanna + 0.001;
-    let canopy = (
-        rainforest * vec3<f32>(0.054, 0.215, 0.055)
-        + temperate_forest * vec3<f32>(0.097, 0.247, 0.072)
-        + boreal_forest * vec3<f32>(0.061, 0.164, 0.115)
-        + savanna * vec3<f32>(0.156, 0.202, 0.063)
-        + vec3<f32>(0.00008, 0.00020, 0.00007)
-    ) / total_species;
 
     // Tint only the grass/dirt layers. Rock remains mineral-grey and snow
     // remains white. Triplanar PBR albedo/normal/roughness stay in use.
@@ -186,33 +160,75 @@ fn biome_surface(
             snow,
         ),
         foliage,
-        cover,
-        canopy,
     );
 }
 
-fn forest_canopy(surface: vec3<f32>, footprint: f32, tint: vec3<f32>) -> vec4<f32> {
-    // Continuously evaluated at planet-space coordinates, even for chunks
-    // too far away to stream a single tree. The regional terms remain
-    // visible when 20 m crowns are smaller than a screen pixel.
-    let continental = macro_noise(surface / 14500.0 + vec3<f32>(-6.2, 11.4, 3.8));
-    let region = filtered_noise(
-        surface / 4200.0 + vec3<f32>(8.3, -2.4, 14.1),
-        1.0 - smoothstep(900.0, 5800.0, footprint),
-    );
-    let grove = filtered_noise(
-        surface / 260.0 + vec3<f32>(7.4, -12.8, 3.7),
-        1.0 - smoothstep(85.0, 380.0, footprint),
-    );
-    let crowns = filtered_noise(
-        surface / 22.0,
-        1.0 - smoothstep(2.5, 22.0, footprint),
-    );
-    let structure = continental * 0.31 + region * 0.27
-        + grove * 0.32 + crowns * 0.23;
-    let clustered = smoothstep(-0.22, 0.25, structure);
-    let light = clamp(0.93 + structure * 0.91, 0.63, 1.31);
-    return vec4<f32>(tint * light, mix(0.72, 1.0, clustered));
+// Inverse of world_core::coordinates::cube_direction, for the atlas fallback
+// over the hemisphere and at altitudes beyond the local tangent projections.
+fn global_canopy(direction: vec3<f32>) -> vec4<f32> {
+    let magnitude = abs(direction);
+    var face: u32;
+    var plane: vec2<f32>;
+    if magnitude.x > magnitude.y && magnitude.x > magnitude.z {
+        if direction.x < 0.0 {
+            face = 0u;
+            plane = vec2<f32>(direction.z, -direction.y) / magnitude.x;
+        } else {
+            face = 3u;
+            plane = vec2<f32>(-direction.y, direction.z) / magnitude.x;
+        }
+    } else if magnitude.z > magnitude.y {
+        if direction.z > 0.0 {
+            face = 1u;
+            plane = vec2<f32>(direction.x, -direction.y) / magnitude.z;
+        } else {
+            face = 4u;
+            plane = vec2<f32>(-direction.y, direction.x) / magnitude.z;
+        }
+    } else if direction.y > 0.0 {
+        face = 2u;
+        plane = vec2<f32>(direction.x, direction.z) / magnitude.y;
+    } else {
+        face = 5u;
+        plane = vec2<f32>(direction.z, direction.x) / magnitude.y;
+    }
+    if (u32(canopy_layout.fade.z) & (1u << face)) == 0u {
+        return vec4<f32>(0.0);
+    }
+    let correction = 0.87 * 0.87;
+    let square = plane * sqrt((1.0 + correction) / (vec2<f32>(1.0) + correction * plane * plane));
+    let uv = square * 0.5 + 0.5;
+    let side = f32(textureDimensions(canopy_atlas).x);
+    let padded = (uv * (side - 1.0) + 0.5) / side;
+    return textureSampleLevel(canopy_atlas, canopy_sampler, padded, i32(CANOPY_CASCADES + face), 0.0);
+}
+
+fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
+    var result = vec4<f32>(0.0);
+    var remaining = 1.0;
+    for (var level = 0u; level < CANOPY_CASCADES; level++) {
+        let layer = canopy_layout.cascades[level];
+        let cosine = dot(layer.center.xyz, direction);
+        if layer.center.w == 0.0 || cosine <= 0.0 {
+            continue;
+        }
+        let square = vec2<f32>(dot(layer.east.xyz, direction), dot(layer.north.xyz, direction))
+            / (layer.east.w * cosine);
+        let edge = max(abs(square.x), abs(square.y));
+        let spatial = 1.0 - smoothstep(0.77, 0.99, edge);
+        let footprint_blend = 1.0 - smoothstep(0.85, 2.7, footprint / layer.north.w);
+        let weight = spatial * footprint_blend;
+        if weight > 0.0 {
+            let uv = square * 0.5 + 0.5;
+            let data = textureSampleLevel(canopy_atlas, canopy_sampler, uv, i32(level), 0.0);
+            result += data * (remaining * weight);
+            remaining *= 1.0 - weight;
+            if remaining < 0.001 {
+                return result;
+            }
+        }
+    }
+    return result + remaining * global_canopy(direction);
 }
 
 struct Projection {
@@ -408,19 +424,19 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
 
     var occlusion = 1.0;
     let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
-    // Ground texture stays visible in the near and middle forest. Only
-    // transition to the canopy representation as the 3D forest approaches
-    // its 2 km cutoff. At any distance past that cutoff, a tree-covered
-    // biome remains forest-colored instead of becoming bare grass.
-    // This is a separate forest canopy layer, not a replacement for soil.
-    let forest_amount = smoothstep(600.0, 1600.0, forest_distance)
-        * biome.forest_cover;
-    if forest_amount > 0.015 {
-        let canopy = forest_canopy(position - direction * height, footprint, biome.canopy_tint);
-        let cover = smoothstep(0.012, 0.79, forest_amount) * canopy.a * 0.98;
-        surface.color = mix(surface.color, canopy.rgb, cover);
-        surface.roughness = mix(surface.roughness, 0.97, cover);
-        occlusion = 1.0 - cover * 0.18;
+    var canopy = vec4<f32>(0.0);
+    var canopy_blend = 0.0;
+    if canopy_layout.fade.y > 0.0 && (forest_distance > canopy_layout.fade.x || terrain_debug_mode != 0u) {
+        // The geometric mean moderates the long axis of low-angle pixel footprints.
+        canopy = forest_canopy(direction, sqrt(pixel_dx * pixel_dy));
+        let handoff = smoothstep(canopy_layout.fade.x, canopy_layout.fade.y, forest_distance);
+        let soil = 1.0 - clamp(weights[3] + weights[4], 0.0, 1.0);
+        let exposed_land = smoothstep(1.1, 3.5, height);
+        let toward_eye = (view.world_position.xyz - input.world_position.xyz) / max(forest_distance, 1.0);
+        // At grazing angles the vertical crowns also hide the ground behind them.
+        let grazing = 1.0 - abs(dot(direction, toward_eye));
+        let crown_influence = 1.0 - exp(-mix(3.2, 6.4, grazing) * canopy.a);
+        canopy_blend = handoff * soil * exposed_land * crown_influence;
     }
 
     if ground_detail > 0.0 {
@@ -473,16 +489,24 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     pbr_input.world_normal = surface_normal;
     pbr_input.N = shaded_normal;
     pbr_input.V = calculate_view(input.world_position, pbr_input.is_orthographic);
-    let lit = apply_pbr_lighting(pbr_input);
+    var lit = apply_pbr_lighting(pbr_input);
+    if canopy_blend > 0.0 {
+        // The impostor atlas already represents lit foliage. Blend the same
+        // scene-linear palette before fog and tonemapping, preserving slope relief.
+        let canopy_color = canopy.rgb / max(canopy.a, 0.001);
+        let sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
+        let shade = 0.83 + 0.27 * max(dot(surface_normal, sun), 0.0);
+        lit = vec4<f32>(mix(lit.rgb, canopy_color * shade, canopy_blend), lit.a);
+    }
     var final_color = main_pass_post_lighting_processing(pbr_input, lit);
 
     if terrain_debug_mode != 0u {
         // Preserve detailed terrain within 650 m even while inspecting
         // the planet-wide map. Fade the diagnostic in gradually rather
         // than painting the nearby soil a flat green or gray.
-        var debug_color = biome.canopy_tint * biome.forest_cover;
+        var debug_color = canopy.rgb;
         if terrain_debug_mode == 1u {
-            debug_color = vec3<f32>(biome.forest_cover);
+            debug_color = vec3<f32>(canopy.a);
         }
         let diagnostic_blend = smoothstep(650.0, 1450.0, forest_distance);
         final_color = mix(final_color, vec4<f32>(debug_color, 1.0), diagnostic_blend);

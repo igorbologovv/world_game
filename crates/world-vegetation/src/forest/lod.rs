@@ -60,6 +60,14 @@ impl Default for VegetationSettings {
     }
 }
 
+impl VegetationSettings {
+    pub(super) fn proxy_range(&self) -> Vec2 {
+        let impostor = self.impostor_range.clamp(200.0, 600.0);
+        let end = self.forest_range.clamp(impostor + 220.0, 3_000.0);
+        Vec2::new(0.79 * end, end)
+    }
+}
+
 pub(super) struct View {
     pub focal: f32,
     pub orthographic: bool,

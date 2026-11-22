@@ -2,7 +2,7 @@
 use bevy::{math::DVec3, prelude::*};
 use world_core::{planet::RADIUS, SurfaceHeights};
 
-use super::{hero_oak, tree_height, tree_site, Random, Species};
+use super::{hero_oak, tree_height, tree_site, ForestClearing, Random, Species};
 
 pub(super) const PATCH_METERS: f64 = 145.0;
 const ANGLE: f64 = PATCH_METERS / RADIUS;
@@ -39,6 +39,21 @@ impl Site {
 }
 
 impl PatchKey {
+    pub fn containing(up: DVec3) -> Self {
+        let latitude = up.y.clamp(-1.0, 1.0).asin();
+        let longitude = up.z.atan2(up.x).rem_euclid(TAU);
+        let row = (((latitude + HALF_PI) / ANGLE) as i32).min(LAST_ROW);
+        let count = columns(row);
+        let col = ((longitude / TAU * f64::from(count)) as i32).rem_euclid(count);
+        Self(row, col)
+    }
+
+    pub fn area(self) -> f64 {
+        let south = f64::from(self.0) * ANGLE - HALF_PI;
+        let north = (south + ANGLE).min(HALF_PI);
+        RADIUS.powi(2) * (north.sin() - south.sin()) * TAU / f64::from(columns(self.0))
+    }
+
     pub fn parent(self) -> NodeKey {
         let band = self.0 / GROUP;
         // At Mars radius there are >100k longitude columns. Multiply
@@ -69,21 +84,39 @@ impl PatchKey {
         )
     }
 
+    #[cfg(test)]
     pub fn sites(self, heights: &SurfaceHeights) -> Vec<Site> {
+        self.sample_sites(heights, None, 1).collect()
+    }
+
+    /// Select a deterministic subset of the canonical candidate sequence.
+    /// A stride of one is the complete set used by the detailed forest.
+    pub fn sample_sites(
+        self,
+        heights: &SurfaceHeights,
+        clearing: Option<ForestClearing>,
+        stride: usize,
+    ) -> impl Iterator<Item = Site> + '_ {
         let latitude = f64::from(self.0) * ANGLE - HALF_PI;
         let step = TAU / f64::from(columns(self.0));
         let mut seed = ((self.0 as u64) << 32) ^ self.1 as u64;
         seed = (seed ^ (seed >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         seed = (seed ^ (seed >> 27)).wrapping_mul(0x94d049bb133111eb);
         seed ^= seed >> 31;
-        (0..CANDIDATES)
-            .filter_map(|candidate| {
+        debug_assert_eq!(CANDIDATES % stride, 0);
+        let first = (seed % stride as u64) as usize;
+        (first..CANDIDATES)
+            .step_by(stride)
+            .filter_map(move |candidate| {
                 let mut rng =
                     Random::new(seed ^ (candidate as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
                 let up = direction(
                     (latitude + rng.unit64() * ANGLE).clamp(-HALF_PI, HALF_PI),
                     (f64::from(self.1) + rng.unit64()) * step,
                 );
+                if clearing.is_some_and(|clearing| clearing.contains(up)) {
+                    return None;
+                }
                 let (ground, species) = tree_site(heights, up, &mut rng)?;
                 let variant = rng.next_u32() as usize % species.variants();
                 let scale = rng.range(0.84, 1.28);
@@ -101,7 +134,6 @@ impl PatchKey {
                     yaw,
                 })
             })
-            .collect()
     }
 }
 

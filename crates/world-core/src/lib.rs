@@ -9,4 +9,6 @@ mod terrain_detail;
 pub use heights::{LocalPool, SurfaceHeights};
 
 #[cfg(feature = "runtime")]
+pub mod canopy;
+#[cfg(feature = "runtime")]
 pub mod runtime;

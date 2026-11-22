@@ -132,6 +132,14 @@ pub(super) struct StreamStats {
 }
 
 impl ForestStream {
+    pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
+        self.nodes
+            .values()
+            .flat_map(|node| &node.leaves)
+            .filter_map(|leaf| Some((leaf.key, leaf.sites.as_ref()?.clone())))
+            .collect()
+    }
+
     pub fn sites(&self, key: PatchKey) -> Option<&[Site]> {
         self.nodes
             .get(&key.parent())?
@@ -270,11 +278,7 @@ impl ForestStream {
                 let heights = heights.clone();
                 let clearing = clearing.copied();
                 leaf.placement = Some(pool.spawn(async move {
-                    let mut sites = key.sites(&heights);
-                    if let Some(clearing) = clearing {
-                        sites.retain(|site| !clearing.contains(site.position));
-                    }
-                    sites.into()
+                    key.sample_sites(&heights, clearing, 1).collect::<Sites>()
                 }));
                 budget -= 1;
             }
@@ -417,10 +421,10 @@ fn approach(from: f32, to: f32, step: f32) -> f32 {
     from + (to - from).clamp(-step, step)
 }
 
-fn proxy_parameters(forest: f32, range: f32, band: Vec2, is_parent: bool) -> ProxyUniform {
+fn proxy_parameters(forest: Vec2, range: f32, band: Vec2, is_parent: bool) -> ProxyUniform {
     ProxyUniform {
         leaf: Vec4::new(0.0, 0.0, band.x, band.y),
-        forest: Vec4::new(forest * 0.79, forest, 0.0, f32::from(u8::from(is_parent))),
+        forest: Vec4::new(forest.x, forest.y, 0.0, f32::from(u8::from(is_parent))),
         impostor: Vec4::new(range * 0.78, range, 0.0, 0.0),
         children: [Vec4::ZERO; CHILD_SLOTS / 4],
     }
@@ -545,7 +549,8 @@ pub(super) fn stream(
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
     let band = View::new(view, projection).impostor_band(&settings);
     let range = settings.impostor_range.clamp(200.0, 600.0);
-    let forest_range = settings.forest_range.clamp(range + 220.0, 3_000.0);
+    let forest_band = settings.proxy_range();
+    let forest_range = forest_band.y;
     let preload = settings.preload_margin.clamp(90.0, 420.0);
     let step = fade_step(&time, &settings);
     // Keep the atlas handle and UV layout stable while new portraits arrive.
@@ -631,7 +636,7 @@ pub(super) fn stream(
                         leaf.anchor,
                         &mut assets,
                         || ProxyMaterial {
-                            coverage: proxy_parameters(forest_range, range, band, false),
+                            coverage: proxy_parameters(forest_band, range, band, false),
                             atlas: atlas.clone(),
                         },
                     )
@@ -653,7 +658,7 @@ pub(super) fn stream(
                 node.anchor,
                 &mut assets,
                 || ProxyMaterial {
-                    coverage: proxy_parameters(forest_range, range, band, true),
+                    coverage: proxy_parameters(forest_band, range, band, true),
                     atlas: atlas.clone(),
                 },
             ) {
@@ -666,7 +671,7 @@ pub(super) fn stream(
     forest.mask.clear();
     for key in &forest.order {
         let node = forest.nodes.get_mut(key).unwrap();
-        let mut uniform = proxy_parameters(forest_range, range, band, true);
+        let mut uniform = proxy_parameters(forest_band, range, band, true);
         for (slot, leaf) in node.leaves.iter_mut().enumerate() {
             let distance = eye.distance(leaf.anchor) as f32;
             let child_target = f32::from(u8::from(

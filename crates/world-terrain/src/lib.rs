@@ -16,7 +16,11 @@ use bevy::{
 
     },
 };
-use world_core::{planet::RADIUS, runtime::{PlanetRoot, WorldMovement, WorldReady}};
+use world_core::{
+    canopy::{CanopyLayout, ForestCanopy},
+    planet::RADIUS,
+    runtime::{PlanetRoot, WorldMovement, WorldReady},
+};
 
 /// Register terrain materials, chunk streaming, lighting, and atmospheric fog.
 ///
@@ -31,6 +35,7 @@ impl Plugin for TerrainPlugin {
         .add_systems(Startup, setup.after(WorldReady))
         .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
         .add_systems(Update, toggle_canopy_debug)
+        .add_systems(Update, update_canopy)
         .add_systems(Update, terrain_surface::stream.after(WorldMovement));
     }
 }
@@ -53,6 +58,11 @@ struct TerrainMaterial {
     terrain_debug_mode: u32,
     #[uniform(7)]
     planet_radius: f32,
+    #[texture(8, dimension = "2d_array")]
+    #[sampler(9)]
+    canopy_atlas: Option<Handle<Image>>,
+    #[uniform(10)]
+    canopy_layout: CanopyLayout,
 }
 
 impl TerrainMaterial {
@@ -82,6 +92,24 @@ impl TerrainMaterial {
             detail_enabled: 0,
             terrain_debug_mode: 0,
             planet_radius: RADIUS as f32,
+            canopy_atlas: None,
+            canopy_layout: CanopyLayout::default(),
+        }
+    }
+}
+
+fn update_canopy(
+    canopy: Option<Res<ForestCanopy>>,
+    terrain: Option<Res<terrain_surface::TerrainSurface>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
+) {
+    let (Some(canopy), Some(terrain)) = (canopy, terrain) else {
+        return;
+    };
+    if canopy.is_changed() || terrain.is_added() {
+        if let Some(mut material) = materials.get_mut(&terrain.material) {
+            material.canopy_atlas = Some(canopy.atlas.clone());
+            material.canopy_layout = canopy.layout;
         }
     }
 }

@@ -1,4 +1,5 @@
 //! Shared vegetation models, material integration, and biome placement rules.
+mod canopy;
 mod debug;
 mod fern;
 mod ground_cover;
@@ -251,6 +252,7 @@ impl Plugin for ProceduralForestPlugin {
                 .after(VisibilitySystems::UpdateFrusta)
                 .before(VisibilitySystems::VisibilityPropagate),
         );
+        canopy::install(app);
     }
 }
 
