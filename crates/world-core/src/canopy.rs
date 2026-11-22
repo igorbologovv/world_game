@@ -32,8 +32,12 @@ pub struct CanopyLayout {
 /// the legacy cube-face order. Vegetation updates the layers and their transforms together.
 #[derive(Resource)]
 pub struct ForestCanopy {
-    /// Filterable 2D array with a stable handle throughout the stream.
+    /// Filterable coverage array with a stable handle throughout the stream.
     pub atlas: Handle<Image>,
+    /// Shading texture for the finest projection. Red is visible crown fraction.
+    /// The remaining channels store premultiplied crown height (0–40 m), tone and warmth.
+    /// The shading mips use the same projection as the first coverage layer.
+    pub crowns: Handle<Image>,
     /// Projections and handoff distances for the resident layers.
     pub layout: CanopyLayout,
 }

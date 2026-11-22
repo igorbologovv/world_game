@@ -1,5 +1,7 @@
 //! Bounded canopy atlas made from the same sites as the detailed forest.
 
+mod crowns;
+
 use std::{collections::HashMap, sync::Arc};
 
 use bevy::{
@@ -25,6 +27,7 @@ use super::{
     streaming::{self, ForestStream},
     ForestClearing,
 };
+use crowns::CrownRaster;
 
 const SIDE: usize = CANOPY_SIDE as usize;
 const TEXELS: usize = SIDE * SIDE;
@@ -44,6 +47,7 @@ struct AtlasStream {
 struct Layer {
     bytes: Vec<u8>,
     frame: Option<Frame>,
+    crowns: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +120,7 @@ fn create(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     image.sampler = ImageSampler::linear();
     commands.insert_resource(ForestCanopy {
         atlas: images.add(image),
+        crowns: images.add(crowns::image()),
         layout: CanopyLayout::default(),
     });
 }
@@ -154,11 +159,19 @@ fn stream(
         };
         *job = None;
         let start = index * TEXELS * 4;
-        let mut atlas = images
-            .get_mut(&canopy.atlas)
-            .expect("canopy retains its atlas");
-        atlas.data.as_mut().expect("canopy atlas has CPU backing")[start..start + TEXELS * 4]
-            .copy_from_slice(&layer.bytes);
+        {
+            let mut atlas = images
+                .get_mut(&canopy.atlas)
+                .expect("canopy retains its atlas");
+            atlas.data.as_mut().expect("canopy atlas has CPU backing")[start..start + TEXELS * 4]
+                .copy_from_slice(&layer.bytes);
+        }
+        if let Some(crowns) = layer.crowns {
+            images
+                .get_mut(&canopy.crowns)
+                .expect("canopy retains the crown texture")
+                .data = Some(crowns);
+        }
         if let Some(frame) = layer.frame {
             canopy.layout.cascades[index] = frame.uniform();
             stream.centers[index] = Some(frame.up);
@@ -188,13 +201,18 @@ fn stream(
         let heights = heights.clone();
         let cached = (index == 0).then(|| forest.cached_sites());
         stream.jobs[index] = Some(pool.spawn(async move {
-            let bytes = match cached {
-                Some(cached) => fine_layer(frame, &heights, clearing, cached),
-                None => coarse_local(frame, &heights, clearing),
+            let (bytes, crowns) = match cached {
+                Some(cached) => {
+                    let mut raster = CrownRaster::new(frame.half_width);
+                    let bytes = fine_layer(frame, &heights, clearing, cached, Some(&mut raster));
+                    (bytes, Some(raster.finish()))
+                }
+                None => (coarse_local(frame, &heights, clearing), None),
             };
             Layer {
                 bytes,
                 frame: Some(frame),
+                crowns,
             }
         }));
         budget -= 1;
@@ -212,6 +230,7 @@ fn stream(
             Layer {
                 bytes: coarse_global(face, &heights, clearing),
                 frame: None,
+                crowns: None,
             }
         }));
         budget -= 1;
@@ -250,8 +269,11 @@ fn fine_layer(
     heights: &SurfaceHeights,
     clearing: Option<ForestClearing>,
     cached: HashMap<PatchKey, Arc<[Site]>>,
+    mut crowns: Option<&mut CrownRaster>,
 ) -> Vec<u8> {
     let mut sums = vec![Vec4::ZERO; TEXELS];
+    let east = frame.east.as_vec3();
+    let north = frame.north.as_vec3();
     // Beyond the polar tree line, the placement grid has more columns than
     // the projected area warrants. No sites can survive the latitude gate.
     if frame.up.y.abs() < 0.962 {
@@ -265,9 +287,13 @@ fn fine_layer(
                 continue;
             }
             let mut add = |site: Site| {
-                let xy = (frame.project(site.position.normalize()) * 0.5 + 0.5)
-                    * f64::from(CANOPY_SIDE)
-                    - 0.5;
+                let square = frame.project(site.position.normalize());
+                if let Some(raster) = crowns.as_deref_mut() {
+                    let axis = site.rotation() * Vec3::X;
+                    let orientation = Vec2::new(axis.dot(east), axis.dot(north)).normalize();
+                    raster.add(site, square, orientation);
+                }
+                let xy = (square * 0.5 + 0.5) * f64::from(CANOPY_SIDE) - 0.5;
                 let low = xy.floor();
                 let blend = xy - low;
                 let low = low.as_ivec2();
@@ -372,13 +398,18 @@ mod tests {
         )));
         let up = terrain_aligned_direction(world_regions::PALM_COAST_REGION.spawn.direction);
         let frame = Frame::new(up, 220.0);
-        let coverage = fine_layer(frame, &heights, None, HashMap::new());
+        let coverage = fine_layer(frame, &heights, None, HashMap::new(), None);
         assert!(coverage.chunks_exact(4).any(|pixel| pixel[3] > 24));
+        let mut raster = CrownRaster::new(frame.half_width);
+        assert_eq!(
+            coverage,
+            fine_layer(frame, &heights, None, HashMap::new(), Some(&mut raster))
+        );
         let clearing = ForestClearing {
             direction: up,
             radius: 400.0,
         };
-        let cleared = fine_layer(frame, &heights, Some(clearing), HashMap::new());
+        let cleared = fine_layer(frame, &heights, Some(clearing), HashMap::new(), None);
         assert!(cleared.iter().all(|&value| value == 0));
 
         let patch = NodeKey::around(up, 1_200.0)

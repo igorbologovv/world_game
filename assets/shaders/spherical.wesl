@@ -1,5 +1,5 @@
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
-import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_view_bindings::{lights, view};
 import bevy_pbr::render::pbr_types::{PbrInput, pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
 import bevy_pbr::render::pbr_functions::{calculate_view, apply_pbr_lighting, main_pass_post_lighting_processing};
 
@@ -37,6 +37,10 @@ struct CanopyLayout {
 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(10)
 var<uniform> canopy_layout: CanopyLayout;
+@group(constants::MATERIAL_BIND_GROUP) @binding(11)
+var crown_detail: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(12)
+var crown_sampler: sampler;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -229,6 +233,82 @@ fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
         }
     }
     return result + remaining * global_canopy(direction);
+}
+
+fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    let layer = canopy_layout.cascades[0];
+    let cosine = dot(layer.center.xyz, direction);
+    if layer.center.w == 0.0 || cosine <= 0.0 {
+        return vec3<f32>(1.0);
+    }
+    let square = vec2<f32>(dot(direction, layer.east.xyz), dot(direction, layer.north.xyz))
+        / (layer.east.w * cosine);
+    let edge = max(abs(square.x), abs(square.y));
+    let side = f32(textureDimensions(crown_detail).x);
+    let diameter = 2.0 * layer.east.w * planet_radius;
+    let meters_per_texel = diameter / side;
+    let pixel_dx = length(dx);
+    let pixel_dy = length(dy);
+    let footprint = max(sqrt(pixel_dx * pixel_dy), max(pixel_dx, pixel_dy) / 6.0);
+    let strength = (1.0 - smoothstep(0.74, 0.96, edge))
+        * (1.0 - smoothstep(1.2, 4.6, footprint / meters_per_texel));
+    if strength <= 0.0 {
+        return vec3<f32>(1.0);
+    }
+
+    let uv = square * 0.5 + 0.5;
+    // Retain horizontal crown detail at an oblique angle while prefiltering
+    // the longer axis of the pixel through the premultiplied mip chain.
+    let scale = 1.0 / (diameter * cosine);
+    let chart_offset = square * layer.east.w;
+    let uv_dx = (vec2<f32>(dot(dx, layer.east.xyz), dot(dx, layer.north.xyz))
+        - chart_offset * dot(dx, layer.center.xyz)) * scale;
+    let uv_dy = (vec2<f32>(dot(dy, layer.east.xyz), dot(dy, layer.north.xyz))
+        - chart_offset * dot(dy, layer.center.xyz)) * scale;
+    let crown = textureSampleGrad(crown_detail, crown_sampler, uv, uv_dx, uv_dy);
+    let crown_amount = smoothstep(0.03, 0.76, crown.r);
+    if crown_amount <= 0.0 {
+        return vec3<f32>(mix(1.0, 0.57, strength));
+    }
+
+    let sun_plane = vec2<f32>(dot(sun, layer.east.xyz), dot(sun, layer.north.xyz));
+    let sun_tangent = length(sun_plane);
+    let step_texels = 1.45;
+    let step_meters = step_texels * meters_per_texel;
+    let offset = sun_plane * (step_texels / (max(sun_tangent, 0.001) * side));
+    let sunward = textureSampleGrad(crown_detail, crown_sampler, uv + offset, uv_dx, uv_dy);
+    let leeward = textureSampleGrad(crown_detail, crown_sampler, uv - offset, uv_dx, uv_dy);
+    let height_scale = 40.0;
+    let sun_height = dot(sun, direction);
+    let direct = smoothstep(0.0, 0.25, sun_height);
+    // Filter both samples over the same footprint so the side lighting and
+    // the soft shadow from the next crown disappear with the crown itself.
+    let slope = (sunward.g - leeward.g) * height_scale / (2.0 * step_meters);
+    let diffuse = smoothstep(-0.33, 0.81, sun_height - slope * sun_tangent);
+    let attributes = crown.gba / max(crown.r, 0.03);
+    let rise = (sunward.g / max(sunward.r, 0.03) - attributes.x) * height_scale;
+    let light_rise = step_meters * max(sun_height, 0.0) / max(0.25, sun_tangent);
+    let shadow = direct * sunward.r * smoothstep(0.0, 7.0, rise - light_rise);
+    let light = (0.89 + direct * (diffuse * 0.54 - 0.17)) * (1.0 - 0.40 * shadow);
+    let shade = light * mix(0.75, 1.26, attributes.y);
+    let warmth = attributes.z - 0.5;
+    let color = vec3<f32>(1.0 + 0.31 * warmth, 1.0 + 0.09 * warmth, 1.0 - 0.37 * warmth);
+    let grove = mix(vec3<f32>(0.57), color * shade, crown_amount);
+    return mix(vec3<f32>(1.0), grove, strength);
+}
+
+fn grove_shading(point: vec3<f32>, footprint: f32, sun: vec3<f32>) -> vec3<f32> {
+    // These bands modulate the canonical crown color only. Feeding them into
+    // canopy alpha would create trees in a clearing or cut holes in a stand.
+    let crowns = filtered_noise(point / 52.0, 1.0 - smoothstep(14.0, 45.0, footprint));
+    let grove_point = point / 235.0 + vec3<f32>(5.4, -1.2, 9.3);
+    let grove_weight = 1.0 - smoothstep(64.0, 210.0, footprint);
+    let groves = filtered_noise(grove_point, grove_weight);
+    let slope = filtered_noise(grove_point + sun * 0.28, grove_weight) - groves;
+    let stands = filtered_noise(point / 1260.0, 1.0 - smoothstep(380.0, 1160.0, footprint));
+    let shade = 1.0 + 0.54 * crowns + 0.60 * groves - 0.26 * slope + 0.49 * stands;
+    let warmth = 0.23 * groves + 0.31 * stands;
+    return max(vec3<f32>(0.37), vec3<f32>(shade + warmth, shade, shade - warmth * 0.68));
 }
 
 struct Projection {
@@ -494,9 +574,14 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         // The impostor atlas already represents lit foliage. Blend the same
         // scene-linear palette before fog and tonemapping, preserving slope relief.
         let canopy_color = canopy.rgb / max(canopy.a, 0.001);
-        let sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
+        var sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
+        if lights.n_directional_lights > 0u {
+            sun = lights.directional_lights[0].direction_to_light;
+        }
         let shade = 0.83 + 0.27 * max(dot(surface_normal, sun), 0.0);
-        lit = vec4<f32>(mix(lit.rgb, canopy_color * shade, canopy_blend), lit.a);
+        let groves = grove_shading(direction * planet_radius, footprint, sun);
+        let crowns = crown_shading(direction, dx, dy, sun);
+        lit = vec4<f32>(mix(lit.rgb, canopy_color * shade * groves * crowns, canopy_blend), lit.a);
     }
     var final_color = main_pass_post_lighting_processing(pbr_input, lit);
 

@@ -63,6 +63,9 @@ struct TerrainMaterial {
     canopy_atlas: Option<Handle<Image>>,
     #[uniform(10)]
     canopy_layout: CanopyLayout,
+    #[texture(11)]
+    #[sampler(12)]
+    crown_detail: Option<Handle<Image>>,
 }
 
 impl TerrainMaterial {
@@ -94,6 +97,7 @@ impl TerrainMaterial {
             planet_radius: RADIUS as f32,
             canopy_atlas: None,
             canopy_layout: CanopyLayout::default(),
+            crown_detail: None,
         }
     }
 }
@@ -109,6 +113,7 @@ fn update_canopy(
     if canopy.is_changed() || terrain.is_added() {
         if let Some(mut material) = materials.get_mut(&terrain.material) {
             material.canopy_atlas = Some(canopy.atlas.clone());
+            material.crown_detail = Some(canopy.crowns.clone());
             material.canopy_layout = canopy.layout;
         }
     }

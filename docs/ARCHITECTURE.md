@@ -86,7 +86,10 @@ The generator builds without the Bevy renderer or the path crate.
   estimate coverage from stratified subsets of the same candidates. Six
   cube faces provide coverage outside the camera-centered layers. Workers
   generate at most three layers concurrently, and terrain samples the shared
-  atlas independently of chunk size. F9 shows crown coverage and color.
+  atlas independently of chunk size. The finest layer also rasterizes each
+  tree's crown relief and tint into one mipmapped shading texture. Directional
+  lighting and broader grove detail modulate crown color under the existing
+  coverage mask. F9 shows crown coverage and color.
 - **Startup.** The client disables Bevy's `TransformPlugin` before installing
   `WorldSpacePlugin`. In `Startup`, `WorldReady` publishes the planet's root
   frame and read-only `SurfaceHeights`. Player and water startup systems run
