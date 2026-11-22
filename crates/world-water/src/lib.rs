@@ -3,6 +3,7 @@
 
 mod ocean;
 mod river_surface;
+mod wetlands;
 
 use bevy::{
     gizmos::config::GizmoConfig,
@@ -20,13 +21,14 @@ use world_core::{
     SurfaceHeights,
 };
 
-/// Load generated river and water data and register their render systems.
+/// Render baked rivers, lakes and oceans, and stream local wetland pools.
 ///
 /// Install with the shared world space plugin and Bevy's gizmos and PBR plugins.
 pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
+        wetlands::install(app);
         app.add_plugins((
             MaterialPlugin::<ocean::OceanMaterial>::default(),
             MaterialPlugin::<river_surface::RiverMaterial>::default(),

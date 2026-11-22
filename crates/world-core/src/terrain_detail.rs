@@ -5,9 +5,55 @@
 //! cube-face/tile boundaries and depends on *physical* coordinates, not tiles.
 //! Keeping this in world-core makes collision, vegetation and rendering agree.
 
-use bevy_math::DVec3;
+use bevy_math::{DVec3, IVec3, Vec3};
 
 use crate::planet::RADIUS;
+
+pub(crate) const BASIN_CELL: f64 = 112.0;
+
+#[derive(Clone, Copy)]
+pub(crate) struct Basin {
+    pub(crate) center: DVec3,
+    pub(crate) radius: f64,
+    depth: f64,
+}
+
+impl Basin {
+    pub(crate) fn at_cell(cell: IVec3) -> Option<Self> {
+        let middle = (cell.as_dvec3() + DVec3::splat(0.5)) * BASIN_CELL;
+        if (middle.length() - RADIUS).abs() > 28.0 {
+            return None;
+        }
+        let hash = |seed| {
+            lattice_hash(
+                i64::from(cell.x),
+                i64::from(cell.y),
+                i64::from(cell.z),
+                seed,
+            )
+        };
+        if hash(0x83AD_D5EF) < -0.45 {
+            return None;
+        }
+        let jitter = DVec3::new(hash(0x3B1C_A48F), hash(0xD47E_C102), hash(0x4084_6DE7)) * 5.0;
+        let center = (middle + jitter).normalize();
+        let radius = 17.0 + 5.0 * hash(0xBB15_71AB);
+        // The depression must reach zero before the sampling cell ends.
+        if (center * RADIUS - middle).abs().max_element() + radius >= BASIN_CELL * 0.5 {
+            return None;
+        }
+        Some(Self {
+            center,
+            radius,
+            depth: 3.1 + 0.8 * hash(0xD9A2_B7F3),
+        })
+    }
+
+    fn relief(self, point: DVec3) -> f64 {
+        let distance = point.distance(self.center * RADIUS) / self.radius;
+        -self.depth * (1.0 - smoothstep(0.08, 1.0, distance)).powi(2)
+    }
+}
 
 /// Scale-aware relief layered onto the planet's low-resolution global heightmap.
 ///
@@ -15,12 +61,18 @@ use crate::planet::RADIUS;
 /// mountain ridges, foothills, valleys and small terrain features are
 /// reconstructed continuously in physical meters (not from the atlas pixels).
 /// The evaluated height is identical on both sides of a terrain chunk seam.
-pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) -> f64 {
+pub(crate) fn detail(
+    direction: DVec3,
+    base_height: f64,
+    river_coverage: f64,
+    lake_coverage: f64,
+) -> f64 {
     let river = 1.0 - smoothstep(22.0, 200.0, river_coverage);
     if base_height <= 1.5 || river == 0.0 {
         return 0.0;
     }
-    let point = direction.normalize() * RADIUS;
+    let up = direction.normalize();
+    let point = up * RADIUS;
     // Entire frequency bands are absent at the coast and above their fade
     // ranges. Skip their hashes while keeping the same weights and samples.
     let inland = smoothstep(30.0, 580.0, base_height);
@@ -74,7 +126,115 @@ pub(crate) fn detail(direction: DVec3, base_height: f64, river_coverage: f64) ->
     } else {
         0.0
     };
-    broad + local + (coastal_hills + dunes) * river
+    let legacy = broad + local + (coastal_hills + dunes) * river;
+    let land =
+        smoothstep(1.5, 13.0, base_height) * river * (1.0 - smoothstep(0.0, 0.55, lake_coverage));
+    if land > 0.0 {
+        legacy + land * biome_relief(up, point, base_height + legacy, river_coverage)
+    } else {
+        legacy
+    }
+}
+
+fn biome_relief(up: DVec3, point: DVec3, elevation: f64, river_coverage: f64) -> f64 {
+    let (temperature, moisture) = climate(up, elevation);
+    let arid = smoothstep(0.65, 0.86, temperature) * (1.0 - smoothstep(0.19, 0.43, moisture));
+    let exposed =
+        smoothstep(850.0, 2_750.0, elevation).max(1.0 - smoothstep(0.18, 0.46, temperature));
+    let marsh = wetland_weight(temperature, moisture, elevation, river_coverage, point);
+    let hills = value_noise(point / 175.0, 0xB1E3_C218);
+    let hummocks = value_noise(point / 31.0, 0x4618_7A27);
+    let bumps = value_noise(point / 8.5, 0xA61B_65D9);
+    let mut relief = hills * (13.0 - 8.5 * marsh - 5.5 * arid)
+        + hummocks * (2.6 - 1.7 * marsh - 1.6 * arid)
+        + bumps * (0.43 - 0.25 * marsh - 0.23 * arid);
+
+    let erosion = (1.0 - marsh) * (1.0 - arid) * smoothstep(0.26, 0.68, moisture);
+    if erosion > 0.0 {
+        // The zero contours form branching hollows; a wider field limits the
+        // cuts to valleys so they break up instead of circling every hill.
+        let channel = value_noise(point / 83.0, 0xAD1C_3F67).abs();
+        relief -= 5.5
+            * erosion
+            * (1.0 - smoothstep(0.06, 0.29, channel))
+            * (1.0 - smoothstep(-0.18, 0.30, hills));
+    }
+    let rocky = (1.0 - marsh) * (1.0 - arid) * (0.26 + 0.74 * exposed);
+    let rock = value_noise(point / 43.0, 0xCF18_9AC3);
+    relief += 6.5 * rocky * smoothstep(0.29, 0.76, rock) * (0.8 + 0.5 * bumps);
+
+    if arid > 0.0 {
+        // Stretch the noise along a prevailing wind axis and vary the crest
+        // position slowly so dune trains curve and break up.
+        let crosswind = point.dot(DVec3::new(0.8, 0.0, 0.6));
+        let along_wind = point.dot(DVec3::new(-0.6, 0.0, 0.8));
+        let warp = value_noise(point / 220.0, 0x9DB4_6073);
+        let bands = DVec3::new(
+            along_wind / 55.0 + 0.8 * warp,
+            point.y / 270.0,
+            crosswind / 310.0,
+        );
+        let crest = value_noise(bands, 0x1858_D2F9);
+        relief += arid * (8.5 * smoothstep(-0.45, 0.63, crest) + 0.35 * bumps);
+    }
+    if marsh > 0.0 {
+        let pool = Basin::at_cell((point / BASIN_CELL).floor().as_ivec3());
+        relief += marsh * pool.map_or(0.0, |basin| basin.relief(point));
+    }
+    relief
+}
+
+pub(crate) fn wetland_weight(
+    temperature: f64,
+    moisture: f64,
+    elevation: f64,
+    river_coverage: f64,
+    point: DVec3,
+) -> f64 {
+    let river_moisture = smoothstep(0.0, 70.0, river_coverage) * 0.23;
+    let lowland = 1.0 - smoothstep(110.0, 670.0, elevation);
+    let wet = smoothstep(0.51, 0.74, moisture + river_moisture);
+    if lowland == 0.0 || wet == 0.0 {
+        return 0.0;
+    }
+    let pockets = 0.38 + 0.62 * smoothstep(-0.48, 0.45, value_noise(point / 620.0, 0x83E0_6AB1));
+    lowland * wet * smoothstep(0.15, 0.34, temperature) * pockets
+}
+
+// Same climate fields as the terrain material and canopy placement. Use the
+// macro elevation so hills and depressions do not move their own biome bands.
+pub(crate) fn climate(up: DVec3, elevation: f64) -> (f64, f64) {
+    let up = up.as_vec3();
+    let weather = climate_noise(up * 5.8 + Vec3::new(17.3, -4.7, 11.8));
+    let rain = climate_noise(up * 17.0 + Vec3::new(-2.1, 9.4, 4.6));
+    let heat = climate_noise(up * 4.1 + Vec3::new(3.2, 18.6, -8.4));
+    let moisture = (0.50 + 0.96 * weather + 0.32 * rain).clamp(0.0, 1.0);
+    let temperature = (1.07 - 0.78 * f64::from(up.y.abs()) - elevation.max(0.0) / 16_000.0
+        + 0.13 * f64::from(heat))
+    .clamp(0.0, 1.0);
+    (temperature, f64::from(moisture))
+}
+
+fn climate_noise(point: Vec3) -> f32 {
+    let cell = point.floor();
+    let fract = point - cell;
+    let w = fract * fract * (Vec3::splat(3.0) - 2.0 * fract);
+    let hash = |offset: Vec3| {
+        let p = (cell + offset) * Vec3::new(0.1031, 0.1030, 0.0973);
+        let mut h = p - p.floor();
+        h += Vec3::splat(h.dot(Vec3::new(h.y, h.x, h.z) + Vec3::splat(33.33)));
+        let v = (h.x + h.y) * h.z;
+        v - v.floor()
+    };
+    let lerp = |a, b, t| a + (b - a) * t;
+    let plane = |z| {
+        lerp(
+            lerp(hash(z), hash(z + Vec3::X), w.x),
+            lerp(hash(z + Vec3::Y), hash(z + Vec3::X + Vec3::Y), w.x),
+            w.y,
+        )
+    };
+    lerp(plane(Vec3::ZERO), plane(Vec3::Z), w.z) - 0.5
 }
 
 fn smoothstep(start: f64, end: f64, x: f64) -> f64 {
@@ -130,20 +290,20 @@ mod tests {
     #[test]
     fn deterministic_and_continuous_across_small_steps() {
         let d = DVec3::new(0.23, 0.95, -0.14).normalize();
-        let a = detail(d, 1200.0, 0.0);
-        assert_eq!(a, detail(d, 1200.0, 0.0));
+        let a = detail(d, 1200.0, 0.0, 0.0);
+        assert_eq!(a, detail(d, 1200.0, 0.0, 0.0));
         let east = d.cross(DVec3::Y).normalize();
-        let b = detail((d + east * (0.01 / RADIUS)).normalize(), 1200.0, 0.0);
+        let b = detail((d + east * (0.01 / RADIUS)).normalize(), 1200.0, 0.0, 0.0);
         assert!((b - a).abs() < 0.15, "detail discontinuity: {a} vs {b}");
     }
 
     #[test]
     fn coastline_and_channels_are_undisturbed() {
         let d = DVec3::new(0.23, 0.95, -0.14).normalize();
-        assert_eq!(detail(d, 0.0, 0.0), 0.0);
-        assert_eq!(detail(d, -1_500.0, 0.0), 0.0);
-        assert_eq!(detail(d, 250.0, 255.0), 0.0);
-        assert!(detail(d, 1200.0, 0.0).abs() < 7_000.0);
+        assert_eq!(detail(d, 0.0, 0.0, 0.0), 0.0);
+        assert_eq!(detail(d, -1_500.0, 0.0, 0.0), 0.0);
+        assert_eq!(detail(d, 250.0, 255.0, 0.0), 0.0);
+        assert!(detail(d, 1200.0, 0.0, 0.0).abs() < 7_000.0);
     }
 
     #[test]
@@ -159,7 +319,7 @@ mod tests {
                     1.0 + (f64::from(z) - 10.0) * 22_000.0 / RADIUS,
                 )
                 .normalize();
-                let height = detail(direction, 1200.0, 0.0);
+                let height = detail(direction, 1200.0, 0.0, 0.0);
                 minimum = minimum.min(height);
                 maximum = maximum.max(height);
             }
@@ -183,7 +343,7 @@ mod tests {
                     + east * (f64::from(x) * 1_500.0 / RADIUS)
                     + north * (f64::from(y) * 1_500.0 / RADIUS))
                     .normalize();
-                let height = detail(up, 850.0, 0.0);
+                let height = detail(up, 850.0, 0.0, 0.0);
                 minimum = minimum.min(height);
                 maximum = maximum.max(height);
             }
@@ -197,10 +357,11 @@ mod tests {
     #[test]
     fn physical_detail_is_not_tied_to_source_texel_size() {
         let d = DVec3::new(-0.35, 0.83, 0.43).normalize();
-        let a = detail(d, 1500.0, 0.0);
+        let a = detail(d, 1500.0, 0.0, 0.0);
         let b = detail(
             (d + DVec3::new(1.0, -1.0, 0.0) * (250.0 / RADIUS)).normalize(),
             1500.0,
+            0.0,
             0.0,
         );
         assert_ne!(a, b);

@@ -27,3 +27,19 @@ The source packs are `gravelly_sand_2k.blend/`,
 `rocky_terrain_02_4k.blend/`, `lichen_rock_4k.blend/`,
 `Ice003_1K-JPG/`, and `jolcham_oak_bark_01_4k.blend/` at the checkout
 root. Use `--source-root` when those packs are in a separate directory.
+
+## Local relief
+
+The shared height sampler layers meter-scale bumps, rolling hills, gullies,
+outcrops, dunes, and shallow wetland basins over the baked terrain and mountain
+relief. Latitude, regional rainfall, elevation, and river proximity blend the
+shapes gradually. The new relief fades at the shoreline and around baked
+channels and lakes. Baked heights and water coverage blend at cube-face edges.
+Explorer ground contact and vegetation placement use the same meter-scale height
+samples as the terrain mesh.
+
+The quadtree prioritizes fine tiles around a low camera and reaches roughly
+one-meter vertex spacing at its finest level. The water plugin streams pools
+in nearby wetland depressions where the sampled ground forms a closed rim.
+Pools use the same terrain heights for their shoreline and are shallow enough
+to walk through.

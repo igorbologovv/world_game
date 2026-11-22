@@ -28,6 +28,8 @@ pub const HEIGHT_SOURCE_PATH: &str = "terrains/spherical/source/height";
 pub const RIVER_ATLAS_PATH: &str = "world/river_atlas.png";
 /// Ocean and inland basin mask path relative to the game assets.
 pub const OCEAN_ATLAS_PATH: &str = "world/ocean_atlas.png";
+/// Directory containing the baked inland lake mask for each cube face.
+pub const LAKE_MASK_PATH: &str = "world/basins";
 /// River mesh path relative to the game assets.
 pub const RIVER_SURFACE_PATH: &str = "world/river_surface.bin";
 /// Generated inland lake meshes at their individual spill elevations.

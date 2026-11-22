@@ -21,9 +21,9 @@ use crate::TerrainMaterial;
 
 const GRID: usize = 20;
 const BASE_LEVEL: u8 = 1;
-// An 18-level quadtree gives ~1 meter sampling near the observer at Mars
-// radius with GRID=20; only a bounded set of chunks is kept in memory.
-const MAX_LEVEL: u8 = 18;
+// At the finest level, even the most stretched cube-face edges stay near
+// one meter per vertex. The global chunk and job budgets still apply.
+const MAX_LEVEL: u8 = 19;
 const MAX_CHUNKS: usize = 960;
 const MAX_JOBS: usize = 6;
 const UPLOADS_PER_FRAME: usize = 8;
@@ -31,6 +31,26 @@ const UPLOADS_PER_FRAME: usize = 8;
 // planet. Parent tiles remain visible until replacements are submitted.
 const SPLIT_ERROR: f64 = 0.78;
 const MERGE_ERROR: f64 = 0.49;
+const DETAIL_ALTITUDE: f64 = 150.0;
+
+#[derive(Clone, Copy)]
+struct LodView {
+    eye: DVec3,
+    surface: DVec3,
+    altitude: f64,
+}
+
+impl LodView {
+    fn new(eye: DVec3, heights: &SurfaceHeights) -> Self {
+        let up = eye.normalize_or_zero();
+        let ground = heights.sample(up).unwrap_or(0.0);
+        Self {
+            eye,
+            surface: up * RADIUS,
+            altitude: (eye.length() - RADIUS - ground).max(0.0),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct Tile {
@@ -83,9 +103,19 @@ impl Tile {
         up * (RADIUS + heights.sample(up).unwrap_or(0.0))
     }
 
-    fn error(self, eye: DVec3, anchor: DVec3) -> f64 {
+    fn error(self, view: LodView, anchor: DVec3) -> f64 {
         let width = RADIUS * 1.65 * self.unit();
-        width / (eye.distance(anchor) - width * 0.42).max(1.0)
+        let footprint = width * 0.42;
+        let visual = width / (view.eye.distance(anchor) - footprint).max(1.0);
+        if self.level < 12 || view.altitude >= DETAIL_ALTITUDE {
+            return visual;
+        }
+        // Reserve fine geometry around the surface position even when a
+        // chunk center sits on the opposite slope of a hill or gully.
+        let proximity = 1.0 - view.altitude / DETAIL_ALTITUDE;
+        let distance = view.surface.distance(anchor.normalize() * RADIUS);
+        let ground = width / (distance * 0.30 + view.altitude * 0.45 - footprint).max(1.0);
+        visual.max(ground * proximity)
     }
 }
 
@@ -198,14 +228,14 @@ impl TerrainSurface {
         chunk
     }
 
-    fn eligible(&self, edit: Edit, eye: DVec3) -> bool {
+    fn eligible(&self, edit: Edit, view: LodView) -> bool {
         match edit {
             Edit::Roots => self.leaves.is_empty(),
             Edit::Split(tile) => self.leaves.get(&tile).is_some_and(|chunk| {
-                tile.level < BASE_LEVEL || tile.error(eye, chunk.anchor) > SPLIT_ERROR
+                tile.level < BASE_LEVEL || tile.error(view, chunk.anchor) > SPLIT_ERROR
             }),
             Edit::Merge(tile) => self.parents.get(&tile).is_some_and(|&anchor| {
-                tile.error(eye, anchor) < MERGE_ERROR
+                tile.error(view, anchor) < MERGE_ERROR
                     && tile
                         .children()
                         .iter()
@@ -214,7 +244,7 @@ impl TerrainSurface {
         }
     }
 
-    fn plan(&mut self, eye: DVec3, heights: &SurfaceHeights) {
+    fn plan(&mut self, view: LodView, heights: &SurfaceHeights) {
         if self.leaves.is_empty() {
             if self.pending.is_empty() {
                 self.request(Edit::Roots, heights);
@@ -232,7 +262,7 @@ impl TerrainSurface {
             self.parents
                 .iter()
                 .filter_map(|(&tile, &anchor)| {
-                    let error = tile.error(eye, anchor);
+                    let error = tile.error(view, anchor);
                     (tile.level >= BASE_LEVEL
                         && error < MERGE_ERROR
                         && tile.children().iter().all(|child| {
@@ -269,7 +299,7 @@ impl TerrainSurface {
                 if reserved.contains(&tile) || tile.level >= MAX_LEVEL {
                     return None;
                 }
-                let error = tile.error(eye, chunk.anchor);
+                let error = tile.error(view, chunk.anchor);
                 (tile.level < BASE_LEVEL || error > SPLIT_ERROR).then_some((error, tile))
             })
             .collect();
@@ -296,13 +326,14 @@ pub(super) fn stream(
         return;
     };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
+    let view = LodView::new(eye, &heights);
 
     let mut uploads = UPLOADS_PER_FRAME;
     let mut index = 0;
     while index < terrain.pending.len() {
         let edit = terrain.pending[index].edit;
         let count = edit.mesh_count();
-        if !terrain.eligible(edit, eye) {
+        if !terrain.eligible(edit, view) {
             terrain.pending.swap_remove(index);
             continue;
         }
@@ -362,7 +393,7 @@ pub(super) fn stream(
             }
         }
     }
-    terrain.plan(eye, &heights);
+    terrain.plan(view, &heights);
 }
 
 fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
@@ -372,7 +403,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     let mut locations = Vec::with_capacity(positions.capacity());
     let mut indices = Vec::with_capacity((GRID * GRID + 4 * GRID) * 6);
     let spacing = RADIUS * tile.unit() / GRID as f64;
-    let normal_step = spacing.max(8.0);
+    let normal_step = spacing.max(0.8);
     for y in 0..=GRID {
         for x in 0..=GRID {
             let up = tile.direction(DVec2::new(x as f64, y as f64) / GRID as f64);
@@ -387,15 +418,14 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
     for y in 0..=GRID {
         for x in 0..=GRID {
             let index = y * stride + x;
-            let normal = if spacing >= 8.0 && x > 0 && x < GRID && y > 0 && y < GRID {
-                // At coarse LODs, use the geometry's existing height samples.
+            let normal = if x > 0 && x < GRID && y > 0 && y < GRID {
+                // Reuse the mesh samples, including geometry at meter scales.
                 let position = |i| Vec3::from_array(positions[i]);
                 let dx = position(index + 1) - position(index - 1);
                 let dy = position(index + stride) - position(index - stride);
                 dy.cross(dx).normalize()
             } else {
                 // Edge normals remain identical between same-level tiles.
-                // An 8 m footprint keeps fine mesh shading stable.
                 let up = tile.direction(DVec2::new(x as f64, y as f64) / GRID as f64);
                 ground_normal(up, f64::from(locations[index][3]), normal_step, heights).as_vec3()
             };
@@ -419,7 +449,7 @@ fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights) -> Mesh {
         .chain((0..GRID).map(|y| (GRID - y) * stride))
         .collect();
     let skirt_start = positions.len() as u16;
-    let depth = (RADIUS * tile.unit() / GRID as f64 * 0.46).max(0.5);
+    let depth = spacing.max(1.25);
     for (i, &a) in edge.iter().enumerate() {
         let next = (i + 1) % edge.len();
         let b = edge[next] as u16;
@@ -470,7 +500,7 @@ mod tests {
 
     #[test]
     fn adjacent_tiles_share_exact_radial_border_directions() {
-        for level in [4_u8, 11, 18] {
+        for level in [4_u8, 11, MAX_LEVEL] {
             let left = Tile {
                 face: 2,
                 level,
@@ -505,8 +535,77 @@ mod tests {
             assert_eq!(center, top_right.direction(DVec2::Y));
             assert_eq!(center, bottom_left.direction(DVec2::X));
             assert_eq!(center, bottom_right.direction(DVec2::ZERO));
-            assert!(root.error(center * (4.0 * RADIUS), center * RADIUS) < SPLIT_ERROR);
-            assert!(root.error(center * (RADIUS + 2.2), center * RADIUS) > SPLIT_ERROR);
+            let view = |altitude| LodView {
+                eye: center * (RADIUS + altitude),
+                surface: center * RADIUS,
+                altitude,
+            };
+            assert!(root.error(view(3.0 * RADIUS), center * RADIUS) < SPLIT_ERROR);
+            assert!(root.error(view(2.2), center * RADIUS) > SPLIT_ERROR);
         }
+    }
+
+    #[test]
+    fn near_ground_tiles_refine_even_with_a_large_center_height_offset() {
+        let tile = Tile {
+            level: MAX_LEVEL - 1,
+            ..Tile::root(2)
+        };
+        let up = tile.direction(DVec2::splat(0.5));
+        let anchor = up * (RADIUS + 500.0);
+        let view = LodView {
+            eye: up * (RADIUS + 432.2),
+            surface: up * RADIUS,
+            altitude: 2.2,
+        };
+        assert!(tile.error(view, anchor) > SPLIT_ERROR);
+        let orbit = LodView {
+            eye: up * (RADIUS + 10_000.0),
+            altitude: 9_600.0,
+            ..view
+        };
+        assert!(tile.error(orbit, anchor) < MERGE_ERROR);
+        let finest = tile.children()[0];
+        let a = finest.direction(DVec2::ZERO);
+        let b = finest.direction(DVec2::X / GRID as f64);
+        assert!(RADIUS * a.distance(b) < 1.25);
+    }
+
+    #[test]
+    fn finest_coastal_mesh_contains_shared_sub_texel_relief() {
+        use bevy::mesh::VertexAttributeValues;
+        use world_core::coordinates::{surface_uv, terrain_aligned_direction};
+
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let heights = SurfaceHeights::load(&assets);
+        let up = terrain_aligned_direction(DVec3::new(-0.97685, 0.21339, 0.01513));
+        let (face, uv) = surface_uv(up);
+        let cells = (uv * f64::from(1_u32 << MAX_LEVEL)).as_uvec2();
+        let tile = Tile {
+            face,
+            level: MAX_LEVEL,
+            x: cells.x,
+            y: cells.y,
+        };
+        let mesh = PreparedTile::build(tile, &heights);
+        let VertexAttributeValues::Float32x3(positions) =
+            mesh.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!("expected three-dimensional terrain vertices");
+        };
+        let mut relief: f64 = 0.0;
+        let first = (mesh.anchor + Vec3::from_array(positions[0]).as_dvec3()).length();
+        for y in 0..=GRID {
+            for x in 0..=GRID {
+                let local = DVec2::new(x as f64, y as f64) / GRID as f64;
+                let up = tile.direction(local);
+                let actual =
+                    mesh.anchor + Vec3::from_array(positions[y * (GRID + 1) + x]).as_dvec3();
+                let ground = heights.sample(up).unwrap();
+                assert!(actual.distance(up * (RADIUS + ground)) < 1e-5);
+                relief = relief.max((actual.length() - first).abs());
+            }
+        }
+        assert!(relief > 0.10, "finest mesh relief is only {relief} m");
     }
 }

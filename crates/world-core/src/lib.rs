@@ -6,7 +6,7 @@ pub mod planet;
 
 mod heights;
 mod terrain_detail;
-pub use heights::SurfaceHeights;
+pub use heights::{LocalPool, SurfaceHeights};
 
 #[cfg(feature = "runtime")]
 pub mod runtime;
