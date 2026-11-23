@@ -223,18 +223,15 @@ impl Plugin for ProceduralForestPlugin {
         .init_resource::<streaming::ForestStream>()
         .init_resource::<lod::FadeMaterials>()
         .init_resource::<debug::LodDiagnostics>()
-        .init_resource::<ground_cover::GroundCover>()
         .add_systems(
             Startup,
             (
                 build_models,
                 hero_oak::request_assets,
                 tree_assets::request_assets,
-                ground_cover::build_material,
                 debug::spawn,
             ),
         )
-        .add_systems(Update, ground_cover::stream.after(WorldMovement))
         .add_systems(
             Update,
             (
@@ -252,6 +249,7 @@ impl Plugin for ProceduralForestPlugin {
                 .after(VisibilitySystems::UpdateFrusta)
                 .before(VisibilitySystems::VisibilityPropagate),
         );
+        ground_cover::install(app);
         canopy::install(app);
     }
 }
@@ -426,12 +424,14 @@ fn select_species(
     let temp = (1.07 - 0.78 * latitude - (height.max(0.0) as f32) / 16_000.0
         + 0.13 * noise3(dir * 4.1 + Vec3::new(3.2, 18.6, -8.4)))
     .clamp(0.0, 1.0);
-    // Smooth, spatially coherent groves, not isolated dice-roll trees.
-    // The broad noise varies on a scale of a few hundred metres and makes
-    // forest clearings and densely packed stands.
-    let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
-    let density = (0.82 + grove * 0.90).clamp(0.25, 1.0);
+    let density = grove_density(dir);
     species_for_climate(latitude, temp, moisture, height, density, random, coastal)
+}
+
+// A 260 m grove field shared by tree placement and understory habitat.
+fn grove_density(dir: Vec3) -> f32 {
+    let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
+    (0.82 + grove * 0.90).clamp(0.25, 1.0)
 }
 
 fn species_for_climate(
@@ -494,7 +494,7 @@ impl Random {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,

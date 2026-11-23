@@ -36,8 +36,8 @@ impostor transition distances.
   camera-facing cutout per tree into a chunk. The parent forest batch aggregates
   the same cutouts from multiple child chunks into one draw. It uses the same
   tree roots and silhouettes during the handoff.
-- `ground_cover` preloads grass and plant patches beyond their dithered
-  display range and fades them in after loading.
+- `ground_cover` preloads plant patches beyond their dithered display range
+  and batches both LODs in the planet's floating-origin grid.
 
 All tree tiers use the same screen-space dither pattern. Their coverage
 intervals meet at the same thresholds and give each shared pixel to one tier. The coarse parent fades away behind
@@ -128,6 +128,30 @@ needs one render entity, with a second only during mesh-to-mesh blending.
 The distant layer uses one small mesh per occupied chunk with no fern
 entities in that layer. Both layers use Bevy's frustum culling. F8 shows
 fern asset status, per-LOD counts, blends, card batches, and queued chunks.
+
+## Procedural ground plants
+
+Ground cover streams 40 species with three seeded shapes per species. Each
+physical patch seeds several clumps, with a dominant species and companion
+species drawn from the same habitat. Temperature follows latitude and
+elevation. Moisture combines the regional climate with local damp pockets,
+river and lake coverage, and coastal influence. The existing canopy climate and
+local grove density favor ferns and shrubs in shaded woodland, while open meadows
+favor grasses and flowers. Wet areas favor moisture-tolerant plants. Salt-
+tolerant species stay in coastal lowlands. Individual roots are checked against
+the terrain slope, sea-surface elevation, river and lake coverage, and the
+species' elevation limit.
+
+Workers build both LODs from the same placements. Each patch uses one mesh
+and one shared foliage material, with a second mesh during dither transitions.
+Compact plants use up to 128 triangles each. Up to eight nearby patches can
+hold a detailed mesh, each capped at 9,600 triangles including background grass.
+Detail enters at 17 m and leaves at 22 m from the patch center. Compact cover
+fades across 44–62 m. Per-frame uploads are capped at two compact patches and
+one detailed patch. Legacy grass and gravel fill gaps between clumps.
+
+The five runtime GLBs contain the generated meshes used by the streamer.
+See the [plant library rebuild command and source catalog](../../tools/PROCEDURAL_PLANTS.md).
 
 ## Validation
 
