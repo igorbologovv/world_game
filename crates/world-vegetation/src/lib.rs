@@ -3,6 +3,7 @@
 
 mod forest;
 
+pub use forest::canopy::bake_planet_canopy;
 pub use forest::{
     CoconutPalm, FernSettings, ForestClearing, ProceduralForestPlugin, VegetationSettings,
 };

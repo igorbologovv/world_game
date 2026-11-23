@@ -259,3 +259,5 @@ fn palm_build_uses_its_checkout_assets_when_launched_from_an_older_directory() {
     let override_assets = prefer_checkout_palm_assets(older.clone(), &checkout, true);
     assert_eq!(override_assets.directory(), older.directory());
 }
+
+mod forest_render;

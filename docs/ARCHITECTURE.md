@@ -81,15 +81,14 @@ The generator builds without the Bevy renderer or the path crate.
   runtime direction. The river mask is queried from the same service.
   Generation uses the legacy scalar source mapping to preserve exact output.
 - **Forest canopy.** Vegetation publishes `world_core::canopy::ForestCanopy`
-  for the terrain material. Near the forest handoff, the atlas accumulates
-  crown area and species color from complete tree patches. Broader layers
-  estimate coverage from stratified subsets of the same candidates. Six
-  cube faces provide coverage outside the camera-centered layers. Workers
-  generate at most three layers concurrently, and terrain samples the shared
-  atlas independently of chunk size. The finest layer also rasterizes each
-  tree's crown relief and tint into one mipmapped shading texture. Directional
-  lighting and broader grove detail modulate crown color under the existing
-  coverage mask. F9 shows crown coverage and color.
+  for the terrain material. A versioned offline bake samples canonical tree
+  patches to produce six 1024² cube faces. A background worker prepares their
+  mip chain and the renderer stages at most 1 MiB of orbital texture per
+  frame. Camera-centered layers supplement the cubemap at finer resolutions.
+  Near the impostor handoff, full tree patches supply species-specific crown
+  silhouettes and relief. Terrain blends these by screen footprint and
+  distance, independently of terrain chunk size. See the
+  [canopy bake and camera sweep](../crates/world-vegetation/README.md#orbital-canopy).
 - **Startup.** The client disables Bevy's `TransformPlugin` before installing
   `WorldSpacePlugin`. In `Startup`, `WorldReady` publishes the planet's root
   frame and read-only `SurfaceHeights`. Player and water startup systems run

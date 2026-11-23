@@ -153,3 +153,44 @@ measure the software renderer on this route.
 Wider forest coverage came with higher mean and P95 frame times on this run.
 The worst measured frame fell by 65%. Native GPU performance requires a
 separate measurement.
+
+## Orbital canopy
+
+The terrain samples a 1024 × 1024 cubemap per face with eleven mip levels.
+Each texel estimates foliage cover and color from stratified groups of the
+same tree candidates used for impostors and meshes. The bake uses the shared
+terrain, hydrology, slope, climate and biome checks. The cubemap filters
+across face boundaries and averages linear, premultiplied color and coverage
+over the texel solid angles. Camera-centered layers resolve finer stands and
+crowns for the impostor handoff. F9 cycles the coverage and color diagnostics.
+
+The default world ships its own bake at `assets/world/planet-canopy-v1.gz`.
+Regenerate it after changing the terrain inputs or the canopy sampling
+algorithm. When tree placement, terrain sampling, or the bake changes, bump
+the bake version and regenerate the packaged file.
+
+```sh
+cargo run --locked -p world-vegetation --example bake_canopy -- assets
+```
+
+The baker also accepts an optional output file. It hashes the source height
+faces, river atlas, and lake masks to detect stale bakes. The runtime loads and
+filters a matching packaged bake on a background thread. Custom worlds use
+the per-user cache under `$XDG_CACHE_HOME/world-client/canopy` or
+`~/.cache/world-client/canopy` on Linux. On a cache miss, a 64 × 64 preview
+arrives first and the background worker builds and caches the full atlas.
+The client uploads at most 1 MiB of orbital canopy per frame and only exposes
+complete levels. The full GPU cubemap occupies 32 MiB. Crown relief is
+generated from tree dimensions and species, so the bake requires no external
+textures.
+
+Run the camera sweep with a Vulkan-capable adapter. It captures the same
+coastal ground, inland handoff, 24 km aerial, and 1,450 km orbital views and
+prints median and 95th-percentile synchronized frame times.
+
+```sh
+WGPU_BACKEND=vulkan cargo test --locked -p world-client forest_altitude_sweep -- --ignored --nocapture
+```
+
+Screenshots are written to `target/forest-sweep`. Set `FOREST_CAPTURE_DIR`
+to keep different runs separate.

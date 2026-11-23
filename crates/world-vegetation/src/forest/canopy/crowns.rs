@@ -8,25 +8,23 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use crate::forest::{placement::Site, proxy::half_width};
+use crate::forest::{placement::Site, proxy::half_width, Species};
 
 const SIDE: usize = 1024;
 const MIP_TEXELS: usize = (SIDE * SIDE * 4 - 1) / 3;
 const HEIGHT_RANGE: f32 = 40.0;
 
 pub(super) fn image() -> Image {
-    let mut result = Image::new_fill(
+    let mut result = Image::new_uninit(
         Extent3d {
             width: SIDE as u32,
             height: SIDE as u32,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 4],
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::default(),
     );
-    result.data = Some(vec![0; MIP_TEXELS * 4]);
     result.texture_descriptor.mip_level_count = SIDE.ilog2() + 1;
     let mut sampler = ImageSamplerDescriptor::linear();
     sampler.set_anisotropic_filter(8);
@@ -65,7 +63,16 @@ impl CrownRaster {
         let leaf_tone = (site.yaw * 2.73).sin() * 0.32 + 0.5;
         let leaf = site.species.colors().1;
         let warmth = (0.48 + (leaf[0] - leaf[2]) * 1.7 + (site.scale - 1.0) * 0.53).clamp(0.0, 1.0);
-        let aspect = 0.75 + 0.22 * leaf_tone;
+        // Broadleaf domes, flatter acacia crowns, conical pine tops and fanned palms
+        // use different outlines and height profiles at the same canonical positions.
+        let (aspect, lobes, serration, shoulder) = match site.species {
+            Species::Oak => (0.85, 0.20, 0.08, 0.57),
+            Species::Pine => (0.93, 0.06, 0.10, 0.37),
+            Species::Acacia => (0.72, 0.18, 0.06, 0.78),
+            Species::Jungle => (0.87, 0.21, 0.11, 0.58),
+            Species::Palm => (0.88, 0.09, 0.22, 0.65),
+        };
+        let aspect = aspect + 0.16 * (leaf_tone - 0.5);
         for y in lo.y..=hi.y {
             for x in lo.x..=hi.x {
                 let offset = (Vec2::new(x as f32, y as f32) - center) / radius;
@@ -77,14 +84,20 @@ impl CrownRaster {
                 let cos3 = radial.x * (4.0 * radial.x * radial.x - 3.0);
                 let y2 = radial.y * radial.y;
                 let sin5 = radial.y * ((16.0 * y2 - 20.0) * y2 + 5.0);
-                let outline = 1.0 + 0.17 * cos3 + 0.095 * sin5;
+                let outline = 1.0 + lobes * cos3 + serration * sin5;
                 let alpha = (0.5 + (outline - distance) * radius).clamp(0.0, 1.0);
                 if alpha < 0.008 {
                     continue;
                 }
-                let dome = (1.0 - (distance / outline).powi(2)).max(0.0).sqrt();
+                let radial_fraction = distance / outline;
+                let dome = if site.species == Species::Pine {
+                    (1.0 - radial_fraction).max(0.0)
+                } else {
+                    (1.0 - radial_fraction.powi(2)).max(0.0).sqrt()
+                };
                 let folds = (0.038 * cos3 + 0.026 * sin5) * distance.min(1.0);
-                let top = (height / HEIGHT_RANGE * (0.59 + 0.41 * dome + folds)).min(1.0);
+                let top =
+                    (height / HEIGHT_RANGE * (shoulder + (1.0 - shoulder) * dome + folds)).min(1.0);
                 let target = &mut self.pixels[y as usize * SIDE + x as usize];
                 let occupied_height = quantize(top * alpha);
                 if occupied_height > target[1] {
@@ -141,7 +154,6 @@ fn mip_chain(mut pixels: Vec<[u8; 4]>, mut side: usize) -> Vec<[u8; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forest::Species;
     use bevy::math::DVec3;
 
     #[test]

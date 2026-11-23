@@ -7060,6 +7060,8 @@ name = "world-vegetation"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "blake3",
+ "flate2",
  "noise",
  "world-core",
  "world-regions",
