@@ -79,7 +79,7 @@ fn forest_altitude_sweep() {
         0.43327880263186114,
     );
     for (label, up, height, tilt, warmup) in [
-        ("ground", coast, 2.2, 0.025, 75),
+        ("ground", coast, 2.2, 0.025, 220),
         ("handoff", woodland, 1_700.0, 0.78, 75),
         ("aerial", woodland, 24_000.0, 0.87, 65),
         ("orbit", woodland, 1_450_000.0, 1.0, 90),
