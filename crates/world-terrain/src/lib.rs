@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! Adaptive spherical terrain rendering and its lighting and atmosphere.
 
+mod clouds;
 mod terrain_surface;
 
 use bevy::{
@@ -22,7 +23,7 @@ use world_core::{
     runtime::{PlanetRoot, WorldMovement, WorldReady},
 };
 
-/// Register terrain materials, chunk streaming, lighting, and atmospheric fog.
+/// Register terrain materials, chunk streaming, lighting, atmosphere, and clouds.
 ///
 /// Install with the shared world space plugin. Streaming reads a camera marked
 /// with [`WorldCamera`](world_core::runtime::WorldCamera).
@@ -30,6 +31,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
+        clouds::install(app);
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, setup.after(WorldReady))
@@ -39,6 +41,8 @@ impl Plugin for TerrainPlugin {
         .add_systems(Update, terrain_surface::stream.after(WorldMovement));
     }
 }
+
+const SUN_DIRECTION: Vec3 = Vec3::new(-0.78, 0.60, -0.18);
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 struct TerrainMaterial {
@@ -254,7 +258,7 @@ fn setup(
 
     // Sun direction in the planet reference frame: afternoon/daylight at the
     // starter region, with an oblique angle to show terrain and tree relief.
-    let sun_direction = Vec3::new(-0.78, 0.60, -0.18).normalize();
+    let sun_direction = SUN_DIRECTION.normalize();
     commands.spawn((
         DirectionalLight {
             // Raw sunlight is attenuated by the atmosphere during rendering.

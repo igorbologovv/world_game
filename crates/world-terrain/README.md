@@ -43,3 +43,12 @@ one-meter vertex spacing at its finest level. The water plugin streams pools
 in nearby wetland depressions where the sampled ground forms a closed rim.
 Pools use the same terrain heights for their shoreline and are shallow enough
 to walk through.
+
+## Clouds
+
+The terrain plugin renders drifting cumulus between 1,650 and 3,850 meters
+above the reference sphere. A generated 3D noise texture shapes the cloud
+fields in planet coordinates, so they stay in place across floating origin
+shifts. The shader samples cloud density along each view ray and toward the
+terrain sun, giving the same clouds shaded undersides from the surface and
+lit tops from orbit.
