@@ -66,6 +66,9 @@ struct TerrainMaterial {
     #[texture(11)]
     #[sampler(12)]
     crown_detail: Option<Handle<Image>>,
+    #[texture(13, dimension = "cube")]
+    #[sampler(14)]
+    globe_canopy: Option<Handle<Image>>,
 }
 
 impl TerrainMaterial {
@@ -98,6 +101,7 @@ impl TerrainMaterial {
             canopy_atlas: None,
             canopy_layout: CanopyLayout::default(),
             crown_detail: None,
+            globe_canopy: None,
         }
     }
 }
@@ -114,6 +118,7 @@ fn update_canopy(
         if let Some(mut material) = materials.get_mut(&terrain.material) {
             material.canopy_atlas = Some(canopy.atlas.clone());
             material.crown_detail = Some(canopy.crowns.clone());
+            material.globe_canopy = Some(canopy.globe.clone());
             material.canopy_layout = canopy.layout;
         }
     }

@@ -1,5 +1,5 @@
 //! Shared vegetation models, material integration, and biome placement rules.
-mod canopy;
+pub(crate) mod canopy;
 mod debug;
 mod fern;
 mod ground_cover;

@@ -1,6 +1,10 @@
 //! Bounded canopy atlas made from the same sites as the detailed forest.
 
+mod bake;
 mod crowns;
+mod globe;
+
+pub use bake::bake_planet_canopy;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -14,9 +18,8 @@ use bevy::{
 };
 use world_core::{
     canopy::{CanopyCascade, CanopyLayout, ForestCanopy, CANOPY_CASCADES, CANOPY_SIDE},
-    coordinates::cube_direction,
     planet::RADIUS,
-    runtime::{GridTransform, ReferenceFrames, WorldCamera},
+    runtime::{GridTransform, ReferenceFrames, WorldAssets, WorldCamera, WorldReady},
     SurfaceHeights,
 };
 
@@ -31,7 +34,7 @@ use crowns::CrownRaster;
 
 const SIDE: usize = CANOPY_SIDE as usize;
 const TEXELS: usize = SIDE * SIDE;
-const LAYERS: usize = CANOPY_CASCADES + 6;
+const LAYERS: usize = CANOPY_CASCADES;
 const HALF_WIDTHS: [f64; CANOPY_CASCADES] =
     [2_900.0, 8_700.0, 26_100.0, 78_300.0, 234_900.0, 704_700.0];
 const PRIORITY: [usize; CANOPY_CASCADES] = [0, 2, 4, 1, 3, 5];
@@ -39,14 +42,14 @@ const MAX_JOBS: usize = 3;
 
 #[derive(Resource, Default)]
 struct AtlasStream {
+    renderer: bool,
     jobs: [Option<Task<Layer>>; LAYERS],
     centers: [Option<DVec3>; CANOPY_CASCADES],
-    global: u8,
 }
 
 struct Layer {
     bytes: Vec<u8>,
-    frame: Option<Frame>,
+    frame: Frame,
     crowns: Option<Vec<u8>>,
 }
 
@@ -96,12 +99,22 @@ impl Frame {
 }
 
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<AtlasStream>()
-        .add_systems(Startup, create)
-        .add_systems(Update, stream.after(streaming::stream));
+    globe::install(app);
+    app.insert_resource(AtlasStream {
+        renderer: app.get_sub_app(bevy::render::RenderApp).is_some(),
+        ..default()
+    })
+    .add_systems(Startup, create.after(WorldReady))
+    .add_systems(Update, stream.after(streaming::stream));
 }
 
-fn create(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn create(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    heights: Res<SurfaceHeights>,
+    assets: Res<WorldAssets>,
+    stream: Res<AtlasStream>,
+) {
     let mut image = Image::new(
         Extent3d {
             width: CANOPY_SIDE,
@@ -118,11 +131,17 @@ fn create(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         ..default()
     });
     image.sampler = ImageSampler::linear();
+    let globe = globe::Globe::new(&mut images);
+    if stream.renderer {
+        globe.start(&assets, &heights);
+    }
     commands.insert_resource(ForestCanopy {
         atlas: images.add(image),
+        globe: globe.image.clone(),
         crowns: images.add(crowns::image()),
         layout: CanopyLayout::default(),
     });
+    commands.insert_resource(globe);
 }
 
 fn stream(
@@ -135,6 +154,7 @@ fn stream(
     mut stream: ResMut<AtlasStream>,
     mut canopy: ResMut<ForestCanopy>,
     mut images: ResMut<Assets<Image>>,
+    time: Res<Time>,
 ) {
     let Ok((entity, camera)) = cameras.single() else {
         return;
@@ -152,6 +172,24 @@ fn stream(
         canopy.layout.fade.y = fade.y;
     }
 
+    let clearing = clearing.as_deref().copied();
+    let clearing_uniform = clearing.map_or(Vec4::ZERO, |clearing| {
+        clearing
+            .direction
+            .as_vec3()
+            .extend(clearing.radius.abs() as f32)
+    });
+    if canopy.layout.clearing != clearing_uniform {
+        canopy.layout.clearing = clearing_uniform;
+    }
+    for index in 0..LAYERS {
+        let weight = canopy.layout.cascades[index].center.w;
+        if stream.centers[index].is_some() && weight < 1.0 {
+            canopy.layout.cascades[index].center.w =
+                (weight + time.delta_secs().min(0.05) * 4.0).min(1.0);
+        }
+    }
+
     let stream = &mut *stream;
     for (index, job) in stream.jobs.iter_mut().enumerate() {
         let Some(layer) = job.as_mut().and_then(|job| block_on(poll_once(job))) else {
@@ -167,18 +205,18 @@ fn stream(
                 .copy_from_slice(&layer.bytes);
         }
         if let Some(crowns) = layer.crowns {
-            images
-                .get_mut(&canopy.crowns)
-                .expect("canopy retains the crown texture")
-                .data = Some(crowns);
+            // Updating an existing Bevy image in place uploads only its base mip.
+            // Publish a fresh texture and projection together for the full mip chain.
+            let mut image = crowns::image();
+            image.data = Some(crowns);
+            canopy.crowns = images.add(image);
         }
-        if let Some(frame) = layer.frame {
-            canopy.layout.cascades[index] = frame.uniform();
-            stream.centers[index] = Some(frame.up);
-        } else {
-            stream.global |= 1 << (index - CANOPY_CASCADES);
-            canopy.layout.fade.z = f32::from(stream.global);
-        }
+        let weight = canopy.layout.cascades[index].center.w;
+        canopy.layout.cascades[index] = layer.frame.uniform();
+        canopy.layout.cascades[index].center.w = weight;
+        stream.centers[index] = Some(layer.frame.up);
+        // Publish at most one completed local layer per frame.
+        break;
     }
 
     let mut budget = MAX_JOBS - stream.jobs.iter().flatten().count();
@@ -186,11 +224,13 @@ fn stream(
         return;
     }
     let pool = AsyncComputeTaskPool::get();
-    let clearing = clearing.as_deref().copied();
     let overground = eye.length() - RADIUS - heights.sample(up).unwrap_or(0.0);
+    let finest_globe_resident = canopy.layout.fade.z == 0.0 && canopy.layout.fade.w == 1.0;
     for index in PRIORITY {
         let width = HALF_WIDTHS[index];
-        if stream.jobs[index].is_some()
+        // The largest projection is coarser than every native cubemap face.
+        if (index == LAYERS - 1 && finest_globe_resident)
+            || stream.jobs[index].is_some()
             || overground > width * 0.9
             || stream.centers[index]
                 .is_some_and(|center| center.distance(up) * RADIUS < width * 0.24)
@@ -211,31 +251,13 @@ fn stream(
             };
             Layer {
                 bytes,
-                frame: Some(frame),
+                frame,
                 crowns,
             }
         }));
         budget -= 1;
         if budget == 0 {
             return;
-        }
-    }
-    for face in 0..6 {
-        let index = CANOPY_CASCADES + face;
-        if stream.global & (1 << face) != 0 || stream.jobs[index].is_some() {
-            continue;
-        }
-        let heights = heights.clone();
-        stream.jobs[index] = Some(pool.spawn(async move {
-            Layer {
-                bytes: coarse_global(face, &heights, clearing),
-                frame: None,
-                crowns: None,
-            }
-        }));
-        budget -= 1;
-        if budget == 0 {
-            break;
         }
     }
 }
@@ -245,7 +267,8 @@ fn stream(
 fn crown(site: Site) -> Vec4 {
     let radius = half_width(site.species, site.variant) * site.height();
     let area = std::f32::consts::PI * radius * radius;
-    let foliage = Vec3::from_array(site.species.colors().1) * 0.46;
+    let foliage =
+        Vec3::from_array(site.species.colors().1) * (0.46 + 0.045 * (site.yaw * 2.73).sin());
     foliage.extend(1.0) * area
 }
 
@@ -330,19 +353,6 @@ fn coarse_local(
 ) -> Vec<u8> {
     raster_coarse(heights, clearing, frame.meters_per_texel(), |pixel| {
         frame.direction((pixel + 0.5) * (2.0 / f64::from(CANOPY_SIDE)) - 1.0)
-    })
-}
-
-fn coarse_global(
-    face: usize,
-    heights: &SurfaceHeights,
-    clearing: Option<ForestClearing>,
-) -> Vec<u8> {
-    let steps = f64::from(CANOPY_SIDE - 1);
-    // Edge texels lie on the exact same directions across faces. The sampling
-    // offsets also depend on the direction, so both sides produce the same data.
-    raster_coarse(heights, clearing, 1.65 * RADIUS / steps, |pixel| {
-        cube_direction(face, pixel / steps)
     })
 }
 

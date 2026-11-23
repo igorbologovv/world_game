@@ -34,6 +34,7 @@ const CANOPY_CASCADES = 6u;
 struct CanopyLayout {
     cascades: array<CanopyCascade, CANOPY_CASCADES>,
     fade: vec4<f32>,
+    clearing: vec4<f32>,
 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(10)
 var<uniform> canopy_layout: CanopyLayout;
@@ -41,6 +42,10 @@ var<uniform> canopy_layout: CanopyLayout;
 var crown_detail: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(12)
 var crown_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(13)
+var globe_canopy: texture_cube<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(14)
+var globe_sampler: sampler;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -167,53 +172,36 @@ fn biome_surface(
     );
 }
 
-// Inverse of world_core::coordinates::cube_direction, for the atlas fallback
-// over the hemisphere and at altitudes beyond the local tangent projections.
-fn global_canopy(direction: vec3<f32>) -> vec4<f32> {
-    let magnitude = abs(direction);
-    var face: u32;
-    var plane: vec2<f32>;
-    if magnitude.x > magnitude.y && magnitude.x > magnitude.z {
-        if direction.x < 0.0 {
-            face = 0u;
-            plane = vec2<f32>(direction.z, -direction.y) / magnitude.x;
-        } else {
-            face = 3u;
-            plane = vec2<f32>(-direction.y, direction.z) / magnitude.x;
-        }
-    } else if magnitude.z > magnitude.y {
-        if direction.z > 0.0 {
-            face = 1u;
-            plane = vec2<f32>(direction.x, -direction.y) / magnitude.z;
-        } else {
-            face = 4u;
-            plane = vec2<f32>(-direction.y, direction.x) / magnitude.z;
-        }
-    } else if direction.y > 0.0 {
-        face = 2u;
-        plane = vec2<f32>(direction.x, direction.z) / magnitude.y;
-    } else {
-        face = 5u;
-        plane = vec2<f32>(direction.z, direction.x) / magnitude.y;
-    }
-    if (u32(canopy_layout.fade.z) & (1u << face)) == 0u {
+fn global_canopy(direction: vec3<f32>, footprint: f32, texel_meters: f32) -> vec4<f32> {
+    if canopy_layout.fade.w == 0.0 {
         return vec4<f32>(0.0);
     }
-    let correction = 0.87 * 0.87;
-    let square = plane * sqrt((1.0 + correction) / (vec2<f32>(1.0) + correction * plane * plane));
-    let uv = square * 0.5 + 0.5;
-    let side = f32(textureDimensions(canopy_atlas).x);
-    let padded = (uv * (side - 1.0) + 0.5) / side;
-    return textureSampleLevel(canopy_atlas, canopy_sampler, padded, i32(CANOPY_CASCADES + face), 0.0);
+    let lod = max(canopy_layout.fade.z, log2(max(footprint / texel_meters, 1.0)));
+    let clearing = canopy_layout.clearing;
+    var coverage = canopy_layout.fade.w;
+    let resolved_texel = texel_meters * exp2(lod);
+    if clearing.w > 0.2 * resolved_texel {
+        let distance_to_clearing = distance(direction, clearing.xyz) * planet_radius;
+        let edge = resolved_texel * 0.5;
+        coverage *= smoothstep(clearing.w - edge, clearing.w + edge, distance_to_clearing);
+    }
+    return textureSampleLevel(globe_canopy, globe_sampler, direction, lod) * coverage;
 }
 
 fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
+    let axis = max(abs(direction.x), max(abs(direction.y), abs(direction.z)));
+    // Account for the shrinking solid angle of a cube texel toward the face edges.
+    let globe_texel = 2.0 * planet_radius * axis * axis / f32(textureDimensions(globe_canopy).x);
+    let resident_texel = globe_texel * exp2(canopy_layout.fade.z);
     var result = vec4<f32>(0.0);
     var remaining = 1.0;
     for (var level = 0u; level < CANOPY_CASCADES; level++) {
         let layer = canopy_layout.cascades[level];
+        if layer.center.w == 0.0 || footprint >= 2.7 * layer.north.w {
+            continue;
+        }
         let cosine = dot(layer.center.xyz, direction);
-        if layer.center.w == 0.0 || cosine <= 0.0 {
+        if cosine <= 0.0 {
             continue;
         }
         let square = vec2<f32>(dot(layer.east.xyz, direction), dot(layer.north.xyz, direction))
@@ -221,7 +209,10 @@ fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
         let edge = max(abs(square.x), abs(square.y));
         let spatial = 1.0 - smoothstep(0.77, 0.99, edge);
         let footprint_blend = 1.0 - smoothstep(0.85, 2.7, footprint / layer.north.w);
-        let weight = spatial * footprint_blend;
+        // Keep the coarsest local projections available as a fallback while the
+        // global texture streams in. Afterwards prefer whichever resolves more terrain.
+        let finer = 1.0 - canopy_layout.fade.w * smoothstep(1.0, 1.9, layer.north.w / resident_texel);
+        let weight = spatial * footprint_blend * layer.center.w * finer;
         if weight > 0.0 {
             let uv = square * 0.5 + 0.5;
             let data = textureSampleLevel(canopy_atlas, canopy_sampler, uv, i32(level), 0.0);
@@ -232,14 +223,14 @@ fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
             }
         }
     }
-    return result + remaining * global_canopy(direction);
+    return result + remaining * global_canopy(direction, footprint, globe_texel);
 }
 
-fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f32>) -> vec4<f32> {
     let layer = canopy_layout.cascades[0];
     let cosine = dot(layer.center.xyz, direction);
     if layer.center.w == 0.0 || cosine <= 0.0 {
-        return vec3<f32>(1.0);
+        return vec4<f32>(1.0);
     }
     let square = vec2<f32>(dot(direction, layer.east.xyz), dot(direction, layer.north.xyz))
         / (layer.east.w * cosine);
@@ -251,9 +242,9 @@ fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f
     let pixel_dy = length(dy);
     let footprint = max(sqrt(pixel_dx * pixel_dy), max(pixel_dx, pixel_dy) / 6.0);
     let strength = (1.0 - smoothstep(0.74, 0.96, edge))
-        * (1.0 - smoothstep(1.2, 4.6, footprint / meters_per_texel));
+        * (1.0 - smoothstep(1.2, 4.6, footprint / meters_per_texel)) * layer.center.w;
     if strength <= 0.0 {
-        return vec3<f32>(1.0);
+        return vec4<f32>(1.0);
     }
 
     let uv = square * 0.5 + 0.5;
@@ -266,9 +257,10 @@ fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f
     let uv_dy = (vec2<f32>(dot(dy, layer.east.xyz), dot(dy, layer.north.xyz))
         - chart_offset * dot(dy, layer.center.xyz)) * scale;
     let crown = textureSampleGrad(crown_detail, crown_sampler, uv, uv_dx, uv_dy);
-    let crown_amount = smoothstep(0.03, 0.76, crown.r);
+    let crown_amount = smoothstep(0.025, 0.76, crown.r);
+    let gaps = mix(1.0, mix(0.26, 1.0, crown_amount), strength);
     if crown_amount <= 0.0 {
-        return vec3<f32>(mix(1.0, 0.57, strength));
+        return vec4<f32>(vec3<f32>(1.0), gaps);
     }
 
     let sun_plane = vec2<f32>(dot(sun, layer.east.xyz), dot(sun, layer.north.xyz));
@@ -293,8 +285,8 @@ fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f
     let shade = light * mix(0.75, 1.26, attributes.y);
     let warmth = attributes.z - 0.5;
     let color = vec3<f32>(1.0 + 0.31 * warmth, 1.0 + 0.09 * warmth, 1.0 - 0.37 * warmth);
-    let grove = mix(vec3<f32>(0.57), color * shade, crown_amount);
-    return mix(vec3<f32>(1.0), grove, strength);
+    let grove = mix(vec3<f32>(0.73), color * shade, crown_amount);
+    return vec4<f32>(mix(vec3<f32>(1.0), grove, strength), gaps);
 }
 
 fn grove_shading(point: vec3<f32>, footprint: f32, sun: vec3<f32>) -> vec3<f32> {
@@ -507,8 +499,8 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     var canopy = vec4<f32>(0.0);
     var canopy_blend = 0.0;
     if canopy_layout.fade.y > 0.0 && (forest_distance > canopy_layout.fade.x || terrain_debug_mode != 0u) {
-        // The geometric mean moderates the long axis of low-angle pixel footprints.
-        canopy = forest_canopy(direction, sqrt(pixel_dx * pixel_dy));
+        // Limit anisotropy near the horizon so distant stands remain stable in motion.
+        canopy = forest_canopy(direction, max(sqrt(pixel_dx * pixel_dy), footprint * 0.35));
         let handoff = smoothstep(canopy_layout.fade.x, canopy_layout.fade.y, forest_distance);
         let soil = 1.0 - clamp(weights[3] + weights[4], 0.0, 1.0);
         let exposed_land = smoothstep(1.1, 3.5, height);
@@ -578,10 +570,18 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         if lights.n_directional_lights > 0u {
             sun = lights.directional_lights[0].direction_to_light;
         }
-        let shade = 0.83 + 0.27 * max(dot(surface_normal, sun), 0.0);
+        // Terrain incidence follows slopes while daylight follows the spherical
+        // horizon. Retain cool indirect light through the terminator.
+        let daylight = smoothstep(-0.12, 0.27, dot(direction, sun));
+        let incidence = max(dot(surface_normal, sun), 0.0);
+        let diffuse = mix(vec3<f32>(0.13, 0.16, 0.21),
+            vec3<f32>(0.79, 0.83, 0.80) + incidence * vec3<f32>(0.34, 0.30, 0.24), daylight);
         let groves = grove_shading(direction * planet_radius, footprint, sun);
+        let landscape = vec3<f32>(1.0 + 0.37 * regional, 1.0 + 0.19 * regional, 1.0 - 0.28 * regional)
+            * (1.0 + 0.52 * patches);
         let crowns = crown_shading(direction, dx, dy, sun);
-        lit = vec4<f32>(mix(lit.rgb, canopy_color * shade * groves * crowns, canopy_blend), lit.a);
+        let forest_color = canopy_color * diffuse * landscape * groves * crowns.rgb;
+        lit = vec4<f32>(mix(lit.rgb, forest_color, canopy_blend * crowns.a), lit.a);
     }
     var final_color = main_pass_post_lighting_processing(pbr_input, lit);
 
