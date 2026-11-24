@@ -130,7 +130,7 @@ fn toggle_canopy_lod_debug(
         return;
     }
     let Some(terrain) = terrain else { return };
-    let Some(material) = materials.get_mut(&terrain.material) else { return };
+    let Some(mut material) = materials.get_mut(&terrain.material) else { return };
     if keyboard.just_pressed(KeyCode::F10) {
         material.canopy_fix_enabled = 1 - material.canopy_fix_enabled;
         info!("Forest canopy handoff [F10]: {}", if material.canopy_fix_enabled != 0 { "improved" } else { "original" });
