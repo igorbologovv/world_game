@@ -24,22 +24,26 @@ use world_core::{
 const DAY: f64 = 86_400.0;
 const YEAR: f64 = 365.25 * DAY;
 const STAR_DISTANCE: f64 = 149.6e9;
+// Planet-fixed +Y at the epoch is the spin axis; all orbit angles are radians.
+const AXIAL_TILT: f64 = 23.5 * PI / 180.0;
 const RATES: [f64; 4] = [1.0, 60.0, 600.0, 3_600.0];
 const MOONS: [MoonOrbit; 2] = [
     MoonOrbit {
         radius: 18.0e6,
         body: 150_000.0,
         period: 4.0 * DAY,
-        tilt: 0.13,
-        phase: 0.1,
+        tilt: 5.0 * PI / 180.0,
+        node: 0.0,
+        phase: -0.1,
         lux: 7600.0,
     },
     MoonOrbit {
         radius: 31.0e6,
         body: 105_000.0,
         period: 11.0 * DAY,
-        tilt: -0.32,
-        phase: 1.65,
+        tilt: 12.0 * PI / 180.0,
+        node: 70.0 * PI / 180.0,
+        phase: -1.65,
         lux: 2000.0,
     },
 ];
@@ -80,14 +84,26 @@ struct MoonOrbit {
     body: f32,
     period: f64,
     tilt: f64,
+    node: f64,
     phase: f64,
     lux: f32,
 }
 
 impl MoonOrbit {
+    fn orbit_tilt(&self) -> DQuat {
+        let normal = ecliptic_normal();
+        let reference = ecliptic_reference();
+        let node = DQuat::from_axis_angle(normal, self.node) * reference;
+        DQuat::from_axis_angle(node, self.tilt)
+    }
+
     fn inertial_position(&self, seconds: f64) -> DVec3 {
-        let (sin, cos) = (angle(seconds, self.period) + self.phase).sin_cos();
-        DQuat::from_rotation_x(self.tilt) * DVec3::new(cos, 0.0, sin) * self.radius
+        // Positive right-handed rotation about the ecliptic normal is
+        // prograde, matching the spin of the planet about +Y.
+        let position = DQuat::from_axis_angle(
+            ecliptic_normal(), angle(seconds, self.period) + self.phase,
+        ) * ecliptic_reference();
+        self.orbit_tilt() * position * self.radius
     }
 }
 
@@ -101,11 +117,28 @@ fn inertial_to_surface(seconds: f64) -> DQuat {
     DQuat::from_rotation_y(-angle(seconds, DAY))
 }
 
+// Preserve the previous sun's horizontal heading at the epoch. Start at
+// northern summer solstice, so its declination is exactly the axial tilt.
+fn solstice_heading() -> DVec3 {
+    DVec3::new(-0.78, 0.0, -0.18).normalize()
+}
+
+fn ecliptic_normal() -> DVec3 {
+    let (sin, cos) = AXIAL_TILT.sin_cos();
+    (DVec3::Y * cos - solstice_heading() * sin).normalize()
+}
+
+// Zero longitude in the orbital plane, chosen near the old moon epoch.
+fn ecliptic_reference() -> DVec3 {
+    let normal = ecliptic_normal();
+    (DVec3::X - normal * normal.dot(DVec3::X)).normalize()
+}
+
 fn star_direction(seconds: f64) -> DVec3 {
-    let initial = DVec3::new(-0.78, 0.60, -0.18).normalize();
-    let orbit_normal = DVec3::Z.cross(initial).normalize();
+    let (sin, cos) = AXIAL_TILT.sin_cos();
+    let initial = solstice_heading() * cos + DVec3::Y * sin;
     let star_to_planet =
-        DQuat::from_axis_angle(orbit_normal, angle(seconds, YEAR)) * (-initial * STAR_DISTANCE);
+        DQuat::from_axis_angle(ecliptic_normal(), angle(seconds, YEAR)) * (-initial * STAR_DISTANCE);
     -star_to_planet.normalize()
 }
 
@@ -378,6 +411,32 @@ mod tests {
         assert!(star_direction(t).dot(star_direction(t + YEAR * 0.5)) < -0.999);
         let direction = inertial_to_surface(t) * DVec3::X;
         assert!(direction.dot(inertial_to_surface(t + DAY * 0.5) * DVec3::X) < -0.999);
+    }
+
+    #[test]
+    fn axial_tilt_controls_seasons_and_moons_are_prograde() {
+        let normal = ecliptic_normal();
+        assert!((normal.dot(DVec3::Y).acos() - AXIAL_TILT).abs() < 1e-12);
+        for (fraction, declination) in [
+            (0.0, AXIAL_TILT),
+            (0.25, 0.0),
+            (0.5, -AXIAL_TILT),
+            (0.75, 0.0),
+        ] {
+            let sun = star_direction(YEAR * fraction);
+            assert!(normal.dot(sun).abs() < 1e-12);
+            assert!((sun.y.asin() - declination).abs() < 1e-12);
+        }
+        for moon in &MOONS {
+            // Recover the normal from motion rather than trusting the
+            // configured tilt or the implementation's rotation sign.
+            let p = moon.inertial_position(0.0).normalize();
+            let q = moon.inertial_position(moon.period / 4.0).normalize();
+            let orbit_normal = p.cross(q).normalize();
+            assert!((orbit_normal.dot(normal).clamp(-1.0, 1.0).acos() - moon.tilt).abs() < 1e-12);
+            assert!(orbit_normal.dot(DVec3::Y) > 0.0);
+            assert!(orbit_normal.dot(normal) > 0.0);
+        }
     }
 
     #[test]

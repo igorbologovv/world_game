@@ -114,9 +114,14 @@ The reference is commit `9e4e290`. The mean gives each matched pose equal weight
 The clock starts at 1× in daylight at Palm Coast and runs independently
 of player movement and weather animation.
 
-The planet spins every 24 hours and follows a circular 365.25-day orbit.
-The two moons follow independent inclined circular orbits with periods of
-4 and 11 days. Positions are evaluated analytically in double precision.
+The planet spins every 24 hours (sidereal rotation) and follows a circular
+365.25-day orbit. Its axis is tilted 23.5 degrees from the orbital normal,
+producing seasonal changes in solar declination. The epoch is northern
+summer solstice. The two moons follow independent prograde circular orbits
+with periods of 4 and 11 days and inclinations of 5 and 12 degrees relative
+to the planet's orbital plane. The second orbit has a different line of
+nodes. Positions are evaluated analytically in double precision. These
+are prescribed orbits, not a gravitational stability simulation.
 The gameplay grid stays planet-fixed. The sky rotates into that frame, and
 moon meshes use the same floating-origin grid as the camera.
 
