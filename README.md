@@ -19,8 +19,10 @@ zooms in at the destination. Dry ground lands the explorer, and ocean or river
 targets put the explorer in flight above the surface. A plain click starts
 normal travel.
 
-Run the client from this worktree. If you set `CARGO_TARGET_DIR` manually,
-give each worktree its own target directory so its binary matches its assets.
+Use `cargo run` to launch Linux development builds with their shared Bevy
+library. Give each worktree its own `CARGO_TARGET_DIR` if you set it manually.
+The client uses assets packaged beside the executable or assets from the
+checkout that built it. Set `BEVY_ASSET_ROOT` to override the asset source.
 
 Keep `bevy_terrain` beside this checkout. Run
 `cargo run --locked -p world-generator` to regenerate assets in the current

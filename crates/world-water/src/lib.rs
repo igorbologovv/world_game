@@ -6,6 +6,7 @@ mod river_surface;
 mod wetlands;
 
 use bevy::{
+    asset::AssetEventSystems,
     gizmos::config::GizmoConfig,
     gizmos::config::GizmoLineConfig,
     light::NotShadowCaster,
@@ -53,6 +54,12 @@ impl Plugin for WaterPlugin {
         )
         .add_systems(
             PostUpdate,
+            ocean::sync_material
+                .after(TransformSystems::Propagate)
+                .before(AssetEventSystems),
+        )
+        .add_systems(
+            PostUpdate,
             river_surface::draw_map.after(TransformSystems::Propagate),
         );
     }
@@ -64,7 +71,7 @@ type OceanPatches = IntoIter<(Mesh, ocean::OceanPatch)>;
 struct WaterLoading {
     rivers: Option<Task<Option<(Mesh, river_surface::RiverCenterlines)>>>,
     lakes: Option<Task<Option<Mesh>>>,
-    ocean: Option<Task<Option<(Image, Vec<(Mesh, ocean::OceanPatch)>)>>>,
+    ocean: Option<Task<Option<ocean::OceanSurface>>>,
     patches: Option<(Handle<ocean::OceanMaterial>, OceanPatches)>,
 }
 
@@ -137,10 +144,17 @@ fn upload(
         );
     }
 
-    if let Some((mask, patches)) = take_ready(&mut pending.ocean) {
-        let material = ocean_materials.add(ocean::OceanMaterial {
-            mask: images.add(mask),
-        });
+    if let Some(ocean::OceanSurface {
+        mask,
+        wave_normals,
+        patches,
+    }) = take_ready(&mut pending.ocean)
+    {
+        let material = ocean_materials.add(ocean::OceanMaterial::new(
+            images.add(mask),
+            images.add(wave_normals),
+        ));
+        ocean::spawn_detail(&root, &mut commands, &mut meshes, material.clone());
         pending.patches = Some((material, patches.into_iter()));
     }
     if let Some((material, patches)) = &mut pending.patches {

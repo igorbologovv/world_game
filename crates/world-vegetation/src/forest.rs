@@ -223,18 +223,15 @@ impl Plugin for ProceduralForestPlugin {
         .init_resource::<streaming::ForestStream>()
         .init_resource::<lod::FadeMaterials>()
         .init_resource::<debug::LodDiagnostics>()
-        .init_resource::<ground_cover::GroundCover>()
         .add_systems(
             Startup,
             (
                 build_models,
                 hero_oak::request_assets,
                 tree_assets::request_assets,
-                ground_cover::build_material,
                 debug::spawn,
             ),
         )
-        .add_systems(Update, ground_cover::stream.after(WorldMovement))
         .add_systems(
             Update,
             (
@@ -252,6 +249,7 @@ impl Plugin for ProceduralForestPlugin {
                 .after(VisibilitySystems::UpdateFrusta)
                 .before(VisibilitySystems::VisibilityPropagate),
         );
+        ground_cover::install(app);
         canopy::install(app);
     }
 }
@@ -280,7 +278,7 @@ fn build_models(
                 let (wood, leaves) = generate_tree(species, variant as u64, level);
                 lods.push(ModelLod::new(
                     Some(wood.finish()),
-                    leaves.finish_canopy(variant as f32, level < 2),
+                    leaves.finish_canopy(variant as f32),
                     foliage_material.clone(),
                     &mut meshes,
                 ));
@@ -426,12 +424,14 @@ fn select_species(
     let temp = (1.07 - 0.78 * latitude - (height.max(0.0) as f32) / 16_000.0
         + 0.13 * noise3(dir * 4.1 + Vec3::new(3.2, 18.6, -8.4)))
     .clamp(0.0, 1.0);
-    // Smooth, spatially coherent groves, not isolated dice-roll trees.
-    // The broad noise varies on a scale of a few hundred metres and makes
-    // forest clearings and densely packed stands.
-    let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
-    let density = (0.82 + grove * 0.90).clamp(0.25, 1.0);
+    let density = grove_density(dir);
     species_for_climate(latitude, temp, moisture, height, density, random, coastal)
+}
+
+// A 260 m grove field shared by tree placement and understory habitat.
+fn grove_density(dir: Vec3) -> f32 {
+    let grove = noise3(dir * (RADIUS as f32 / 260.0) + Vec3::new(7.4, -12.8, 3.7));
+    (0.82 + grove * 0.90).clamp(0.25, 1.0)
 }
 
 fn species_for_climate(
@@ -494,7 +494,7 @@ impl Random {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
@@ -608,11 +608,9 @@ impl MeshBuilder {
         aspect: f32,
         color: [f32; 4],
         rng: &mut Random,
-        lod: usize,
     ) {
-        let card_count = if lod == 2 { 1 } else { 2 };
         let angle = rng.range(0.0, std::f32::consts::TAU);
-        for axis in 0..card_count {
+        for axis in 0..2 {
             let turn = angle + axis as f32 * std::f32::consts::FRAC_PI_2;
             let across = Vec3::new(turn.cos(), 0.0, turn.sin());
             let rise = Vec3::Y + across.cross(Vec3::Y) * rng.range(-0.47, 0.47);
@@ -650,16 +648,12 @@ impl MeshBuilder {
         }
     }
 
-    fn finish_canopy(mut self, variant: f32, animate: bool) -> Mesh {
+    fn finish_canopy(mut self, variant: f32) -> Mesh {
         self.wind = self
             .positions
             .iter()
             .map(|&[x, y, z]| {
-                let weight = if animate {
-                    ((y - 2.5) * 0.009).clamp(0.0, 0.21)
-                } else {
-                    0.0
-                };
+                let weight = ((y - 2.5) * 0.009).clamp(0.0, 0.21);
                 [weight, variant * 1.8 + x * 0.21 + z * 0.17 + y * 0.09]
             })
             .collect();
@@ -746,34 +740,35 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         trunk_nodes.push((trunk(t), trunk_radius * (1.0 - 0.88 * t)));
     }
     wood.tube_path(&trunk_nodes, sides, bark);
-    if lod == 0 {
-        let roots = if matches!(species, Species::Jungle) {
-            6
-        } else {
-            4
-        };
-        let radius = if matches!(species, Species::Jungle) {
-            2.8
-        } else {
-            1.56
-        };
-        for i in 0..roots {
-            let angle =
-                i as f32 * std::f32::consts::TAU / roots as f32 + turn + rng.range(-0.21, 0.21);
-            let spread = Vec3::new(angle.cos(), 0.0, angle.sin()) * radius * rng.range(0.65, 1.15);
-            let knee = Vec3::Y * 1.12 + spread * 0.50;
-            let toe = spread + Vec3::Y * 0.48;
-            let root_top = trunk((2.4 + radius * 0.42) / trunk_length);
-            wood.tube_path(
-                &[
-                    (toe, 0.07),
-                    (knee, trunk_radius * 0.34),
-                    (root_top, trunk_radius * 0.66),
-                ],
-                5,
-                bark,
-            );
+    let roots = if matches!(species, Species::Jungle) {
+        6
+    } else {
+        4
+    };
+    let radius = if matches!(species, Species::Jungle) {
+        2.8
+    } else {
+        1.56
+    };
+    for i in 0..roots {
+        let angle = i as f32 * std::f32::consts::TAU / roots as f32 + turn + rng.range(-0.21, 0.21);
+        let spread = Vec3::new(angle.cos(), 0.0, angle.sin()) * radius * rng.range(0.65, 1.15);
+        // Consume the same root draws so crown randomness stays fixed at every LOD.
+        if lod != 0 {
+            continue;
         }
+        let knee = Vec3::Y * 1.12 + spread * 0.50;
+        let toe = spread + Vec3::Y * 0.48;
+        let root_top = trunk((2.4 + radius * 0.42) / trunk_length);
+        wood.tube_path(
+            &[
+                (toe, 0.07),
+                (knee, trunk_radius * 0.34),
+                (root_top, trunk_radius * 0.66),
+            ],
+            5,
+            bark,
+        );
     }
 
     let levels = match species {
@@ -781,19 +776,13 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         Species::Acacia => 3,
         _ => 5,
     };
-    let twigs = if matches!(species, Species::Pine) {
-        [2, 1, 1][lod]
-    } else {
-        [3, 2, 1][lod]
-    };
+    // Keep every crown tier and major lobe in its canonical position.
+    let twigs = if species == Species::Pine { 2 } else { 3 };
     let leaves_per_cluster = match species {
         Species::Pine => [8, 5, 3][lod],
         _ => [13, 7, 3][lod],
     };
     for tier in 0..levels {
-        if (lod == 1 && tier % 4 == 2) || (lod == 2 && tier % 2 == 1) {
-            continue;
-        }
         let t = (tier as f32 + 1.0) / (levels as f32 + 1.0);
         let (branch_y, length, branches) = match species {
             Species::Oak => (
@@ -875,7 +864,6 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
                     species,
                     green,
                     &mut foliage_random,
-                    lod,
                 );
             }
         }
@@ -894,7 +882,6 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         species,
         green,
         &mut rng,
-        lod,
     );
     (wood, leaves)
 }
@@ -907,7 +894,6 @@ fn leaf_cluster(
     species: Species,
     green: [f32; 3],
     rng: &mut Random,
-    lod: usize,
 ) {
     let lobe_size = if matches!(species, Species::Acacia) {
         radius * 0.85
@@ -926,7 +912,6 @@ fn leaf_cluster(
         },
         [green[0], green[1], green[2], 1.0],
         rng,
-        lod,
     );
     for _ in 0..count {
         let angle = rng.range(0.0, std::f32::consts::TAU);
@@ -942,14 +927,7 @@ fn leaf_cluster(
             Species::Oak => (0.79, 0.32),
             Species::Palm => unreachable!(),
         };
-        let size = rng.range(0.73, 1.30)
-            * if lod == 2 {
-                3.3
-            } else if lod == 1 {
-                1.6
-            } else {
-                1.0
-            };
+        let size = rng.range(0.73, 1.30);
         let tint = rng.range(0.71, 1.22);
         let color = [
             (green[0] * tint).min(1.0),

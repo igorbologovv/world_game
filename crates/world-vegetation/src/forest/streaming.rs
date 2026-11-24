@@ -5,7 +5,7 @@ use std::{
 };
 
 use bevy::{
-    camera::primitives::{Aabb, MeshAabb},
+    camera::primitives::Aabb,
     light::NotShadowCaster,
     math::DVec3,
     prelude::*,
@@ -13,7 +13,9 @@ use bevy::{
 };
 use world_core::{
     planet::RADIUS,
-    runtime::{GridTransform, PlanetRoot, ReferenceFrame, ReferenceFrames, WorldCamera},
+    runtime::{
+        GridTransform, PlanetRoot, ReferenceFrame, ReferenceFrames, WorldAssets, WorldCamera,
+    },
     SurfaceHeights,
 };
 
@@ -22,7 +24,8 @@ use super::{
     impostor,
     lod::{coverage, fade_step, quantize, spawn_tree, VegetationSettings, View},
     placement::{NodeKey, PatchKey, Site, PATCH_METERS},
-    proxy::{ProxyMaterial, ProxyMesh, ProxyUniform, CHILD_SLOTS},
+    proxy::{ProxyGeometry, ProxyMaterial, ProxyMesh, ProxyUniform, CHILD_SLOTS},
+    tree_assets::TreeAssets,
     within_horizon, ForestClearing, ForestModels,
 };
 
@@ -68,7 +71,7 @@ struct Batch {
 enum MeshState {
     #[default]
     Missing,
-    Pending(Task<Option<Mesh>>),
+    Pending(Task<Option<ProxyGeometry>>),
     Empty,
     Ready(Batch),
 }
@@ -93,12 +96,18 @@ impl MeshState {
         }
     }
 
-    fn poll(&mut self) -> Option<Option<Mesh>> {
+    fn poll(&mut self) -> Option<Option<ProxyGeometry>> {
         match self {
             Self::Pending(task) => block_on(poll_once(task)),
             _ => None,
         }
     }
+}
+
+struct ProxyAtlas {
+    colors: Handle<Image>,
+    normals: Handle<Image>,
+    frames: impostor::Frames,
 }
 
 #[derive(Resource, Default)]
@@ -108,10 +117,8 @@ pub(super) struct ForestStream {
     mask: HashMap<PatchKey, (f32, f32)>,
     retiring: Vec<Entity>,
     retiring_batches: Vec<Entity>,
-    atlas: Option<Handle<Image>>,
-    atlas_task: Option<Task<Image>>,
-    atlas_revision: (bool, usize),
-    atlas_task_revision: (bool, usize),
+    atlas: Option<ProxyAtlas>,
+    atlas_task: Option<Task<impostor::Atlas>>,
     next_debug_log: f64,
     next_plan: f64,
     last_eye: Option<DVec3>,
@@ -286,6 +293,8 @@ impl ForestStream {
     }
 
     fn request_meshes(&mut self, eye: DVec3, impostor_range: f32, preload: f32) {
+        let Some(atlas) = &self.atlas else { return };
+        let frames = atlas.frames;
         let pool = AsyncComputeTaskPool::get();
         let mut parents = PARENT_JOBS.saturating_sub(
             self.nodes
@@ -317,14 +326,19 @@ impl ForestStream {
                     let mut mesh = ProxyMesh::default();
                     for (slot, sites) in children.iter().enumerate() {
                         for &site in sites.iter() {
-                            mesh.add(site, origin, slot);
+                            mesh.add(
+                                site,
+                                origin,
+                                slot,
+                                frames[impostor::tile(site.species, site.variant)],
+                            );
                         }
                     }
                     mesh.finish()
                 }));
                 parents -= 1;
             }
-            if leaves == 0 || self.atlas.is_none() {
+            if leaves == 0 {
                 continue;
             }
             let reach = f64::from(impostor_range + preload.min(180.0));
@@ -344,7 +358,12 @@ impl ForestStream {
                 leaf.impostor = MeshState::Pending(pool.spawn(async move {
                     let mut mesh = ProxyMesh::default();
                     for &site in sites.iter() {
-                        mesh.add(site, origin, 0);
+                        mesh.add(
+                            site,
+                            origin,
+                            0,
+                            frames[impostor::tile(site.species, site.variant)],
+                        );
                     }
                     mesh.finish()
                 }));
@@ -434,15 +453,13 @@ fn make_batch(
     commands: &mut Commands,
     root: &PlanetRoot,
     frame: &ReferenceFrame,
-    mesh: Mesh,
+    geometry: ProxyGeometry,
     anchor: DVec3,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ProxyMaterial>,
     material: ProxyMaterial,
 ) -> Option<Batch> {
-    let mut bounds = mesh.get_aabb()?;
-    // Billboards rotate on the GPU. Keep their full swept volume inside the CPU bounds.
-    bounds.half_extents += 27.0;
+    let ProxyGeometry { mesh, bounds } = geometry;
     let (cell, translation) = frame.translation_to_grid(anchor);
     let material = materials.add(material);
     let entity = root
@@ -532,8 +549,12 @@ pub(super) fn stream(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ProxyMaterial>>,
-    models: Res<ForestModels>,
-    hero_loading: Res<HeroOakAssets>,
+    mut models: ResMut<ForestModels>,
+    (world_assets, hero_loading, tree_loading): (
+        Res<WorldAssets>,
+        Res<HeroOakAssets>,
+        Res<TreeAssets>,
+    ),
     mut visibility: Query<&mut Visibility, With<MeshMaterial3d<ProxyMaterial>>>,
 ) {
     let Ok((entity, camera, view, projection)) = cameras.single() else {
@@ -553,39 +574,30 @@ pub(super) fn stream(
     let forest_range = forest_band.y;
     let preload = settings.preload_margin.clamp(90.0, 420.0);
     let step = fade_step(&time, &settings);
-    // Keep the atlas handle and UV layout stable while new portraits arrive.
-    let oak = models
-        .hero_oak
-        .as_ref()
-        .and_then(|hero| images.get(&hero.impostor_image));
-    let revision = (oak.is_some(), models.portraits.revision);
-    if forest.atlas_task.is_none() && (forest.atlas.is_none() || forest.atlas_revision != revision)
+    // Build a single atlas after the authored LOD0 sources resolve. A baked
+    // fallback must never replace an authored crown after its handoff.
+    if forest.atlas.is_none()
+        && forest.atlas_task.is_none()
+        && !hero_loading.is_pending()
+        && !tree_loading.is_pending()
     {
-        let oak = oak.cloned();
-        let portraits = models.portraits.clone();
-        forest.atlas_task_revision = revision;
+        let portraits = std::mem::take(&mut models.portraits);
+        let directory = world_assets.directory().to_owned();
         forest.atlas_task = Some(
             AsyncComputeTaskPool::get()
-                .spawn(async move { impostor::bake(oak.as_ref(), &portraits) }),
+                .spawn(async move { impostor::load_or_bake(&directory, &portraits) }),
         );
     }
-    if let Some(image) = forest
+    if let Some(atlas) = forest
         .atlas_task
         .as_mut()
         .and_then(|task| block_on(poll_once(task)))
     {
-        if let Some(atlas) = forest.atlas.as_ref() {
-            // Check existence before taking AssetMut: the guard from get_mut()
-            // otherwise keeps the mutable borrow alive across the else branch.
-            if images.get(atlas).is_some() {
-                *images.get_mut(atlas).expect("atlas was checked above") = image;
-            } else {
-                forest.atlas = Some(images.add(image));
-            }
-        } else {
-            forest.atlas = Some(images.add(image));
-        }
-        forest.atlas_revision = forest.atlas_task_revision;
+        forest.atlas = Some(ProxyAtlas {
+            colors: images.add(atlas.colors),
+            normals: images.add(atlas.normals),
+            frames: atlas.frames,
+        });
         forest.atlas_task = None;
     }
 
@@ -637,7 +649,8 @@ pub(super) fn stream(
                         &mut assets,
                         || ProxyMaterial {
                             coverage: proxy_parameters(forest_band, range, band, false),
-                            atlas: atlas.clone(),
+                            atlas: atlas.colors.clone(),
+                            normals: atlas.normals.clone(),
                         },
                     )
                 {
@@ -659,7 +672,8 @@ pub(super) fn stream(
                 &mut assets,
                 || ProxyMaterial {
                     coverage: proxy_parameters(forest_band, range, band, true),
-                    atlas: atlas.clone(),
+                    atlas: atlas.colors.clone(),
+                    normals: atlas.normals.clone(),
                 },
             ) {
                 uploads -= 1;

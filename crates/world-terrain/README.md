@@ -43,3 +43,30 @@ one-meter vertex spacing at its finest level. The water plugin streams pools
 in nearby wetland depressions where the sampled ground forms a closed rim.
 Pools use the same terrain heights for their shoreline and are shallow enough
 to walk through.
+
+## Clouds
+
+The terrain plugin ray marches two planet-centered cloud layers. The lower
+layer grows from 1,450 m above the reference sphere into cumulus and broader
+decks. The thinner ice layer begins at 4,950 m and fades out by 7,900 m.
+Both layers use a seamless weather cubemap for large-scale coverage and
+a small 3D texture for billows, edge erosion, and wind-stretched wisps.
+The textures and their mip chains are generated at startup. Planet-space
+sampling keeps the fields continuous across floating-origin shifts.
+
+The shader uses the scene's directional light and Bevy's atmospheric
+transmittance. Short sun rays shade the interior of nearby clouds.
+From farther away the shader filters detail over the pixel footprint,
+takes fewer samples, and uses a cheaper lighting approximation. It skips
+the clear air between layers and stops marching once enough light has been
+absorbed.
+
+The offscreen client sweep captures matched views from orbit, 34 km,
+5.5 km, 2.35 km, and 150 m above the reference sphere. It writes PNGs to
+`target/cloud-sweep` by default and reports median frame time with GPU
+synchronization at 1024 × 576. Set `CLOUD_CAPTURE_DIR` to override the
+output directory.
+
+```sh
+WGPU_BACKEND=vulkan cargo test --locked -p world-client cloud_altitude_sweep -- --ignored --nocapture
+```

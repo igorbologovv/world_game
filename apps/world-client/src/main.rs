@@ -28,10 +28,12 @@ fn main() {
         "Starter River"
     };
     let workspace = Path::new(WORKSPACE_ROOT);
-    let assets = prefer_checkout_palm_assets(
-        WorldAssets::resolve(workspace),
-        &workspace.join("assets"),
-        std::env::var_os("BEVY_ASSET_ROOT").is_some(),
+    let executable = std::env::current_exe().ok();
+    let override_root = std::env::var_os("BEVY_ASSET_ROOT");
+    let assets = client_assets(
+        workspace,
+        executable.as_deref(),
+        override_root.as_deref().map(Path::new),
     );
     let mut app = App::new();
     app.add_plugins(
@@ -47,6 +49,7 @@ fn main() {
                 ..default()
             }),
     );
+    info!("Loading world assets from {}", assets.directory().display());
     if region.id == PALM_COAST_REGION.id && !assets.directory().join(PALM_MESH).is_file() {
         warn!(
             "Coconut palm model missing from {}",
@@ -67,21 +70,26 @@ fn spawn_region(mut args: impl Iterator<Item = String>) -> Option<Region> {
     }
 }
 
-fn prefer_checkout_palm_assets(
-    assets: WorldAssets,
-    checkout: &Path,
-    explicit_override: bool,
+fn client_assets(
+    workspace: &Path,
+    executable: Option<&Path>,
+    override_root: Option<&Path>,
 ) -> WorldAssets {
-    // Launching this build from an older checkout can find its terrain assets
-    // before finding this checkout's vegetation.
-    if !explicit_override
-        && !assets.directory().join(PALM_MESH).is_file()
-        && checkout.join(PALM_MESH).is_file()
-    {
-        WorldAssets::new(checkout.to_path_buf())
-    } else {
-        assets
+    if let Some(root) = override_root {
+        return WorldAssets::new(root.join("assets"));
     }
+    let packaged = executable
+        .and_then(Path::parent)
+        .map(|parent| parent.join("assets"));
+    let checkout = workspace.join("assets");
+    // Keep the Rust materials and their shader bindings in the same build.
+    // The working directory can belong to a different checkout.
+    for directory in packaged.into_iter().chain(std::iter::once(checkout)) {
+        if directory.join("world").is_dir() {
+            return WorldAssets::new(directory);
+        }
+    }
+    WorldAssets::resolve(workspace)
 }
 
 fn asset_plugin(assets: &WorldAssets) -> AssetPlugin {

@@ -312,3 +312,83 @@ mod tests {
         }
     }
 }
+
+/// Build matching, tile-isolated albedo and normal mip chains from one view.
+pub(super) fn impostor_mips(
+    mut colors: Vec<[u8; 4]>,
+    mut normals: Vec<[u8; 4]>,
+    mut width: usize,
+    mut height: usize,
+    tiles: usize,
+) -> (Vec<u8>, Vec<u8>, u32) {
+    let mut color_data = Vec::new();
+    let mut normal_data = Vec::new();
+    let mut levels = 0;
+    loop {
+        let tile_width = width / tiles;
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                let mut color = colors[index];
+                let mut normal = normals[index];
+                if color[3] == 0 {
+                    // Extend edges into empty texels so filtering doesn't mix the
+                    // visible silhouette with black or a neighboring tile.
+                    let neighbors = [
+                        (x % tile_width > 0, index.wrapping_sub(1)),
+                        (x % tile_width + 1 < tile_width, index + 1),
+                        (y > 0, index.wrapping_sub(width)),
+                        (y + 1 < height, index + width),
+                    ];
+                    if let Some((_, adjacent)) = neighbors
+                        .into_iter()
+                        .find(|&(valid, adjacent)| valid && colors[adjacent][3] > 0)
+                    {
+                        color = colors[adjacent];
+                        color[3] = 0;
+                        normal = normals[adjacent];
+                    }
+                }
+                color_data.extend(color);
+                normal_data.extend(normal);
+            }
+        }
+        levels += 1;
+        if tile_width <= 6 {
+            break;
+        }
+        let mut next_colors = Vec::with_capacity(colors.len() / 4);
+        let mut next_normals = Vec::with_capacity(normals.len() / 4);
+        for y in (0..height).step_by(2) {
+            for x in (0..width).step_by(2) {
+                let i = y * width + x;
+                let block = [i, i + 1, i + width, i + width + 1];
+                let weights = block.map(|i| u32::from(colors[i][3]));
+                let sum = weights.iter().sum::<u32>();
+                let average = |pixels: &[[u8; 4]], channel| {
+                    if sum == 0 {
+                        return 0;
+                    }
+                    (block
+                        .into_iter()
+                        .zip(weights)
+                        .map(|(i, weight)| u32::from(pixels[i][channel]) * weight)
+                        .sum::<u32>()
+                        / sum) as u8
+                };
+                let mut color = std::array::from_fn(|channel| average(&colors, channel));
+                color[3] = (sum / 4) as u8;
+                next_colors.push(color);
+                next_normals.push(std::array::from_fn(|channel| average(&normals, channel)));
+            }
+        }
+        for tile in 0..tiles {
+            preserve_coverage(&colors, &mut next_colors, width, tile, tiles, 0.46);
+        }
+        colors = next_colors;
+        normals = next_normals;
+        width /= 2;
+        height /= 2;
+    }
+    (color_data, normal_data, levels)
+}

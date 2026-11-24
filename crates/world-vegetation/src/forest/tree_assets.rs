@@ -65,6 +65,12 @@ pub(super) struct TreeAssets {
     mipmaps: HashMap<AssetId<Image>, Handle<Image>>,
 }
 
+impl TreeAssets {
+    pub fn is_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
 pub(super) fn request_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -163,7 +169,7 @@ fn build_variant(
     materials: &mut Assets<StandardMaterial>,
     foliage: &mut Assets<FoliageMaterial>,
     mipmaps: &mut HashMap<AssetId<Image>, Handle<Image>>,
-) -> Option<(VariantModels, Vec<[u8; 4]>)> {
+) -> Option<(VariantModels, impostor::Source)> {
     let parts = |file, name: &str| {
         let gltf = gltfs.get(file)?;
         let material = gltf.named_materials.get(name)?;
@@ -189,25 +195,21 @@ fn build_variant(
     };
     let bark_image = bark.base_color_texture.as_ref()?;
     let leaf_image = leaves.base_color_texture.as_ref()?;
-    let (far_wood, far_leaves) = geometry.last()?;
-    let portrait = impostor::render_authored(
-        prefab.species,
-        prefab.variant,
-        [
-            (
-                meshes.get(far_wood)?,
-                images.get(bark_image)?,
-                0.0,
-                prefab.repeat_bark,
-            ),
-            (
-                meshes.get(far_leaves)?,
-                images.get(leaf_image)?,
-                cutoff,
-                prefab.repeat_leaves,
-            ),
-        ],
-    )?;
+    let (wood, foliage_mesh) = geometry.first()?;
+    let portrait = impostor::Source::new([
+        impostor::Part::authored(
+            meshes.get(wood)?,
+            images.get(bark_image)?,
+            &bark,
+            prefab.repeat_bark,
+        )?,
+        impostor::Part::authored(
+            meshes.get(foliage_mesh)?,
+            images.get(leaf_image)?,
+            &leaves,
+            prefab.repeat_leaves,
+        )?,
+    ]);
 
     bark.base_color_texture = Some(
         mipmaps
@@ -232,7 +234,7 @@ fn build_variant(
     });
 
     let mut lods = Vec::with_capacity(LODS);
-    for (level, (wood, leaves)) in geometry.into_iter().enumerate() {
+    for (wood, leaves) in geometry {
         let bounds = meshes.get(&wood)?.get_aabb()?;
         let wood = WoodLod { mesh: wood, bounds };
         let mut mesh = meshes.get_mut(&leaves)?;
@@ -245,11 +247,7 @@ fn build_variant(
         let weights: Vec<_> = positions
             .iter()
             .map(|&[x, y, z]| {
-                let weight = if level < 2 {
-                    ((y - 1.5) * 0.025).clamp(0.0, 0.18)
-                } else {
-                    0.0
-                };
+                let weight = ((y - 1.5) * 0.025).clamp(0.0, 0.18);
                 [weight, x * 0.21 + z * 0.17 + y * 0.09]
             })
             .collect();
@@ -288,8 +286,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn shipped_prefabs_load_into_three_shared_lods_and_the_forest_atlas() {
+    fn load_shipped_assets() -> App {
+        use crate::forest::hero_oak::{self, HeroOakAssets};
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
         let mut app = App::new();
         app.add_plugins((
@@ -308,35 +306,71 @@ mod tests {
         .init_asset::<StandardMaterial>()
         .init_asset::<FoliageMaterial>()
         .insert_resource(WorldAssets::new(Path::new(path).to_path_buf()))
-        .add_systems(Startup, (super::super::build_models, request_assets))
-        .add_systems(Update, finish_loading);
+        .add_systems(
+            Startup,
+            (
+                super::super::build_models,
+                request_assets,
+                hero_oak::request_assets,
+            ),
+        )
+        .add_systems(Update, (finish_loading, hero_oak::finish_loading));
         app.finish();
         app.cleanup();
 
         let timeout = Instant::now() + Duration::from_secs(10);
         loop {
             app.update();
-            if app.world().resource::<TreeAssets>().pending.is_empty() {
+            if !app.world().resource::<TreeAssets>().is_pending()
+                && !app.world().resource::<HeroOakAssets>().is_pending()
+            {
                 break;
             }
             assert!(Instant::now() < timeout, "tree assets timed out");
             std::thread::sleep(Duration::from_millis(5));
         }
 
+        app
+    }
+
+    #[test]
+    #[ignore = "regenerates the shipped tree impostor pack"]
+    fn bake_tree_impostors() {
+        let app = load_shipped_assets();
+        let world = app.world();
+        let assets = world.resource::<WorldAssets>();
+        let forest = world.resource::<ForestModels>();
+        assert!(forest.portraits.contains(Species::Oak, 0));
+        for prefab in PREFABS {
+            assert!(forest.portraits.contains(prefab.species, prefab.variant));
+        }
+        impostor::bake_to(
+            &assets.directory().join(impostor::ATLAS_PATH),
+            &forest.portraits,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn shipped_prefabs_load_into_three_shared_lods_and_the_forest_atlas() {
+        let app = load_shipped_assets();
         let world = app.world();
         let forest = world.resource::<ForestModels>();
+        let assets = world.resource::<WorldAssets>();
+        impostor::load(
+            &assets.directory().join(impostor::ATLAS_PATH),
+            &forest.portraits,
+        )
+        .expect("the shipped impostors must match the canonical LOD0s");
         let meshes = world.resource::<Assets<Mesh>>();
         let images = world.resource::<Assets<Image>>();
         let materials = world.resource::<Assets<FoliageMaterial>>();
-        assert_eq!(forest.portraits.revision, PREFABS.len());
-        let atlas = impostor::bake(None, &forest.portraits);
-        let fallback = impostor::bake(None, &impostor::Portraits::default());
         for prefab in PREFABS {
             let variant = &forest.variants[prefab.species as usize][prefab.variant];
             assert_eq!(variant.lods.len(), LODS);
             let foliage = &variant.lods[0].foliage_material;
             let mut previous = 6_000;
-            for lod in &variant.lods {
+            for (level, lod) in variant.lods.iter().enumerate() {
                 assert_eq!(&lod.foliage_material, foliage);
                 let wood = meshes.get(&lod.wood.as_ref().unwrap().mesh).unwrap();
                 let leaves = meshes.get(&lod.foliage).unwrap();
@@ -347,6 +381,22 @@ mod tests {
                     "{} LOD has {triangles} triangles",
                     prefab.path
                 );
+                if level != 0 {
+                    let (mean, worst) = forest.portraits.silhouette_score(
+                        prefab.species,
+                        prefab.variant,
+                        [wood, leaves],
+                    );
+                    println!(
+                        "{} LOD{level}: silhouette IoU {mean:.3} mean, {worst:.3} minimum",
+                        prefab.path
+                    );
+                    assert!(
+                        mean >= 0.88 && worst >= 0.80,
+                        "{} LOD{level}: silhouette overlap {mean:.3} / {worst:.3}",
+                        prefab.path
+                    );
+                }
                 previous = triangles;
             }
             let leaves = &materials.get(foliage).unwrap().base;
@@ -354,32 +404,7 @@ mod tests {
                 .get(leaves.base_color_texture.as_ref().unwrap())
                 .unwrap();
             assert!(leaf_image.texture_descriptor.mip_level_count > 1);
-            let width = atlas.texture_descriptor.size.width as usize;
-            let tile_x = (impostor::uv(prefab.species, prefab.variant, Vec2::ZERO).x * width as f32)
-                as usize;
-            let side = atlas.texture_descriptor.size.height as usize;
-            let tile_x = tile_x - tile_x % side;
-            let bytes = |image: &Image| {
-                image
-                    .data
-                    .as_ref()
-                    .unwrap()
-                    .chunks_exact(width * 4)
-                    .take(side)
-                    .flat_map(|row| row[tile_x * 4..(tile_x + side) * 4].iter().copied())
-                    .collect::<Vec<_>>()
-            };
-            let portrait = bytes(&atlas);
-            assert_ne!(portrait, bytes(&fallback));
-            assert!(
-                portrait
-                    .chunks_exact(4)
-                    .filter(|pixel| pixel[3] > 120)
-                    .count()
-                    > 100,
-                "{} portrait is missing its cutout",
-                prefab.path
-            );
+            assert!(forest.portraits.contains(prefab.species, prefab.variant));
         }
     }
 }

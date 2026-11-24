@@ -18,7 +18,7 @@ The workspace moves those connections into the contracts below.
 | --- | --- | --- |
 | `world-core` | Legacy cube-sphere coordinates, planet constants, region IDs and spawn contract, height and river coverage queries, asset directory, floating-origin frame, shared components and sets | `coordinates`, `planet`, `SurfaceHeights`, optional `runtime` |
 | `world-generation` | Procedural planet baking, heightmaps, drainage, rivers, water classification and legacy output files | `generate_world(&Path)` |
-| `world-terrain` | Adaptive terrain chunks, terrain material and textures, lighting and atmospheric fog | `TerrainPlugin` |
+| `world-terrain` | Adaptive terrain chunks, terrain material and textures, lighting, atmosphere, and clouds | `TerrainPlugin` |
 | `world-water` | Ocean patches and bathymetry, river meshes and map lines, ocean and river shaders and shared water shader code | `WaterPlugin` |
 | `world-vegetation` | Biome placement, ground cover, forests, Hero Oak models and LODs, foliage and distant-forest shaders | `ProceduralForestPlugin` |
 | `world-player` | Explorer movement and animation, input and camera modes, travel UI and destination marker | `PlayerPlugin::new(ExplorerSpawn)` |
@@ -27,9 +27,10 @@ The workspace moves those connections into the contracts below.
 | `apps/world-client` | Bevy configuration, asset root, region selection, registration of subsystem plugins | `world-client` binary |
 | `apps/world-generator` | Command-line entry point and the default output directory | `generate_world` binary |
 
-The terrain owner maintains `assets/shaders/spherical.wgsl` and
-`assets/textures/terrain/`. The water owner maintains `ocean.wgsl`,
-`river_water.wgsl`, and `water_common.wgsl`. The vegetation owner maintains
+The terrain owner maintains `assets/shaders/spherical.wesl`,
+`assets/shaders/planet_clouds.wesl`, and `assets/textures/terrain/`. The water
+owner maintains `ocean.wgsl`, `river_water.wgsl`, and `water_common.wgsl`.
+The vegetation owner maintains
 `foliage.wgsl`, `distant_forest.wgsl`, `assets/models/hero_oak/`, and their
 source exports and build tooling. Generator outputs in `assets/world/` and
 `assets/terrains/spherical/source/height/` are shared with runtime consumers.
@@ -135,9 +136,10 @@ cargo test -p world-vegetation
 cargo test -p world-generation
 ```
 
-The client resolves `assets/` from `BEVY_ASSET_ROOT` when set, then from the
-working directory, the executable directory, or the source checkout. Bevy and
-the synchronous world data readers use the same resolved directory.
+The client uses the `assets/` directory under `BEVY_ASSET_ROOT` when that
+variable is set. Otherwise it prefers packaged assets beside the executable
+or assets from the checkout that built it. Bevy and the synchronous world data
+readers use the same resolved directory.
 
 Run the generator from the workspace root to regenerate the files it owns.
 It writes under `assets/` in its working directory and overwrites generated

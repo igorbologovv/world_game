@@ -24,8 +24,7 @@ pub(super) fn procedural(lod: usize) -> (MeshBuilder, MeshBuilder) {
     trunk.tube_path(&path, [9, 6, 4][lod], bark);
 
     let mut leaves = MeshBuilder::default();
-    let fronds = [14, 10, 7][lod];
-    for i in 0..fronds {
+    for i in 0..14 {
         let a = i as f32 * 2.399_963;
         let (sin, cos) = a.sin_cos();
         let radial = Vec3::new(cos, 0.0, sin);

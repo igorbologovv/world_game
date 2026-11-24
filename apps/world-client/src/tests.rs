@@ -249,15 +249,27 @@ fn spawn_argument_selects_a_known_region() {
 }
 
 #[test]
-fn palm_build_uses_its_checkout_assets_when_launched_from_an_older_directory() {
-    let checkout = Path::new(WORKSPACE_ROOT).join("assets");
-    let older = WorldAssets::new(checkout.join("models"));
-    let chosen = prefer_checkout_palm_assets(older.clone(), &checkout, false);
-    assert_eq!(chosen.directory(), checkout);
-    assert!(chosen.directory().join(PALM_MESH).is_file());
+fn client_assets_match_the_checkout_unless_packaged_or_overridden() {
+    let workspace = Path::new(WORKSPACE_ROOT);
+    let package = std::env::temp_dir().join(format!("world-client-package-{}", std::process::id()));
+    let executable = package.join("world-client");
+    let checkout = client_assets(workspace, Some(&executable), None);
+    assert_eq!(checkout.directory(), workspace.join("assets"));
+    assert!(checkout.directory().join(PALM_MESH).is_file());
 
-    let override_assets = prefer_checkout_palm_assets(older.clone(), &checkout, true);
-    assert_eq!(override_assets.directory(), older.directory());
+    let packaged = package.join("assets");
+    std::fs::create_dir_all(packaged.join("world")).unwrap();
+    assert_eq!(
+        client_assets(workspace, Some(&executable), None).directory(),
+        packaged,
+    );
+
+    let override_root = package.join("override");
+    let overridden = client_assets(workspace, Some(&executable), Some(&override_root));
+    assert_eq!(overridden.directory(), override_root.join("assets"));
+    std::fs::remove_dir_all(package).unwrap();
 }
 
 mod forest_render;
+
+mod cloud_render;
