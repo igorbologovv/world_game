@@ -207,7 +207,7 @@ fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
         let square = vec2<f32>(dot(layer.east.xyz, direction), dot(layer.north.xyz, direction))
             / (layer.east.w * cosine);
         let edge = max(abs(square.x), abs(square.y));
-        let spatial = 1.0 - smoothstep(0.77, 0.99, edge);
+        let spatial = 1.0 - smoothstep(0.61, 0.995, edge);
         let footprint_blend = 1.0 - smoothstep(0.85, 2.7, footprint / layer.north.w);
         // Keep the coarsest local projections available as a fallback while the
         // global texture streams in. Afterwards prefer whichever resolves more terrain.
@@ -255,7 +255,7 @@ fn canopy_cascade_debug(direction: vec3<f32>, footprint: f32) -> vec3<f32> {
         let square = vec2<f32>(dot(layer.east.xyz, direction), dot(layer.north.xyz, direction))
             / (layer.east.w * cosine);
         let edge = max(abs(square.x), abs(square.y));
-        let spatial = 1.0 - smoothstep(0.77, 0.99, edge);
+        let spatial = 1.0 - smoothstep(0.61, 0.995, edge);
         let footprint_blend = 1.0 - smoothstep(0.85, 2.7, footprint / layer.north.w);
         let finer = 1.0 - canopy_layout.fade.w
             * smoothstep(1.0, 1.9, layer.north.w / resident_texel);
@@ -287,7 +287,7 @@ fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f
     let pixel_dx = length(dx);
     let pixel_dy = length(dy);
     let footprint = max(sqrt(pixel_dx * pixel_dy), max(pixel_dx, pixel_dy) / 6.0);
-    let strength = (1.0 - smoothstep(0.74, 0.96, edge))
+    let strength = (1.0 - smoothstep(0.61, 0.995, edge))
         * (1.0 - smoothstep(1.2, 4.6, footprint / meters_per_texel)) * layer.center.w;
     if strength <= 0.0 {
         return vec4<f32>(1.0);
