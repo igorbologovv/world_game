@@ -263,7 +263,7 @@ fn setup(
     commands.spawn((
         DirectionalLight {
             // Raw sunlight is attenuated by the atmosphere during rendering.
-            illuminance: lux::RAW_SUNLIGHT,
+            illuminance: lux::RAW_SUNLIGHT * 0.6,
             shadow_maps_enabled: true,
             ..default()
         },

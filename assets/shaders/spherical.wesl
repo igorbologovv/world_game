@@ -564,7 +564,7 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     if handoff > 0.0 && canopy_coverage > 0.0 {
         // The atlas stores premultiplied linear foliage color. Use the same
         // sun, sky and exposure as the 3D forest by blending before lighting.
-        let canopy_color = canopy.rgb / max(canopy.a, 0.001);
+        let canopy_color = canopy.rgb / max(canopy.a, 0.001) * 0.3;
         var sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
         if lights.n_directional_lights > 0u {
             sun = lights.directional_lights[0].direction_to_light;
