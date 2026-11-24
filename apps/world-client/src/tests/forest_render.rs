@@ -1,6 +1,12 @@
 //! Offscreen altitude sweep and steady-state frame timing on the active adapter.
 
-use std::{fs, path::PathBuf, time::Instant};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+use bevy::time::TimeUpdateStrategy;
 
 use bevy::{
     app::PluginsState,
@@ -29,6 +35,138 @@ fn forest_altitude_sweep() {
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/forest-sweep"));
     fs::create_dir_all(&output).unwrap();
+    let (mut app, target) = render_app();
+    let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
+    // This inland direction looks over a boreal river valley and broken ridges.
+    let woodland = DVec3::new(
+        -0.36285174347169147,
+        0.8249897523299634,
+        0.43327880263186114,
+    );
+    for (label, up, height, tilt, warmup) in [
+        ("ground", coast, 2.2, 0.025, 220),
+        ("handoff", woodland, 1_700.0, 0.78, 75),
+        ("aerial", woodland, 24_000.0, 0.87, 65),
+        ("orbit", woodland, 1_450_000.0, 1.0, 90),
+    ] {
+        set_camera(app.world_mut(), up, height, tilt);
+        for _ in 0..warmup {
+            render_frame(&mut app);
+        }
+        measure(&mut app, &target, &output, label);
+    }
+    let layout = app.world().resource::<ForestCanopy>().layout;
+    assert_eq!(layout.fade.z, 0.0, "the 1024² faces must finish uploading");
+    assert_eq!(
+        layout.fade.w, 1.0,
+        "the orbital canopy must finish fading in"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and writes screenshots"]
+fn tree_lod_sweep() {
+    let output = std::env::var_os("FOREST_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/tree-lod-sweep"));
+    fs::create_dir_all(&output).unwrap();
+    let (mut app, target) = render_app();
+    for _ in 0..300 {
+        render_frame(&mut app);
+    }
+    let world = app.world_mut();
+    let root = world.resource::<PlanetRoot>().entity();
+    let origin = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction) * RADIUS;
+    let mut palms = world.query_filtered::<GridTransform, With<world_vegetation::CoconutPalm>>();
+    let positions: Vec<_> = palms
+        .iter(world)
+        .map(|grid| (*grid.cell, *grid.transform))
+        .collect();
+    let frame = world.get::<ReferenceFrame>(root).unwrap();
+    let tree = positions
+        .iter()
+        .map(|(cell, transform)| frame.grid_position_double(cell, transform))
+        .min_by(|a, b| {
+            a.distance_squared(origin)
+                .total_cmp(&b.distance_squared(origin))
+        })
+        .expect("the Palm Coast fixture must stream a palm");
+    println!("Tracked palm at {tree:?}");
+    let up = tree.normalize();
+    let tangent = DVec3::Y.cross(up).normalize();
+    let focus = tree + up * 6.5;
+    for (label, distance, azimuth, elevation) in [
+        ("mesh-close", 17.0, 0.0_f64, 0.06_f64),
+        ("mesh-mid", 33.0, 0.0, 0.06),
+        ("mesh-far", 51.0, 0.0, 0.06),
+        ("handoff", 62.0, 0.0, 0.06),
+        ("impostor", 81.0, 0.0, 0.06),
+        ("impostor-side", 81.0, 1.4, 0.06),
+        ("impostor-above", 81.0, 1.4, 0.8),
+        ("forest", 330.0, 1.4, 0.45),
+    ] {
+        let horizontal = tangent * azimuth.cos() + up.cross(tangent) * azimuth.sin();
+        let eye = focus + distance * (horizontal * elevation.cos() + up * elevation.sin());
+        aim_at_tree(app.world_mut(), eye, focus, up);
+        for _ in 0..75 {
+            render_frame(&mut app);
+        }
+        measure(&mut app, &target, &output, label);
+    }
+
+    // From the spawn clearing, keep foreground trees out of this comparison.
+    // Hold the view fixed and force the representation on either side of the fade.
+    let view = (origin - tree - up * (origin - tree).dot(up)).normalize();
+    let position = |distance| focus + distance * (view * 0.997 + up * 0.077);
+    aim_at_tree(app.world_mut(), position(43.0), focus, up);
+    let defaults = *app
+        .world()
+        .resource::<world_vegetation::VegetationSettings>();
+    for (label, mesh, band) in [
+        ("paired-lod0", [180.0, 210.0], [165.0, 205.0]),
+        ("paired-lod1", [10.0, 180.0], [165.0, 205.0]),
+        ("paired-lod2", [10.0, 20.0], [165.0, 205.0]),
+        ("paired-impostor", defaults.mesh_distances, [16.0, 20.0]),
+    ] {
+        app.insert_resource(world_vegetation::VegetationSettings {
+            mesh_distances: mesh,
+            impostor_blend: band,
+            ..defaults
+        });
+        for _ in 0..75 {
+            render_frame(&mut app);
+        }
+        capture(&mut app, &target, &output, label);
+    }
+    app.insert_resource(defaults);
+    for _ in 0..75 {
+        render_frame(&mut app);
+    }
+    for frame in 0..=100 {
+        let distance = 12.0 + 0.66 * f64::from(frame);
+        aim_at_tree(app.world_mut(), position(distance), focus, up);
+        render_frame(&mut app);
+        if frame % 10 == 0 {
+            capture(&mut app, &target, &output, &format!("dolly-{frame:03}"));
+        }
+    }
+}
+
+fn aim_at_tree(world: &mut World, eye: DVec3, focus: DVec3, up: DVec3) {
+    let root = world.resource::<PlanetRoot>().entity();
+    let (cell, translation) = world
+        .get::<ReferenceFrame>(root)
+        .unwrap()
+        .translation_to_grid(eye);
+    let mut cameras = world.query::<(GridTransform, &mut WorldCamera)>();
+    let (mut camera, mut mode) = cameras.single_mut(world).unwrap();
+    *camera.cell = cell;
+    *camera.transform =
+        Transform::from_translation(translation).looking_to((focus - eye).as_vec3(), up.as_vec3());
+    *mode = WorldCamera::Map;
+}
+
+fn render_app() -> (App, Handle<Image>) {
     let assets = WorldAssets::new(Path::new(WORKSPACE_ROOT).join("assets"));
     let mut app = App::new();
     app.add_plugins(
@@ -70,59 +208,46 @@ fn forest_altitude_sweep() {
             ));
         },
     );
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 60.0,
+    )));
     render_frame(&mut app);
-    let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
-    // This inland direction looks over a boreal river valley and broken ridges.
-    let woodland = DVec3::new(
-        -0.36285174347169147,
-        0.8249897523299634,
-        0.43327880263186114,
-    );
-    for (label, up, height, tilt, warmup) in [
-        ("ground", coast, 2.2, 0.025, 220),
-        ("handoff", woodland, 1_700.0, 0.78, 75),
-        ("aerial", woodland, 24_000.0, 0.87, 65),
-        ("orbit", woodland, 1_450_000.0, 1.0, 90),
-    ] {
-        set_camera(app.world_mut(), up, height, tilt);
-        for _ in 0..warmup {
-            render_frame(&mut app);
-        }
-        let mut samples: Vec<_> = (0..36)
-            .map(|_| {
-                let start = Instant::now();
-                render_frame(&mut app);
-                start.elapsed().as_secs_f64() * 1000.0
-            })
-            .collect();
-        samples.sort_by(f64::total_cmp);
-        println!(
-            "{label} median={:.2} ms p95={:.2} ms",
-            samples[samples.len() / 2],
-            samples[samples.len() * 95 / 100]
-        );
+    (app, target)
+}
 
-        let path = output.join(format!("{label}.png"));
-        if path.exists() {
-            fs::remove_file(&path).unwrap();
-        }
-        app.world_mut()
-            .spawn(Screenshot::image(target.clone()))
-            .observe(save_to_disk(path.clone()));
-        for _ in 0..15 {
-            render_frame(&mut app);
-            if path.metadata().is_ok_and(|info| info.len() > 1_000) {
-                break;
-            }
-        }
-        assert!(path.metadata().unwrap().len() > 1_000, "{path:?}");
-    }
-    let layout = app.world().resource::<ForestCanopy>().layout;
-    assert_eq!(layout.fade.z, 0.0, "the 1024² faces must finish uploading");
-    assert_eq!(
-        layout.fade.w, 1.0,
-        "the orbital canopy must finish fading in"
+fn measure(app: &mut App, target: &Handle<Image>, output: &std::path::Path, label: &str) {
+    let mut samples: Vec<_> = (0..36)
+        .map(|_| {
+            let start = Instant::now();
+            render_frame(app);
+            start.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "{label} median={:.2} ms p95={:.2} ms",
+        samples[samples.len() / 2],
+        samples[samples.len() * 95 / 100]
     );
+
+    capture(app, target, output, label);
+}
+
+fn capture(app: &mut App, target: &Handle<Image>, output: &std::path::Path, label: &str) {
+    let path = output.join(format!("{label}.png"));
+    if path.exists() {
+        fs::remove_file(&path).unwrap();
+    }
+    app.world_mut()
+        .spawn(Screenshot::image(target.clone()))
+        .observe(save_to_disk(path.clone()));
+    for _ in 0..15 {
+        render_frame(app);
+        if path.metadata().is_ok_and(|info| info.len() > 1_000) {
+            break;
+        }
+    }
+    assert!(path.metadata().unwrap().len() > 1_000, "{path:?}");
 }
 
 fn set_camera(world: &mut World, up: DVec3, height: f64, tilt: f64) {

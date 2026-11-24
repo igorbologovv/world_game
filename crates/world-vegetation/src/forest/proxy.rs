@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 use bevy::{
     asset::RenderAssetUsages,
+    camera::primitives::Aabb,
     math::DVec3,
     pbr::MaterialPipeline,
     prelude::*,
@@ -34,9 +35,11 @@ pub(super) struct ProxyUniform {
 pub(super) struct ProxyMaterial {
     #[uniform(0)]
     pub coverage: ProxyUniform,
-    #[texture(1)]
+    #[texture(1, dimension = "2d_array")]
     #[sampler(2)]
     pub atlas: Handle<Image>,
+    #[texture(3, dimension = "2d_array")]
+    pub normals: Handle<Image>,
 }
 
 impl Material for ProxyMaterial {
@@ -68,24 +71,38 @@ impl Material for ProxyMaterial {
 pub(super) struct ProxyMesh {
     geometry: MeshBuilder,
     sites: Vec<[f32; 4]>,
+    bounds: Option<(Vec3, Vec3)>,
+}
+
+pub(super) struct ProxyGeometry {
+    pub mesh: Mesh,
+    pub bounds: Aabb,
 }
 
 impl ProxyMesh {
-    pub fn add(&mut self, site: Site, anchor: DVec3, slot: usize) {
+    pub fn add(&mut self, site: Site, anchor: DVec3, slot: usize, frame: impostor::Framing) {
         let root = (site.position - anchor).as_vec3();
-        let height = site.height();
-        let transform = Transform::from_translation(root)
-            .with_rotation(site.rotation())
-            .with_scale(Vec3::splat(height));
+        let rotation = site.rotation();
+        let up = rotation * Vec3::Y;
+        let forward = rotation * Vec3::Z;
+        let center = root + up * (site.scale * frame.center);
+        let radius = frame.radius * site.scale;
+        let extent = Vec3::splat(std::f32::consts::SQRT_2 * radius);
+        let min = center - extent;
+        let max = center + extent;
+        self.bounds = Some(
+            self.bounds
+                .map_or((min, max), |(lo, hi)| (min.min(lo), max.max(hi))),
+        );
         let start = self.geometry.positions.len() as u32;
-        let up = transform.up().into();
-        let half_width = half_width(site.species, site.variant) * height * 1.16;
-        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
-            let side = (x * 2.0 - 1.0) * half_width;
-            let position = transform.transform_point(Vec3::Y * y * 1.07) + Vec3::X * side;
-            let uv = impostor::uv(site.species, site.variant, Vec2::new(x, 1.0 - y));
-            self.geometry
-                .vertex(position, up, uv, [1.0, 1.0, 1.0, side]);
+        let tile = impostor::tile(site.species, site.variant) as f32;
+        for (x, y) in [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)] {
+            self.geometry.vertex(
+                center,
+                up,
+                Vec2::new(tile + 0.25 + x * 0.5, y),
+                forward.extend(radius).to_array(),
+            );
         }
         self.geometry.triangle(start, start + 1, start + 2);
         self.geometry.triangle(start, start + 2, start + 3);
@@ -95,14 +112,15 @@ impl ProxyMesh {
         );
     }
 
-    pub fn finish(self) -> Option<Mesh> {
-        if self.sites.is_empty() {
-            return None;
-        }
+    pub fn finish(self) -> Option<ProxyGeometry> {
+        let (min, max) = self.bounds?;
         let mut mesh = self.geometry.finish();
         mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
         mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, self.sites);
-        Some(mesh)
+        Some(ProxyGeometry {
+            mesh,
+            bounds: Aabb::from_min_max(min, max),
+        })
     }
 }
 
@@ -134,13 +152,17 @@ mod tests {
         };
         let mut leaf = ProxyMesh::default();
         let mut parent = ProxyMesh::default();
-        leaf.add(site, anchor, 0);
-        parent.add(site, anchor, 5);
+        let frame = impostor::Framing {
+            center: 8.0,
+            radius: 9.0,
+        };
+        leaf.add(site, anchor, 0, frame);
+        parent.add(site, anchor, 5, frame);
         assert_eq!(leaf.sites[0], [0.0, 300.0, 0.0, 0.0]);
         assert_eq!(parent.sites[0], [0.0, 300.0, 0.0, 5.0]);
         assert_eq!(leaf.geometry.positions, parent.geometry.positions);
         assert_eq!(leaf.geometry.uvs, parent.geometry.uvs);
-        assert_eq!(leaf.finish().unwrap().indices().unwrap().len(), 6);
-        assert_eq!(parent.finish().unwrap().indices().unwrap().len(), 6);
+        assert_eq!(leaf.finish().unwrap().mesh.indices().unwrap().len(), 6);
+        assert_eq!(parent.finish().unwrap().mesh.indices().unwrap().len(), 6);
     }
 }

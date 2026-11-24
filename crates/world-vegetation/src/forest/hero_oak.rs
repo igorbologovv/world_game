@@ -1,31 +1,33 @@
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
-    gltf::{Gltf, GltfMesh, GltfMaterial},
-    prelude::*,
     camera::primitives::MeshAabb,
-    image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
+    gltf::{Gltf, GltfMaterial, GltfMesh},
+    image::{
+        ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
+        ImageSamplerDescriptor,
+    },
+    prelude::*,
     render::{
         mesh::VertexAttributeValues,
-        render_resource::{Face, TextureDimension, TextureFormat, TextureViewDimension},
+        render_resource::{TextureDimension, TextureFormat, TextureViewDimension},
     },
 };
 
-use super::{textures, FoliageMaterial, ForestModels, ModelLod, Wind, WoodLod};
+use super::{impostor, textures, FoliageMaterial, ForestModels, ModelLod, Species, Wind, WoodLod};
 
 pub(super) const ROOT_SINK: f64 = 0.16;
 const ALPHA_CUTOFF: f32 = 0.46;
 
 pub(super) struct HeroOak {
-    pub lods: [ModelLod; 4],
+    pub lods: [ModelLod; 3],
     pub bark: Handle<StandardMaterial>,
-    pub impostor_image: Handle<Image>,
 }
 
 #[derive(Resource)]
 pub(super) struct HeroOakAssets(Option<OakFiles>);
 
 struct OakFiles {
-    lods: [Handle<Gltf>; 4],
+    lods: [Handle<Gltf>; 3],
     bark: [Handle<Image>; 3],
 }
 
@@ -36,25 +38,23 @@ impl HeroOakAssets {
 }
 
 struct OakPrimitives {
-    leaves: [Handle<Mesh>; 4],
+    leaves: [Handle<Mesh>; 3],
     wood: [Handle<Mesh>; 3],
     bark_image: Handle<Image>,
     leaf_image: Handle<Image>,
-    impostor_image: Handle<Image>,
 }
 
 impl OakPrimitives {
     fn resolve(
-        files: &[Handle<Gltf>; 4],
+        files: &[Handle<Gltf>; 3],
         gltfs: &Assets<Gltf>,
         gltf_meshes: &Assets<GltfMesh>,
         materials: &Assets<GltfMaterial>,
     ) -> Option<Self> {
-        let mut leaves = Vec::with_capacity(4);
+        let mut leaves = Vec::with_capacity(3);
         let mut wood = Vec::with_capacity(3);
         let mut bark_image = None;
         let mut leaf_image = None;
-        let mut impostor_image = None;
         for (level, file) in files.iter().enumerate() {
             let gltf = gltfs.get(file)?;
             let part = |name: &str| -> Option<(Handle<Mesh>, Handle<Image>)> {
@@ -70,19 +70,13 @@ impl OakPrimitives {
                 let image = materials.get(material)?.base_color_texture.clone()?;
                 Some((primitive.mesh.clone(), image))
             };
-            if level == 3 {
-                let (mesh, image) = part("Oak_Distant_Silhouette")?;
-                leaves.push(mesh);
-                impostor_image = Some(image);
-            } else {
-                let (mesh, image) = part("Sunlit_Oak_Foliage")?;
-                leaves.push(mesh);
-                let (trunk, bark) = part("Aged_Oak_Bark")?;
-                wood.push(trunk);
-                if level == 0 {
-                    bark_image = Some(bark);
-                    leaf_image = Some(image);
-                }
+            let (mesh, image) = part("Sunlit_Oak_Foliage")?;
+            leaves.push(mesh);
+            let (trunk, bark) = part("Aged_Oak_Bark")?;
+            wood.push(trunk);
+            if level == 0 {
+                bark_image = Some(bark);
+                leaf_image = Some(image);
             }
         }
         Some(Self {
@@ -90,7 +84,6 @@ impl OakPrimitives {
             wood: wood.try_into().ok()?,
             bark_image: bark_image?,
             leaf_image: leaf_image?,
-            impostor_image: impostor_image?,
         })
     }
 
@@ -101,11 +94,11 @@ impl OakPrimitives {
         materials: &mut Assets<StandardMaterial>,
         foliage_materials: &mut Assets<FoliageMaterial>,
         bark_maps: Option<&[Handle<Image>; 3]>,
-    ) -> Option<HeroOak> {
+    ) -> Option<(HeroOak, impostor::Source)> {
         for handle in self.leaves.iter().chain(self.wood.iter()) {
             meshes.get(handle)?;
         }
-        for handle in [&self.bark_image, &self.leaf_image, &self.impostor_image] {
+        for handle in [&self.bark_image, &self.leaf_image] {
             images.get(handle)?;
         }
 
@@ -136,16 +129,29 @@ impl OakPrimitives {
             ));
             bark.perceptual_roughness = 0.98;
         }
-        let bark = materials.add(bark);
-        let canopy = foliage_materials.add(foliage(
-            textures::import_mipmapped(images, &self.leaf_image, Some(ALPHA_CUTOFF), false),
+        let leaves = foliage(textures::import_mipmapped(
+            images,
+            &self.leaf_image,
+            Some(ALPHA_CUTOFF),
             false,
         ));
-        let impostor = foliage_materials.add(foliage(
-            textures::import_mipmapped(images, &self.impostor_image, Some(ALPHA_CUTOFF), false),
-            true,
-        ));
-        let mut lods = Vec::with_capacity(4);
+        let source = impostor::Source::new([
+            impostor::Part::authored(
+                meshes.get(&self.wood[0])?,
+                images.get(bark.base_color_texture.as_ref()?)?,
+                &bark,
+                true,
+            )?,
+            impostor::Part::authored(
+                meshes.get(&self.leaves[0])?,
+                images.get(&self.leaf_image)?,
+                &leaves.base,
+                false,
+            )?,
+        ]);
+        let bark = materials.add(bark);
+        let canopy = foliage_materials.add(leaves);
+        let mut lods = Vec::with_capacity(3);
         for (level, leaves) in self.leaves.iter().enumerate() {
             let mut mesh = meshes.get_mut(leaves)?;
             let foliage_bounds = mesh.get_aabb()?;
@@ -159,11 +165,7 @@ impl OakPrimitives {
             let wind: Vec<_> = positions
                 .iter()
                 .map(|&[x, y, z]| {
-                    let weight = if level < 2 {
-                        ((y - 3.0) * 0.008).clamp(0.0, 0.20)
-                    } else {
-                        0.0
-                    };
+                    let weight = ((y - 3.0) * 0.008).clamp(0.0, 0.20);
                     [weight, x * 0.21 + z * 0.17 + y * 0.09]
                 })
                 .collect();
@@ -177,36 +179,32 @@ impl OakPrimitives {
                     bounds: meshes.get(handle)?.get_aabb()?,
                 })
             });
-            let material = if level == 3 {
-                impostor.clone()
-            } else {
-                canopy.clone()
-            };
             lods.push(ModelLod::from_parts(
                 wood,
                 leaves.clone(),
-                material,
+                canopy.clone(),
                 foliage_bounds,
             ));
         }
-        Some(HeroOak {
-            lods: lods.try_into().ok()?,
-            bark,
-            impostor_image: self.impostor_image.clone(),
-        })
+        Some((
+            HeroOak {
+                lods: lods.try_into().ok()?,
+                bark,
+            },
+            source,
+        ))
     }
 }
 
-fn foliage(texture: Handle<Image>, impostor: bool) -> FoliageMaterial {
+fn foliage(texture: Handle<Image>) -> FoliageMaterial {
     FoliageMaterial {
         base: StandardMaterial {
             base_color_texture: Some(texture),
             alpha_mode: AlphaMode::Mask(ALPHA_CUTOFF),
-            perceptual_roughness: if impostor { 0.9 } else { 0.79 },
+            perceptual_roughness: 0.79,
             reflectance: 0.16,
-            double_sided: !impostor,
-            // The impostor already contains both windings for each card.
-            cull_mode: impostor.then_some(Face::Back),
+            double_sided: true,
+            cull_mode: None,
             ..default()
         },
         extension: Wind::default(),
@@ -221,17 +219,20 @@ pub(super) fn request_assets(mut commands: Commands, assets: Res<AssetServer>) {
         ("models/hero_oak/bark/metallic-roughness.ktx2", false),
     ]
     .map(|(path, is_srgb)| {
-        assets.load_builder().with_settings(move |settings: &mut ImageLoaderSettings| {
-            settings.is_srgb = is_srgb;
-            settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
-                mag_filter: ImageFilterMode::Linear,
-                min_filter: ImageFilterMode::Linear,
-                mipmap_filter: ImageFilterMode::Linear,
-                ..default()
-            });
-        }).load(path)
+        assets
+            .load_builder()
+            .with_settings(move |settings: &mut ImageLoaderSettings| {
+                settings.is_srgb = is_srgb;
+                settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                    address_mode_u: ImageAddressMode::Repeat,
+                    address_mode_v: ImageAddressMode::Repeat,
+                    mag_filter: ImageFilterMode::Linear,
+                    min_filter: ImageFilterMode::Linear,
+                    mipmap_filter: ImageFilterMode::Linear,
+                    ..default()
+                });
+            })
+            .load(path)
     });
     commands.insert_resource(HeroOakAssets(Some(OakFiles { lods, bark })));
 }
@@ -288,7 +289,7 @@ pub(super) fn finish_loading(
     } else {
         return;
     };
-    models.hero_oak = OakPrimitives::resolve(&files.lods, &gltfs, &gltf_meshes, &gltf_materials)
+    let loaded = OakPrimitives::resolve(&files.lods, &gltfs, &gltf_meshes, &gltf_materials)
         .and_then(|parts| {
             parts.build(
                 &mut meshes,
@@ -298,7 +299,10 @@ pub(super) fn finish_loading(
                 bark_maps,
             )
         });
-    if models.hero_oak.is_none() {
+    if let Some((oak, source)) = loaded {
+        models.portraits.insert(Species::Oak, 0, source);
+        models.hero_oak = Some(oak);
+    } else {
         warn!("Hero Oak meshes or textures are unavailable. Keeping the procedural oak meshes.");
     }
     pending.0 = None;
@@ -333,8 +337,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bevy::{
-        asset::AssetPlugin, gltf::GltfPlugin, image::{CompressedImageFormats, ImageLoader, ImagePlugin}, scene::ScenePlugin,
-    world_serialization::WorldSerializationPlugin,
+        asset::AssetPlugin,
+        gltf::GltfPlugin,
+        image::{CompressedImageFormats, ImageLoader, ImagePlugin},
+        scene::ScenePlugin,
+        world_serialization::WorldSerializationPlugin,
     };
 
     use super::*;
@@ -349,7 +356,7 @@ mod tests {
                 ..default()
             },
             WorldSerializationPlugin,
-        ScenePlugin,
+            ScenePlugin,
             ImagePlugin::default(),
             GltfPlugin::default(),
         ))
@@ -392,23 +399,43 @@ mod tests {
                     assert_eq!(image.texture_descriptor.format, format);
                     assert!(image.texture_descriptor.mip_level_count > 1);
                 }
-                for (level, (lod, count)) in
-                    oak.lods.iter().zip([33_524, 4_384, 626, 8]).enumerate()
-                {
+                assert!(world
+                    .resource::<ForestModels>()
+                    .portraits
+                    .contains(Species::Oak, 0));
+                let mut previous = usize::MAX;
+                for (level, lod) in oak.lods.iter().enumerate() {
                     let leaves = meshes.get(&lod.foliage).unwrap();
                     let wood_indices = lod.wood.as_ref().map_or(0, |wood| {
                         let mesh = meshes.get(&wood.mesh).unwrap();
-                        assert_trunk_material_basis(mesh);
+                        if level == 0 {
+                            assert_trunk_material_basis(mesh);
+                        }
                         mesh.indices().unwrap().len()
                     });
-                    assert_eq!((leaves.indices().unwrap().len() + wood_indices) / 3, count);
-                    assert_eq!(lod.wood.is_some(), level < 3);
+                    if level != 0 {
+                        let (mean, worst) =
+                            world.resource::<ForestModels>().portraits.silhouette_score(
+                                Species::Oak,
+                                0,
+                                [
+                                    meshes.get(&lod.wood.as_ref().unwrap().mesh).unwrap(),
+                                    leaves,
+                                ],
+                            );
+                        println!("Hero Oak LOD{level}: silhouette IoU {mean:.3} mean, {worst:.3} minimum");
+                        assert!(mean >= 0.95 && worst >= 0.85);
+                    }
+                    let triangles = (leaves.indices().unwrap().len() + wood_indices) / 3;
+                    assert!(triangles < previous);
+                    previous = triangles;
+                    assert!(lod.wood.is_some());
                     assert!(leaves.contains_attribute(Mesh::ATTRIBUTE_UV_1));
                     assert!(leaves.contains_attribute(Mesh::ATTRIBUTE_COLOR));
 
                     let material = foliage_materials.get(&lod.foliage_material).unwrap();
                     assert_eq!(material.base.alpha_mode, AlphaMode::Mask(ALPHA_CUTOFF));
-                    assert_eq!(material.base.cull_mode, (level == 3).then_some(Face::Back));
+                    assert_eq!(material.base.cull_mode, None);
                     let texture = images
                         .get(material.base.base_color_texture.as_ref().unwrap())
                         .unwrap();
@@ -416,7 +443,6 @@ mod tests {
                 }
                 assert_eq!(oak.lods[0].foliage_material, oak.lods[1].foliage_material);
                 assert_eq!(oak.lods[1].foliage_material, oak.lods[2].foliage_material);
-                assert_ne!(oak.lods[2].foliage_material, oak.lods[3].foliage_material);
                 break;
             }
             assert!(
