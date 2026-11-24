@@ -36,6 +36,17 @@ fn forest_altitude_sweep() {
         .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/forest-sweep"));
     fs::create_dir_all(&output).unwrap();
     let (mut app, target) = render_app();
+    let world = app.world_mut();
+    let mut visibility = world.query::<(&Name, &mut Visibility)>();
+    let (_, mut clouds) = visibility
+        .iter_mut(world)
+        .find(|(name, _)| name.as_str() == "Planetary clouds")
+        .expect("expected a planetary cloud mesh");
+    *clouds = Visibility::Hidden;
+    let mut hud = world.query_filtered::<&mut Node, Without<ChildOf>>();
+    for mut root in hud.iter_mut(world) {
+        root.display = Display::None;
+    }
     let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
     // This inland direction looks over a boreal river valley and broken ridges.
     let woodland = DVec3::new(
@@ -45,6 +56,7 @@ fn forest_altitude_sweep() {
     );
     for (label, up, height, tilt, warmup) in [
         ("ground", coast, 2.2, 0.025, 220),
+        ("grazing", woodland, 320.0, 0.16, 120),
         ("handoff", woodland, 1_700.0, 0.78, 75),
         ("aerial", woodland, 24_000.0, 0.87, 65),
         ("orbit", woodland, 1_450_000.0, 1.0, 90),
@@ -61,6 +73,26 @@ fn forest_altitude_sweep() {
         layout.fade.w, 1.0,
         "the orbital canopy must finish fading in"
     );
+
+    // Compare the same woodland with impostor geometry and terrain canopy.
+    // Changing only the forest range keeps the camera, air path and lighting fixed.
+    set_camera(app.world_mut(), woodland, 1_250.0, 0.94);
+    let settings = *app
+        .world()
+        .resource::<world_vegetation::VegetationSettings>();
+    for (label, forest_range) in [
+        ("reference-impostors", 3_000.0),
+        ("reference-canopy", 1_200.0),
+    ] {
+        app.insert_resource(world_vegetation::VegetationSettings {
+            forest_range,
+            ..settings
+        });
+        for _ in 0..180 {
+            render_frame(&mut app);
+        }
+        capture(&mut app, &target, &output, label);
+    }
 }
 
 #[test]
@@ -167,7 +199,8 @@ fn aim_at_tree(world: &mut World, eye: DVec3, focus: DVec3, up: DVec3) {
 }
 
 fn render_app() -> (App, Handle<Image>) {
-    let assets = WorldAssets::new(Path::new(WORKSPACE_ROOT).join("assets"));
+    let override_root = std::env::var_os("BEVY_ASSET_ROOT").map(PathBuf::from);
+    let assets = client_assets(Path::new(WORKSPACE_ROOT), None, override_root.as_deref());
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
