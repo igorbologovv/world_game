@@ -24,7 +24,7 @@ use bevy::{
     winit::WinitPlugin,
 };
 
-use world_core::canopy::ForestCanopy;
+use world_core::{canopy::ForestCanopy, runtime::GridCell};
 
 use super::*;
 
@@ -36,6 +36,17 @@ fn forest_altitude_sweep() {
         .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/forest-sweep"));
     fs::create_dir_all(&output).unwrap();
     let (mut app, target) = render_app();
+    let world = app.world_mut();
+    let mut visibility = world.query::<(&Name, &mut Visibility)>();
+    let (_, mut clouds) = visibility
+        .iter_mut(world)
+        .find(|(name, _)| name.as_str() == "Planetary clouds")
+        .expect("expected a planetary cloud mesh");
+    *clouds = Visibility::Hidden;
+    let mut hud = world.query_filtered::<&mut Node, Without<ChildOf>>();
+    for mut root in hud.iter_mut(world) {
+        root.display = Display::None;
+    }
     let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
     // This inland direction looks over a boreal river valley and broken ridges.
     let woodland = DVec3::new(
@@ -45,6 +56,7 @@ fn forest_altitude_sweep() {
     );
     for (label, up, height, tilt, warmup) in [
         ("ground", coast, 2.2, 0.025, 220),
+        ("grazing", woodland, 320.0, 0.16, 120),
         ("handoff", woodland, 1_700.0, 0.78, 75),
         ("aerial", woodland, 24_000.0, 0.87, 65),
         ("orbit", woodland, 1_450_000.0, 1.0, 90),
@@ -61,6 +73,26 @@ fn forest_altitude_sweep() {
         layout.fade.w, 1.0,
         "the orbital canopy must finish fading in"
     );
+
+    // Compare the same woodland with impostor geometry and terrain canopy.
+    // Changing only the forest range keeps the camera, air path and lighting fixed.
+    set_camera(app.world_mut(), woodland, 1_250.0, 0.94);
+    let settings = *app
+        .world()
+        .resource::<world_vegetation::VegetationSettings>();
+    for (label, forest_range) in [
+        ("reference-impostors", 3_000.0),
+        ("reference-canopy", 1_200.0),
+    ] {
+        app.insert_resource(world_vegetation::VegetationSettings {
+            forest_range,
+            ..settings
+        });
+        for _ in 0..180 {
+            render_frame(&mut app);
+        }
+        capture(&mut app, &target, &output, label);
+    }
 }
 
 #[test]
@@ -152,6 +184,137 @@ fn tree_lod_sweep() {
     }
 }
 
+#[test]
+#[ignore = "requires a GPU adapter and writes screenshots"]
+fn broadleaf_lighting_sweep() {
+    use bevy::gltf::{Gltf, GltfMesh};
+    use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
+
+    let output = std::env::var_os("FOREST_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/broadleaf-lighting"));
+    fs::create_dir_all(&output).unwrap();
+    let (mut app, target) = render_app();
+    let asset = app
+        .world()
+        .resource::<AssetServer>()
+        .load::<Gltf>("models/vegetation/tree_part9/tree_lod0.glb");
+    let settings = *app
+        .world()
+        .resource::<world_vegetation::VegetationSettings>();
+    let mesh_settings = world_vegetation::VegetationSettings {
+        mesh_distances: [180.0, 210.0],
+        impostor_blend: [165.0, 205.0],
+        ..settings
+    };
+    app.insert_resource(mesh_settings);
+    for _ in 0..360 {
+        render_frame(&mut app);
+    }
+    let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
+    let world = app.world_mut();
+    let gltf = world.resource::<Assets<Gltf>>().get(&asset).unwrap();
+    let leaves = &gltf.named_materials["Leaves"];
+    let leaf_mesh = gltf
+        .meshes
+        .iter()
+        .filter_map(|mesh| world.resource::<Assets<GltfMesh>>().get(mesh))
+        .flat_map(|mesh| &mesh.primitives)
+        .find(|primitive| primitive.material.as_ref() == Some(leaves))
+        .unwrap()
+        .mesh
+        .clone();
+    let mut parents = world.query::<(&Mesh3d, &ChildOf)>();
+    let trees: Vec<_> = parents
+        .iter(world)
+        .filter(|(mesh, _)| mesh.0 == leaf_mesh)
+        .map(|(_, parent)| parent.parent())
+        .collect();
+    let root = world.resource::<PlanetRoot>().entity();
+    let frame = world.get::<ReferenceFrame>(root).unwrap();
+    let tree = trees
+        .into_iter()
+        .map(|entity| {
+            frame.grid_position_double(
+                world.get::<GridCell>(entity).unwrap(),
+                world.get::<Transform>(entity).unwrap(),
+            )
+        })
+        .min_by(|a, b| {
+            a.distance_squared(coast * RADIUS)
+                .total_cmp(&b.distance_squared(coast * RADIUS))
+        })
+        .expect("Palm Coast must stream the authored tropical broadleaf");
+    println!("Tracked broadleaf at {tree:?}");
+    let up = tree.normalize();
+    let sun = world
+        .query_filtered::<&Transform, With<DirectionalLight>>()
+        .single(world)
+        .unwrap()
+        .rotation
+        * Vec3::Z;
+    let sun = sun.as_dvec3();
+    let toward_sun = (sun - up * sun.dot(up)).normalize();
+    let focus = tree + up * 13.0;
+    for (side, direction) in [("sunward", toward_sun), ("leeward", -toward_sun)] {
+        aim_at_tree(
+            app.world_mut(),
+            focus + direction * 52.0 + up * 4.0,
+            focus,
+            up,
+        );
+        for (representation, lods) in [
+            ("mesh", mesh_settings),
+            (
+                "impostor",
+                world_vegetation::VegetationSettings {
+                    impostor_blend: [16.0, 20.0],
+                    ..settings
+                },
+            ),
+        ] {
+            app.insert_resource(lods);
+            for _ in 0..120 {
+                render_frame(&mut app);
+            }
+            capture(
+                &mut app,
+                &target,
+                &output,
+                &format!("{side}-{representation}"),
+            );
+        }
+    }
+    let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
+    let assets = app.world().resource::<AssetServer>();
+    for path in [
+        "shaders/vegetation_fade.wesl",
+        "shaders/vegetation_proxy.wesl",
+    ] {
+        let shader = assets.load::<Shader>(path);
+        let mut ready = false;
+        for pipeline in cache.pipelines() {
+            let PipelineDescriptor::RenderPipelineDescriptor(descriptor) = &pipeline.descriptor
+            else {
+                continue;
+            };
+            if descriptor
+                .fragment
+                .as_ref()
+                .is_some_and(|stage| stage.shader == shader)
+            {
+                assert!(
+                    !matches!(pipeline.state, CachedPipelineState::Err(_)),
+                    "{path}: {:?}",
+                    pipeline.state
+                );
+                ready |= matches!(pipeline.state, CachedPipelineState::Ok(_));
+            }
+        }
+        assert!(ready, "{path} did not compile");
+    }
+}
+
 fn aim_at_tree(world: &mut World, eye: DVec3, focus: DVec3, up: DVec3) {
     let root = world.resource::<PlanetRoot>().entity();
     let (cell, translation) = world
@@ -167,7 +330,8 @@ fn aim_at_tree(world: &mut World, eye: DVec3, focus: DVec3, up: DVec3) {
 }
 
 fn render_app() -> (App, Handle<Image>) {
-    let assets = WorldAssets::new(Path::new(WORKSPACE_ROOT).join("assets"));
+    let override_root = std::env::var_os("BEVY_ASSET_ROOT").map(PathBuf::from);
+    let assets = client_assets(Path::new(WORKSPACE_ROOT), None, override_root.as_deref());
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins

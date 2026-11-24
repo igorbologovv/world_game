@@ -13,7 +13,10 @@ use bevy::{
     },
 };
 
-use super::{impostor, textures, FoliageMaterial, ForestModels, ModelLod, Species, Wind, WoodLod};
+use super::{
+    impostor, textures, FoliageMaterial, ForestModels, ModelLod, Species, Wind, WoodLod,
+    BROADLEAF_TRANSMISSION,
+};
 
 pub(super) const ROOT_SINK: f64 = 0.16;
 const ALPHA_CUTOFF: f32 = 0.46;
@@ -129,7 +132,7 @@ impl OakPrimitives {
             ));
             bark.perceptual_roughness = 0.98;
         }
-        let leaves = foliage(textures::import_mipmapped(
+        let mut leaves = foliage(textures::import_mipmapped(
             images,
             &self.leaf_image,
             Some(ALPHA_CUTOFF),
@@ -141,14 +144,17 @@ impl OakPrimitives {
                 images.get(bark.base_color_texture.as_ref()?)?,
                 &bark,
                 true,
+                None,
             )?,
             impostor::Part::authored(
                 meshes.get(&self.leaves[0])?,
                 images.get(&self.leaf_image)?,
                 &leaves.base,
                 false,
+                None,
             )?,
         ]);
+        leaves.extension = Wind::for_crown(source.frame());
         let bark = materials.add(bark);
         let canopy = foliage_materials.add(leaves);
         let mut lods = Vec::with_capacity(3);
@@ -203,6 +209,7 @@ fn foliage(texture: Handle<Image>) -> FoliageMaterial {
             alpha_mode: AlphaMode::Mask(ALPHA_CUTOFF),
             perceptual_roughness: 0.79,
             reflectance: 0.16,
+            diffuse_transmission: BROADLEAF_TRANSMISSION,
             double_sided: true,
             cull_mode: None,
             ..default()

@@ -15,7 +15,7 @@ use world_core::runtime::WorldAssets;
 
 use super::{
     impostor, textures, FoliageMaterial, ForestModels, ModelLod, Species, VariantModels, Wind,
-    WoodLod,
+    WoodLod, BROADLEAF_TRANSMISSION,
 };
 
 const LODS: usize = 3;
@@ -190,11 +190,20 @@ fn build_variant(
 
     let mut bark = standard_material_from_gltf_material(parts(&files[0], "Bark")?.1);
     let mut leaves = standard_material_from_gltf_material(parts(&files[0], "Leaves")?.1);
+    if prefab.species.broadleaf() {
+        leaves.diffuse_transmission = BROADLEAF_TRANSMISSION;
+    }
     let AlphaMode::Mask(cutoff) = leaves.alpha_mode else {
         return None;
     };
     let bark_image = bark.base_color_texture.as_ref()?;
     let leaf_image = leaves.base_color_texture.as_ref()?;
+    let leaf_normal = leaves
+        .normal_map_texture
+        .as_ref()
+        .filter(|_| leaves.normal_map_channel == bevy::mesh::UvChannel::Uv0)
+        .filter(|_| prefab.species.broadleaf())
+        .and_then(|handle| images.get(handle));
     let (wood, foliage_mesh) = geometry.first()?;
     let portrait = impostor::Source::new([
         impostor::Part::authored(
@@ -202,12 +211,14 @@ fn build_variant(
             images.get(bark_image)?,
             &bark,
             prefab.repeat_bark,
+            None,
         )?,
         impostor::Part::authored(
             meshes.get(foliage_mesh)?,
             images.get(leaf_image)?,
             &leaves,
             prefab.repeat_leaves,
+            leaf_normal,
         )?,
     ]);
 
@@ -228,9 +239,14 @@ fn build_variant(
             .clone(),
     );
     let bark = materials.add(bark);
+    let extension = if prefab.species.broadleaf() {
+        Wind::for_crown(portrait.frame())
+    } else {
+        Wind::default()
+    };
     let leaf_material = foliage.add(FoliageMaterial {
         base: leaves,
-        extension: Wind::default(),
+        extension,
     });
 
     let mut lods = Vec::with_capacity(LODS);
@@ -405,6 +421,15 @@ mod tests {
                 .unwrap();
             assert!(leaf_image.texture_descriptor.mip_level_count > 1);
             assert!(forest.portraits.contains(prefab.species, prefab.variant));
+            if prefab.species == Species::Oak {
+                assert!(
+                    forest
+                        .portraits
+                        .has_leaf_normal_map(prefab.species, prefab.variant),
+                    "{} must carry its leaf normal map into the impostor bake",
+                    prefab.path
+                );
+            }
         }
     }
 }

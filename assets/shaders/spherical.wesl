@@ -319,19 +319,16 @@ fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f
     let height_scale = 40.0;
     let sun_height = dot(sun, direction);
     let direct = smoothstep(0.0, 0.25, sun_height);
-    // Filter both samples over the same footprint so the side lighting and
-    // the soft shadow from the next crown disappear with the crown itself.
+    // The signed slope adds contrast around the stand's mean shading.
+    // Filtering the height difference removes contrast at coarser footprints.
     let slope = (sunward.g - leeward.g) * height_scale / (2.0 * step_meters);
-    let diffuse = smoothstep(-0.33, 0.81, sun_height - slope * sun_tangent);
     let attributes = crown.gba / max(crown.r, 0.03);
-    let rise = (sunward.g / max(sunward.r, 0.03) - attributes.x) * height_scale;
-    let light_rise = step_meters * max(sun_height, 0.0) / max(0.25, sun_tangent);
-    let shadow = direct * sunward.r * smoothstep(0.0, 7.0, rise - light_rise);
-    let light = (0.89 + direct * (diffuse * 0.54 - 0.17)) * (1.0 - 0.40 * shadow);
-    let shade = light * mix(0.75, 1.26, attributes.y);
+    let side_light = clamp(slope * sun_tangent, -0.7, 0.7);
+    let light = 1.0 - 0.48 * direct * side_light;
+    let shade = light * mix(0.75, 1.25, attributes.y);
     let warmth = attributes.z - 0.5;
     let color = vec3<f32>(1.0 + 0.31 * warmth, 1.0 + 0.09 * warmth, 1.0 - 0.37 * warmth);
-    let grove = mix(vec3<f32>(0.73), color * shade, crown_amount);
+    let grove = mix(vec3<f32>(1.0), color * shade, crown_amount);
     return vec4<f32>(mix(vec3<f32>(1.0), grove, strength), gaps);
 }
 
@@ -543,18 +540,21 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     var occlusion = 1.0;
     let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
     var canopy = vec4<f32>(0.0);
-    var canopy_blend = 0.0;
+    var canopy_coverage = 0.0;
+    var handoff = 0.0;
+    var grazing = 0.0;
     if canopy_layout.fade.y > 0.0 && (forest_distance > canopy_layout.fade.x || terrain_debug_mode != 0u) {
         // Limit anisotropy near the horizon so distant stands remain stable in motion.
         canopy = forest_canopy(direction, max(sqrt(pixel_dx * pixel_dy), footprint * 0.35));
-        let handoff = smoothstep(canopy_layout.fade.x, canopy_layout.fade.y, forest_distance);
+        handoff = smoothstep(canopy_layout.fade.x, canopy_layout.fade.y, forest_distance);
         let soil = 1.0 - clamp(weights[3] + weights[4], 0.0, 1.0);
         let exposed_land = smoothstep(1.1, 3.5, height);
         let toward_eye = (view.world_position.xyz - input.world_position.xyz) / max(forest_distance, 1.0);
-        // At grazing angles the vertical crowns also hide the ground behind them.
-        let grazing = 1.0 - abs(dot(direction, toward_eye));
-        let crown_influence = 1.0 - exp(-mix(3.2, 6.4, grazing) * canopy.a);
-        canopy_blend = handoff * soil * exposed_land * crown_influence;
+        // Near-vertical views reveal clearings. Oblique rays cross more crowns.
+        grazing = 1.0 - saturate(abs(dot(direction, toward_eye)));
+        let crown_depth = mix(2.0, 12.0, grazing * grazing);
+        let crown_influence = 1.0 - pow(1.0 - canopy.a, crown_depth);
+        canopy_coverage = soil * exposed_land * crown_influence;
     }
 
     if ground_detail > 0.0 {
@@ -607,28 +607,31 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     pbr_input.world_normal = surface_normal;
     pbr_input.N = shaded_normal;
     pbr_input.V = calculate_view(input.world_position, pbr_input.is_orthographic);
-    var lit = apply_pbr_lighting(pbr_input);
-    if canopy_blend > 0.0 {
-        // The impostor atlas already represents lit foliage. Blend the same
-        // scene-linear palette before fog and tonemapping, preserving slope relief.
-        let canopy_color = canopy.rgb / max(canopy.a, 0.001);
+    if handoff > 0.0 && canopy_coverage > 0.0 {
+        // The atlas stores premultiplied linear foliage color. Use the same
+        // sun, sky and exposure as the 3D forest by blending before lighting.
+        let canopy_color = canopy.rgb / max(canopy.a, 0.001) * 0.3;
         var sun = vec3<f32>(-0.57735, 0.57735, -0.57735);
         if lights.n_directional_lights > 0u {
             sun = lights.directional_lights[0].direction_to_light;
         }
-        // Terrain incidence follows slopes while daylight follows the spherical
-        // horizon. Retain cool indirect light through the terminator.
-        let daylight = smoothstep(-0.12, 0.27, dot(direction, sun));
-        let incidence = max(dot(surface_normal, sun), 0.0);
-        let diffuse = mix(vec3<f32>(0.13, 0.16, 0.21),
-            vec3<f32>(0.79, 0.83, 0.80) + incidence * vec3<f32>(0.34, 0.30, 0.24), daylight);
         let groves = grove_shading(direction * planet_radius, footprint, sun);
-        let landscape = vec3<f32>(1.0 + 0.37 * regional, 1.0 + 0.19 * regional, 1.0 - 0.28 * regional)
-            * (1.0 + 0.52 * patches);
         let crowns = crown_shading(direction, dx, dy, sun);
-        let forest_color = canopy_color * diffuse * landscape * groves * crowns.rgb;
-        lit = vec4<f32>(mix(lit.rgb, forest_color, canopy_blend * crowns.a), lit.a);
+        let stand_cover = canopy_coverage * mix(crowns.a, 1.0, grazing);
+        // Geometry has first claim on the pixel. Apply the canopy's share
+        // to the remaining terrain so ground does not leak through both fades.
+        let geometry_cover = (1.0 - handoff) * stand_cover;
+        let cover = handoff * stand_cover / max(1.0 - geometry_cover, 0.001);
+        // The coarse normal represents many crown faces. Retain their mean
+        // self-shadowing at every resolution, including the orbital cubemap.
+        let forest_color = canopy_color * groves * crowns.rgb * 0.24;
+        let forest_normal = normalize(mix(direction, surface_normal, 0.5));
+        pbr_input.material.base_color = vec4<f32>(mix(base_color.rgb, forest_color, cover), 1.0);
+        pbr_input.material.perceptual_roughness = mix(surface.roughness, 0.85, cover);
+        pbr_input.material.reflectance = mix(pbr_input.material.reflectance, vec3<f32>(0.16), cover);
+        pbr_input.N = normalize(mix(shaded_normal, forest_normal, cover));
     }
+    let lit = apply_pbr_lighting(pbr_input);
     var final_color = main_pass_post_lighting_processing(pbr_input, lit);
 
     if terrain_debug_mode != 0u {

@@ -91,6 +91,13 @@ view per tree. Its two mipmapped texture arrays occupy about 30.4 MiB on the
 GPU. The loader matches the packaged atlas to the decoded authored sources
 and bakes custom or missing variants asynchronously.
 
+Broadleaf meshes and impostors use the same rough leaf reflectance, diffuse
+transmission, and crown extinction. The shader estimates the incoming light's
+path through an ellipsoid in canonical tree space. Meshes use the fragment's
+local position and impostors reconstruct it from captured depth. The atlas
+retains unlit albedo, includes tangent-space leaf normals when available, and
+filters albedo and decoded normal directions before encoding the next mip.
+
 Export with Blender and Pillow. The first command extracts the two woodland
 intermediates from the original scene. The second packs the runtime models.
 
@@ -118,6 +125,8 @@ one fixed viewpoint and records a moving handoff.
 ```sh
 FOREST_CAPTURE_DIR=target/tree-lod-sweep \
   cargo test --locked -p world-client tree_lod_sweep -- --ignored --nocapture
+FOREST_CAPTURE_DIR=target/broadleaf-lighting \
+  cargo test --locked -p world-client broadleaf_lighting_sweep -- --ignored --nocapture
 ```
 
 The baseline and revised runs used Vulkan on a Radeon RX 6750 XT at

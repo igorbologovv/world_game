@@ -15,10 +15,10 @@ use bevy::{
             AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
         },
     },
-    shader::ShaderRef,
+    shader::{ShaderDefVal, ShaderRef},
 };
 
-use super::{impostor, placement::Site, MeshBuilder, Species};
+use super::{impostor, placement::Site, MeshBuilder, Species, BROADLEAF_TRANSMISSION};
 
 pub(super) const CHILD_SLOTS: usize = 24;
 #[derive(Clone, Copy, ShaderType)]
@@ -62,6 +62,25 @@ impl Material for ProxyMaterial {
             Mesh::ATTRIBUTE_COLOR.at_shader_location(3),
             Mesh::ATTRIBUTE_TANGENT.at_shader_location(4),
         ])?];
+        let broadleaf_tiles = Species::ALL
+            .into_iter()
+            .filter(|species| species.broadleaf())
+            .flat_map(|species| (0..species.variants()).map(move |variant| (species, variant)))
+            .fold(0, |mask, (species, variant)| {
+                mask | (1 << impostor::tile(species, variant))
+            });
+        let defs = [
+            ShaderDefVal::Bool("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into(), true),
+            ShaderDefVal::UInt("BROADLEAF_TILE_MASK".into(), broadleaf_tiles),
+            ShaderDefVal::UInt(
+                "BROADLEAF_TRANSMISSION_BYTE".into(),
+                (BROADLEAF_TRANSMISSION * 255.0).round() as u32,
+            ),
+        ];
+        descriptor.vertex.shader_defs.extend(defs.clone());
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.extend(defs);
+        }
 
         Ok(())
     }
