@@ -1,6 +1,7 @@
 //! The transparent planet-centered cloud volume.
 
 mod fields;
+mod volumetric;
 
 use bevy::{
     light::NotShadowCaster,
@@ -25,7 +26,61 @@ const SHADER: &str = "shaders/planet_clouds.wesl";
 
 pub(super) fn install(app: &mut App) {
     app.add_plugins(MaterialPlugin::<CloudMaterial>::default())
-        .add_systems(Startup, spawn.after(WorldReady));
+        .init_resource::<CloudMode>()
+        .add_systems(Startup, spawn.after(WorldReady))
+        .add_systems(Update, select_renderer);
+    volumetric::install(app);
+}
+
+#[derive(Default, Resource, Clone, Copy, PartialEq, Eq)]
+enum CloudMode {
+    #[default]
+    Volumetric,
+    Legacy,
+    Clear,
+}
+
+#[derive(Component)]
+struct CloudVisibility;
+
+#[derive(Component)]
+struct LegacyProxy;
+
+#[derive(Resource)]
+struct CloudFields {
+    shape: Handle<Image>,
+    weather: Handle<Image>,
+}
+
+fn select_renderer(
+    keyboard: Option<Res<ButtonInput<KeyCode>>>,
+    mut mode: ResMut<CloudMode>,
+    mut proxy: Query<&mut Visibility, With<LegacyProxy>>,
+) {
+    if keyboard.is_some_and(|keys| keys.just_pressed(KeyCode::F6)) {
+        *mode = match *mode {
+            CloudMode::Volumetric => CloudMode::Legacy,
+            CloudMode::Legacy => CloudMode::Clear,
+            CloudMode::Clear => CloudMode::Volumetric,
+        };
+        info!(
+            "Planetary clouds (F6): {}",
+            match *mode {
+                CloudMode::Volumetric => "volumetric",
+                CloudMode::Legacy => "legacy",
+                CloudMode::Clear => "clear",
+            }
+        );
+    }
+    if mode.is_changed() {
+        if let Ok(mut visibility) = proxy.single_mut() {
+            *visibility = if *mode == CloudMode::Legacy {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
@@ -80,17 +135,26 @@ fn spawn(
     let radius = RADIUS as f32;
     // The margin encloses the analytic shell between the proxy's vertices.
     let proxy = Sphere::new(radius + TOP + 500.0).mesh().ico(24).unwrap();
+    let weather = images.add(fields::weather());
+    commands.insert_resource(CloudFields {
+        shape: images.add(fields::shape()),
+        weather: weather.clone(),
+    });
     root.spawn(
         &mut commands,
-        (
-            Name::new("Planetary clouds"),
+        (Name::new("Planetary clouds"), CloudVisibility),
+    )
+    .with_children(|clouds| {
+        clouds.spawn((
+            LegacyProxy,
+            Visibility::Hidden,
             Mesh3d(meshes.add(proxy)),
             MeshMaterial3d(materials.add(CloudMaterial {
                 radii: Vec4::new(radius, radius + BASE, radius + TOP, 0.0),
                 billows: images.add(fields::billows()),
-                weather: images.add(fields::weather()),
+                weather,
             })),
             NotShadowCaster,
-        ),
-    );
+        ));
+    });
 }

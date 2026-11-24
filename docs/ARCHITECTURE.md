@@ -27,8 +27,8 @@ The workspace moves those connections into the contracts below.
 | `apps/world-client` | Bevy configuration, asset root, region selection, registration of subsystem plugins | `world-client` binary |
 | `apps/world-generator` | Command-line entry point and the default output directory | `generate_world` binary |
 
-The terrain owner maintains `assets/shaders/spherical.wesl`,
-`assets/shaders/planet_clouds.wesl`, and `assets/textures/terrain/`. The water
+The terrain owner maintains `assets/shaders/spherical.wesl`, the planetary
+cloud shaders, and `assets/textures/terrain/`. The water
 owner maintains `ocean.wgsl`, `river_water.wgsl`, and `water_common.wgsl`.
 The vegetation owner maintains
 `foliage.wgsl`, `distant_forest.wgsl`, `assets/models/hero_oak/`, and their
@@ -100,8 +100,9 @@ The generator builds without the Bevy renderer or the path crate.
 - **Rendering.** In `PostUpdate`, the player's free camera runs in
   `CameraMotion` before transform propagation. Ocean culling follows camera
   motion, river map lines follow propagation, and forest visibility runs
-  between Bevy's frustum update and visibility propagation. The terrain
-  atmosphere also reads the camera after camera motion.
+  between Bevy's frustum update and visibility propagation. Terrain draws
+  experimental clouds after the transparent pass and before HDR post-processing.
+  The cloud view is extracted from the camera's planet grid position.
 
 ## Adding a subsystem or region
 

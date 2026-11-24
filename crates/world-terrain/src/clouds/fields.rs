@@ -100,6 +100,78 @@ pub(super) fn billows() -> Image {
     image
 }
 
+pub(super) fn shape() -> Image {
+    let size = BILLOW_SIZE;
+    let low = Worley::new(4);
+    let high = Worley::new(8);
+    let mut data = Vec::with_capacity((size.pow(3) * 2) as usize);
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let p = (UVec3::new(x, y, z).as_vec3() + 0.5) / size as f32;
+                let base = 0.67 * value_noise(p * 4.0, 4, 41)
+                    + 0.24 * value_noise(p * 8.0, 8, 113)
+                    + 0.09 * value_noise(p * 16.0, 16, 174);
+                let billow = 0.69 * low.sample(p) + 0.31 * high.sample(p);
+                data.extend([unorm(base * 0.68 + billow * 0.32), unorm(billow)]);
+            }
+        }
+    }
+    let mut image = with_mips(
+        size,
+        size,
+        TextureDimension::D3,
+        TextureFormat::Rg8Unorm,
+        data,
+    );
+    image.sampler = filtered(ImageAddressMode::Repeat);
+    image
+}
+
+struct Worley {
+    period: i32,
+    points: Vec<Vec3>,
+}
+
+impl Worley {
+    fn new(period: i32) -> Self {
+        let mut points = Vec::with_capacity(period.pow(3) as usize);
+        for z in 0..period {
+            for y in 0..period {
+                for x in 0..period {
+                    let p = Vec3::new(x as f32, y as f32, z as f32);
+                    points.push(Vec3::new(
+                        value_noise(p, period, 11),
+                        value_noise(p, period, 117),
+                        value_noise(p, period, 293),
+                    ));
+                }
+            }
+        }
+        Self { period, points }
+    }
+
+    fn sample(&self, p: Vec3) -> f32 {
+        let p = p * self.period as f32;
+        let floor = p.floor();
+        let cell = floor.as_ivec3();
+        let fraction = p - floor;
+        let mut nearest = 1.0_f32;
+        for z in -1..=1 {
+            for y in -1..=1 {
+                for x in -1..=1 {
+                    let offset = IVec3::new(x, y, z);
+                    let c = (cell + offset) & IVec3::splat(self.period - 1);
+                    let index = (c.z * self.period + c.y) * self.period + c.x;
+                    let point = offset.as_vec3() + self.points[index as usize];
+                    nearest = nearest.min(point.distance_squared(fraction));
+                }
+            }
+        }
+        1.0 - nearest.sqrt()
+    }
+}
+
 fn unorm(value: f32) -> u8 {
     (255.0 * value.clamp(0.0, 1.0)).round() as u8
 }
