@@ -95,6 +95,10 @@ fn cloud_altitude_sweep() {
     println!("Cloud sweep target: {width}x{height}");
     render_frame(&mut app);
     let case = std::env::var("CLOUD_CASE").ok();
+    if case.as_deref() == Some("celestial") {
+        capture_celestial_cycle(&mut app, &target, &output);
+        return;
+    }
     // The shoreline is about 9.2 km from the Palm Coast spawn toward its look target.
     let shore_distance = 9_190.0;
     for (name, distance, altitude, tilt) in [
@@ -227,10 +231,14 @@ fn cloud_altitude_sweep() {
 }
 
 fn toggle_renderer(app: &mut App) {
+    press_key(app, KeyCode::F6, Key::F6);
+}
+
+fn press_key(app: &mut App, key_code: KeyCode, logical_key: Key) {
     for state in [ButtonState::Pressed, ButtonState::Released] {
         app.world_mut().write_message(KeyboardInput {
-            key_code: KeyCode::F6,
-            logical_key: Key::F6,
+            key_code,
+            logical_key: logical_key.clone(),
             state,
             window: Entity::PLACEHOLDER,
             text: None,
@@ -238,6 +246,96 @@ fn toggle_renderer(app: &mut App) {
         });
         render_frame(app);
     }
+}
+
+fn capture_celestial_cycle(app: &mut App, target: &Handle<Image>, output: &Path) {
+    set_camera(app.world_mut(), 0.0, 90.0, -0.13);
+    for _ in 0..80 {
+        render_frame(app);
+    }
+    capture(app, target, output.join("01-day.png"));
+    let sun = |world: &mut World| {
+        world
+            .query::<(&Transform, &bevy::light::SunDisk)>()
+            .iter(world)
+            .find(|(_, disk)| disk.intensity > 0.0)
+            .unwrap()
+            .0
+            .back()
+            .as_vec3()
+    };
+    let day = sun(app.world_mut());
+    for _ in 0..3 {
+        press_key(app, KeyCode::F3, Key::F3);
+    }
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        250,
+    )));
+    for _ in 0..48 {
+        render_frame(app);
+    }
+    let night = sun(app.world_mut());
+    assert!(
+        night.dot(day) < -0.15,
+        "the star must cross to the night side"
+    );
+    press_key(app, KeyCode::F2, Key::F2);
+    assert_eq!(night, sun(app.world_mut()));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    capture(app, target, output.join("02-moonlit-coast.png"));
+
+    let world = app.world_mut();
+    let mut lights = world.query::<(Entity, &bevy::light::SunDisk, &mut DirectionalLight)>();
+    let saved: Vec<_> = lights
+        .iter_mut(world)
+        .filter(|(_, disk, _)| disk.intensity == 0.0)
+        .map(|(entity, _, mut light)| (entity, std::mem::replace(&mut light.illuminance, 0.0)))
+        .collect();
+    assert_eq!(saved.len(), 2);
+    assert!(saved.iter().all(|(_, lux)| *lux > 0.0));
+    for _ in 0..12 {
+        render_frame(app);
+    }
+    capture(app, target, output.join("03-without-moonlight.png"));
+    let world = app.world_mut();
+    for (entity, illuminance) in saved {
+        world
+            .get_mut::<DirectionalLight>(entity)
+            .unwrap()
+            .illuminance = illuminance;
+    }
+    let root = world.resource::<PlanetRoot>().entity();
+    let grid = world.get::<ReferenceFrame>(root).unwrap().clone();
+    let moondir = world
+        .query::<(&Name, &world_core::runtime::GridCell, &Transform)>()
+        .iter(world)
+        .find_map(|(name, cell, transform)| {
+            (name.as_str() == "Moon 1").then(|| grid.grid_position_double(cell, transform))
+        })
+        .unwrap();
+    let mut cameras = world.query_filtered::<GridTransform, With<WorldCamera>>();
+    let mut camera = cameras.single_mut(world).unwrap();
+    let eye = grid.grid_position_double(&camera.cell, &camera.transform);
+    camera.transform.rotation = Transform::IDENTITY
+        .looking_to((moondir - eye).as_vec3(), eye.normalize().as_vec3())
+        .rotation;
+    for _ in 0..25 {
+        render_frame(app);
+    }
+    capture(app, target, output.join("04-moon-and-stars.png"));
+    let shader: Handle<Shader> = app
+        .world()
+        .resource::<AssetServer>()
+        .load("shaders/moon.wesl");
+    let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
+    assert!(
+        cache.pipelines().any(|pipeline| {
+            matches!(&pipeline.descriptor, PipelineDescriptor::RenderPipelineDescriptor(d)
+            if d.fragment.as_ref().is_some_and(|f| f.shader == shader))
+                && matches!(pipeline.state, CachedPipelineState::Ok(_))
+        }),
+        "moon material did not render"
+    );
 }
 
 fn assert_cloud_pipelines(app: &App, experimental: bool) {
@@ -297,9 +395,11 @@ fn capture(app: &mut App, target: &Handle<Image>, path: PathBuf) {
 
 fn aim_near_sun(world: &mut World, offset: f64) {
     let sun = world
-        .query_filtered::<&Transform, With<bevy::light::SunDisk>>()
-        .single(world)
+        .query::<(&Transform, &bevy::light::SunDisk)>()
+        .iter(world)
+        .find(|(_, disk)| disk.intensity > 0.0)
         .unwrap()
+        .0
         .back()
         .as_vec3();
     let root = world.resource::<PlanetRoot>().entity();

@@ -248,9 +248,11 @@ fn broadleaf_lighting_sweep() {
     println!("Tracked broadleaf at {tree:?}");
     let up = tree.normalize();
     let sun = world
-        .query_filtered::<&Transform, With<DirectionalLight>>()
-        .single(world)
+        .query::<(&Transform, &bevy::light::SunDisk)>()
+        .iter(world)
+        .find(|(_, disk)| disk.intensity > 0.0)
         .unwrap()
+        .0
         .rotation
         * Vec3::Z;
     let sun = sun.as_dvec3();

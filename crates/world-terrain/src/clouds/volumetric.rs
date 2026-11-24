@@ -72,7 +72,7 @@ fn extract_camera(
     cameras: Extract<
         Query<(RenderEntity, &GridCell, &Transform, &Exposure, &Projection), With<WorldCamera>>,
     >,
-    sun: Extract<Query<(&DirectionalLight, &Transform), With<bevy::light::SunDisk>>>,
+    sun: Extract<Query<(&DirectionalLight, &Transform), With<crate::celestial::PrimarySun>>>,
     visibility: Extract<Query<&Visibility, With<CloudVisibility>>>,
     mode: Extract<Res<CloudMode>>,
     fields: Extract<Option<Res<CloudFields>>>,

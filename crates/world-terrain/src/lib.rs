@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! Adaptive spherical terrain rendering and its lighting and atmosphere.
 
+mod celestial;
 mod clouds;
 mod terrain_surface;
 
@@ -10,7 +11,7 @@ use bevy::{
         ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
         ImageSamplerDescriptor,
     },
-    light::{atmosphere::ScatteringMedium, light_consts::lux, Atmosphere, SunDisk},
+    light::{atmosphere::ScatteringMedium, Atmosphere},
     pbr::MaterialPlugin,
     prelude::*,
     reflect::TypePath,
@@ -31,6 +32,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
+        celestial::install(app);
         clouds::install(app);
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
             .insert_resource(ClearColor(Color::BLACK))
@@ -257,20 +259,6 @@ fn setup(
         ground_albedo: Vec3::splat(0.27),
         medium: scattering,
     });
-
-    // Sun direction in the planet reference frame: afternoon/daylight at the
-    // starter region, with an oblique angle to show terrain and tree relief.
-    let sun_direction = Vec3::new(-0.78, 0.60, -0.18).normalize();
-    commands.spawn((
-        DirectionalLight {
-            // Raw sunlight is attenuated by the atmosphere during rendering.
-            illuminance: lux::RAW_SUNLIGHT * 0.6,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_translation(sun_direction * 1_000.0).looking_at(Vec3::ZERO, Vec3::Y),
-        SunDisk::EARTH,
-    ));
 
     // The atmosphere's generated environment lighting supplies the blue sky
     // fill. A large uniform ambient term would wash out shadow contrast.

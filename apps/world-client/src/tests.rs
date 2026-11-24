@@ -83,9 +83,11 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     assert!(ground > WATER_SURFACE_ELEVATION);
     assert_explorer_at(world, root, spawn, ground);
     let sun = world
-        .query_filtered::<&Transform, With<DirectionalLight>>()
-        .single(world)
-        .unwrap();
+        .query::<(&Transform, &bevy::light::SunDisk)>()
+        .iter(world)
+        .find(|(_, disk)| disk.intensity > 0.0)
+        .unwrap()
+        .0;
     assert!(spawn.dot((sun.rotation * Vec3::Z).as_dvec3()) > 0.60);
     let size = UVec2::new(800, 600);
     {

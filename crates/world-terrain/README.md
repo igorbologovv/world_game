@@ -106,3 +106,26 @@ The reference is commit `9e4e290`. The mean gives each matched pose equal weight
 | Backlit view | 3.26 | 3.12 |
 | Cloud core, 2.1 km | 7.23 | 5.90 |
 | Mean across views | 3.91 | 3.49 |
+
+## Celestial clock
+
+**F2** pauses and resumes the celestial clock. **F3** cycles through 1×, 60×,
+600× and 3,600× speed, with the current setting logged on each change.
+The clock starts at 1× in daylight at Palm Coast and runs independently
+of player movement and weather animation.
+
+The planet spins every 24 hours and follows a circular 365.25-day orbit.
+The two moons follow independent inclined circular orbits with periods of
+4 and 11 days. Positions are evaluated analytically in double precision.
+The gameplay grid stays planet-fixed. The sky rotates into that frame, and
+moon meshes use the same floating-origin grid as the camera.
+
+The existing atmosphere and clouds receive the moving sun. Each moon has a
+sunlit phase and supplies directional moonlight scaled by that phase. Its
+intensity is tuned for the fixed gameplay exposure. The procedural star
+cubemap rotates with the sky, becoming visible after twilight and in space.
+
+```sh
+CLOUD_CASE=celestial CLOUD_CAPTURE_DIR=target/celestial-cycle \\
+  cargo test --locked -p world-client cloud_altitude_sweep -- --ignored --nocapture
+```
