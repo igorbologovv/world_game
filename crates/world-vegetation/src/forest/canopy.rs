@@ -373,10 +373,10 @@ fn raster_coarse(
             let up = direction(DVec2::new(f64::from(x), f64::from(y)));
             let east = up.any_orthonormal_vector() * angular_offset;
             let north = up.cross(east);
-            let mut sum = Vec4::ZERO;
+            let mut area_ratio = Vec4::ZERO;
             for offset in [east + north, east - north, -east + north, -east - north] {
                 let patch = PatchKey::containing((up + offset).normalize());
-                sum += *sample_cache.entry(patch).or_insert_with(|| {
+                area_ratio += *sample_cache.entry(patch).or_insert_with(|| {
                     if patch.center().y.abs() > 0.9601 {
                         return Vec4::ZERO;
                     }
@@ -385,10 +385,12 @@ fn raster_coarse(
                         .sample_sites(heights, clearing, stride)
                         .map(crown)
                         .sum::<Vec4>();
-                    cover(crowns * (stride as f32 / area))
+                    // Match the global cubemap baker: accumulate raw crown area
+                    // before applying the nonlinear occupancy transfer function.
+                    crowns * (stride as f32 / area)
                 });
             }
-            pixels.extend(encode(sum * 0.25));
+            pixels.extend(encode(cover(area_ratio * 0.25)));
         }
     }
     pixels
@@ -399,6 +401,15 @@ mod tests {
     use super::*;
     use std::path::Path;
     use world_core::coordinates::terrain_aligned_direction;
+
+    #[test]
+    fn coarse_coverage_uses_mean_area_before_nonlinear_transfer() {
+        let dense = Vec4::splat(4.0);
+        let total = cover(dense * 0.25);
+        let old_average = cover(dense) * 0.25;
+        assert!(total.w > old_average.w);
+        assert!(total.w < 1.0);
+    }
 
     #[test]
     fn near_canopy_uses_canonical_crowns_and_respects_clearings() {

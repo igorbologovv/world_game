@@ -46,6 +46,10 @@ var crown_sampler: sampler;
 var globe_canopy: texture_cube<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(14)
 var globe_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(15)
+var<uniform> canopy_fix_enabled: u32;
+@group(constants::MATERIAL_BIND_GROUP) @binding(16)
+var<uniform> canopy_debug_view: u32;
 
 // Sand, grass, dirt, rock, snow. Distances are in meters.
 const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
@@ -188,12 +192,19 @@ fn global_canopy(direction: vec3<f32>, footprint: f32, texel_meters: f32) -> vec
     return textureSampleLevel(globe_canopy, globe_sampler, direction, lod) * coverage;
 }
 
-fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
+// Weighted contributions to the canonical premultiplied canopy coverage.
+struct CanopyLookup {
+    value: vec4<f32>,
+    sources: array<f32, 7>, // local levels 0..5, followed by globe
+}
+
+fn forest_canopy(direction: vec3<f32>, footprint: f32) -> CanopyLookup {
     let axis = max(abs(direction.x), max(abs(direction.y), abs(direction.z)));
     // Account for the shrinking solid angle of a cube texel toward the face edges.
     let globe_texel = 2.0 * planet_radius * axis * axis / f32(textureDimensions(globe_canopy).x);
     let resident_texel = globe_texel * exp2(canopy_layout.fade.z);
     var result = vec4<f32>(0.0);
+    var sources: array<f32, 7>;
     var remaining = 1.0;
     for (var level = 0u; level < CANOPY_CASCADES; level++) {
         let layer = canopy_layout.cascades[level];
@@ -216,14 +227,18 @@ fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
         if weight > 0.0 {
             let uv = square * 0.5 + 0.5;
             let data = textureSampleLevel(canopy_atlas, canopy_sampler, uv, i32(level), 0.0);
-            result += data * (remaining * weight);
+            let contribution = remaining * weight;
+            result += data * contribution;
+            sources[level] += contribution;
             remaining *= 1.0 - weight;
             if remaining < 0.001 {
-                return result;
+                return CanopyLookup(result, sources);
             }
         }
     }
-    return result + remaining * global_canopy(direction, footprint, globe_texel);
+    result += remaining * global_canopy(direction, footprint, globe_texel);
+    sources[6] = remaining * canopy_layout.fade.w;
+    return CanopyLookup(result, sources);
 }
 
 fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f32>) -> vec4<f32> {
@@ -497,11 +512,18 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     var occlusion = 1.0;
     let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
     var canopy = vec4<f32>(0.0);
+    var canopy_sources: array<f32, 7>;
     var canopy_blend = 0.0;
+    var canopy_handoff = 0.0;
+    var canopy_fine = 0.0;
+    var crown_shade = vec3<f32>(1.0);
     if canopy_layout.fade.y > 0.0 && (forest_distance > canopy_layout.fade.x || terrain_debug_mode != 0u) {
         // Limit anisotropy near the horizon so distant stands remain stable in motion.
-        canopy = forest_canopy(direction, max(sqrt(pixel_dx * pixel_dy), footprint * 0.35));
+        let sample = forest_canopy(direction, max(sqrt(pixel_dx * pixel_dy), footprint * 0.35));
+        canopy = sample.value;
+        canopy_sources = sample.sources;
         let handoff = smoothstep(canopy_layout.fade.x, canopy_layout.fade.y, forest_distance);
+        canopy_handoff = handoff;
         let soil = 1.0 - clamp(weights[3] + weights[4], 0.0, 1.0);
         let exposed_land = smoothstep(1.1, 3.5, height);
         let toward_eye = (view.world_position.xyz - input.world_position.xyz) / max(forest_distance, 1.0);
@@ -509,6 +531,16 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         let grazing = 1.0 - abs(dot(direction, toward_eye));
         let crown_influence = 1.0 - exp(-mix(3.2, 6.4, grazing) * canopy.a);
         canopy_blend = handoff * soil * exposed_land * crown_influence;
+        if canopy_fix_enabled != 0u {
+            // Coarse coverage has small alpha although grazing rays traverse
+            // multiple crowns. Retain more forest without inventing clearing trees.
+            canopy_fine = clamp(canopy_sources[0]
+                * (1.0 - smoothstep(4.0, 22.0, footprint)), 0.0, 1.0);
+            let unresolved = 1.0 - canopy_fine;
+            let optical_depth = mix(3.2, 6.4 + 5.2 * unresolved, grazing);
+            let visible_crowns = 1.0 - exp(-optical_depth * canopy.a);
+            canopy_blend = handoff * soil * exposed_land * visible_crowns;
+        }
     }
 
     if ground_detail > 0.0 {
@@ -580,7 +612,18 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         let landscape = vec3<f32>(1.0 + 0.37 * regional, 1.0 + 0.19 * regional, 1.0 - 0.28 * regional)
             * (1.0 + 0.52 * patches);
         let crowns = crown_shading(direction, dx, dy, sun);
-        let forest_color = canopy_color * diffuse * landscape * groves * crowns.rgb;
+        var forest_color = canopy_color * diffuse * landscape * groves * crowns.rgb;
+        crown_shade = crowns.rgb;
+        if canopy_fix_enabled != 0u {
+            // Fade from individual crown relief to spatially stable stand
+            // shadowing, instead of abruptly returning to unshadowed foliage.
+            let unresolved = 1.0 - canopy_fine;
+            let stand = smoothstep(0.012, 0.32, canopy.a);
+            let broad = macro_noise(position / 9600.0 + vec3<f32>(2.7, -4.1, 0.9));
+            let coarse_shadow = 0.79 + 0.15 * broad;
+            crown_shade = mix(crowns.rgb, vec3<f32>(coarse_shadow), unresolved * stand);
+            forest_color = canopy_color * diffuse * landscape * groves * crown_shade;
+        }
         lit = vec4<f32>(mix(lit.rgb, forest_color, canopy_blend * crowns.a), lit.a);
     }
     var final_color = main_pass_post_lighting_processing(pbr_input, lit);
@@ -595,6 +638,30 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         }
         let diagnostic_blend = smoothstep(650.0, 1450.0, forest_distance);
         final_color = mix(final_color, vec4<f32>(debug_color, 1.0), diagnostic_blend);
+    }
+    if canopy_debug_view != 0u {
+        var diagnostic = vec3<f32>(0.0);
+        if canopy_debug_view == 1u {
+            // Blue -> cyan -> green -> yellow -> orange -> red: six
+            // local levels; magenta: the global cubemap.
+            diagnostic = canopy_sources[0] * vec3<f32>(0.10, 0.24, 1.0)
+                + canopy_sources[1] * vec3<f32>(0.02, 0.82, 0.97)
+                + canopy_sources[2] * vec3<f32>(0.16, 0.90, 0.29)
+                + canopy_sources[3] * vec3<f32>(0.98, 0.87, 0.08)
+                + canopy_sources[4] * vec3<f32>(1.00, 0.45, 0.06)
+                + canopy_sources[5] * vec3<f32>(0.92, 0.13, 0.16)
+                + canopy_sources[6] * vec3<f32>(0.78, 0.17, 0.87);
+        } else if canopy_debug_view == 2u {
+            // R: sampled coverage, G: effective opacity, B: finest-detail weight.
+            diagnostic = vec3<f32>(canopy.a, canopy_blend, canopy_fine);
+        } else if canopy_debug_view == 3u {
+            diagnostic = crown_shade; // Shading multiplier before fog.
+        } else {
+            // R: geometric handoff, G: canopy opacity, B: local fine weight.
+            diagnostic = vec3<f32>(canopy_handoff, canopy_blend, canopy_sources[0]);
+        }
+        final_color = mix(final_color, vec4<f32>(diagnostic, 1.0),
+            smoothstep(450.0, 1200.0, forest_distance));
     }
     return FragmentOutput(final_color);
 }
