@@ -311,6 +311,32 @@ mod tests {
             assert_eq!(image.data.as_ref().unwrap().len(), mip_bytes);
         }
     }
+
+    #[test]
+    fn impostor_mips_filter_linear_albedo_and_folded_normals() {
+        use super::super::impostor::{decode_normal, encode_normal};
+
+        let side = 12;
+        let mut colors = Vec::new();
+        let mut normals = Vec::new();
+        for y in 0..side {
+            for x in 0..side {
+                let gray = if x % 2 == 0 { 0 } else { 255 };
+                colors.push([gray, gray, gray, 255]);
+                let directions = [-0.05, 0.05];
+                let normal = Vec3::new(directions[x % 2], directions[y % 2], -1.0);
+                let [u, v] = encode_normal(normal);
+                normals.push([u, v, 46, 128]);
+            }
+        }
+
+        let (colors, normals, levels) = impostor_mips(colors, normals, side, side, 1);
+        assert_eq!(levels, 2);
+        let mip = side * side * 4;
+        assert_eq!(&colors[mip..mip + 3], &[188; 3]);
+        let normal = decode_normal([normals[mip], normals[mip + 1]]);
+        assert!(normal.z < -0.99, "{normal:?}");
+    }
 }
 
 /// Build matching, tile-isolated albedo and normal mip chains from one view.
@@ -365,21 +391,45 @@ pub(super) fn impostor_mips(
                 let block = [i, i + 1, i + width, i + width + 1];
                 let weights = block.map(|i| u32::from(colors[i][3]));
                 let sum = weights.iter().sum::<u32>();
-                let average = |pixels: &[[u8; 4]], channel| {
-                    if sum == 0 {
-                        return 0;
-                    }
+                if sum == 0 {
+                    next_colors.push([0; 4]);
+                    next_normals.push([0; 4]);
+                    continue;
+                }
+                let mut albedo = Vec3::ZERO;
+                let mut direction = Vec3::ZERO;
+                for (index, weight) in block.into_iter().zip(weights) {
+                    let [red, green, blue, _] = colors[index];
+                    let [x, y, _, _] = normals[index];
+                    let weight = weight as f32 / sum as f32;
+                    albedo += LinearRgba::from(Srgba::rgb_u8(red, green, blue)).to_vec3() * weight;
+                    direction += super::impostor::decode_normal([x, y]) * weight;
+                }
+                let color = Srgba::from(LinearRgba::rgb(albedo.x, albedo.y, albedo.z));
+                let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+                next_colors.push([
+                    byte(color.red),
+                    byte(color.green),
+                    byte(color.blue),
+                    (sum / 4) as u8,
+                ]);
+                // Octahedral coordinates wrap at -Z. Average directions in
+                // 3D so texels on opposite sides of the fold keep that normal.
+                let [x, y] = if direction.length_squared() > 1e-4 {
+                    super::impostor::encode_normal(direction)
+                } else {
+                    let index = block.into_iter().max_by_key(|&i| colors[i][3]).unwrap();
+                    [normals[index][0], normals[index][1]]
+                };
+                let average = |channel| {
                     (block
                         .into_iter()
                         .zip(weights)
-                        .map(|(i, weight)| u32::from(pixels[i][channel]) * weight)
+                        .map(|(index, weight)| u32::from(normals[index][channel]) * weight)
                         .sum::<u32>()
                         / sum) as u8
                 };
-                let mut color = std::array::from_fn(|channel| average(&colors, channel));
-                color[3] = (sum / 4) as u8;
-                next_colors.push(color);
-                next_normals.push(std::array::from_fn(|channel| average(&normals, channel)));
+                next_normals.push([x, y, average(2), average(3)]);
             }
         }
         for tile in 0..tiles {

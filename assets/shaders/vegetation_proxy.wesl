@@ -1,7 +1,8 @@
 import super::vegetation_dither::{vegetation_threshold, vegetation_coverage};
+import super::tree_crown_lighting::shade_broadleaf;
 import bevy_pbr::render::mesh_functions::get_world_from_local;
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_view_bindings::{lights, view};
 import bevy_pbr::render::pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
 import bevy_pbr::render::pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing};
 
@@ -167,6 +168,7 @@ fn decode_normal(encoded: vec2<f32>) -> vec3<f32> {
 struct Capture {
     color: vec4<f32>,
     surface: vec4<f32>,
+    depth: f32,
 }
 
 fn sample_view(
@@ -174,7 +176,7 @@ fn sample_view(
     tile_scale: f32, inset: f32, parallax: f32, dx: vec2<f32>, dy: vec2<f32>,
 ) -> Capture {
     if weight <= 0.005 {
-        return Capture(vec4<f32>(0.0), vec4<f32>(0.0));
+        return Capture(vec4<f32>(0.0), vec4<f32>(0.0), 0.0);
     }
     let camera = basis(layer);
     let plane_uv = project(camera, point);
@@ -191,20 +193,27 @@ fn sample_view(
     }
     let uv = project(camera, point + in.eye * displacement);
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) {
-        return Capture(vec4<f32>(0.0), vec4<f32>(0.0));
+        return Capture(vec4<f32>(0.0), vec4<f32>(0.0), 0.0);
     }
     let lookup = atlas_uv(uv, in.tile, tile_scale, inset);
     var albedo = textureSampleGrad(atlas, atlas_sampler, lookup, layer, dx, dy);
     var surface = textureSampleGrad(normal_atlas, atlas_sampler, lookup, layer, dx, dy);
+    var surface_uv = uv;
     if albedo.a < 0.45 && abs(displacement) > 0.02 {
         let original = textureSampleGrad(atlas, atlas_sampler, plane_atlas_uv, layer, dx, dy);
         if 0.75 * original.a > albedo.a {
             albedo = vec4<f32>(original.rgb, 0.75 * original.a);
             surface = sampled;
+            surface_uv = plane_uv;
         }
     }
     let alpha = weight * albedo.a;
-    return Capture(vec4<f32>(albedo.rgb * alpha, alpha), vec4<f32>(decode_normal(surface.rg), surface.b) * alpha);
+    // Resolve the captured surface onto the actual eye ray for crown lighting.
+    let hit = camera.side * (2.0 * surface_uv.x - 1.0)
+        + camera.rise * (1.0 - 2.0 * surface_uv.y)
+        + camera.eye * (2.0 * surface.a - 1.0);
+    return Capture(vec4<f32>(albedo.rgb * alpha, alpha),
+        vec4<f32>(decode_normal(surface.rg), surface.b) * alpha, dot(hit, in.eye) * alpha);
 }
 
 @fragment
@@ -235,8 +244,9 @@ fn fragment(in: ProxyOutput) -> @location(0) vec4<f32> {
         discard;
     }
     let surface = (p0.surface + p1.surface + p2.surface) / albedo.a;
-    let normal = surface.xyz;
-    let world_normal = normalize(cross(in.up, in.forward) * normal.x + in.up * normal.y + in.forward * normal.z);
+    let normal = select(in.eye, surface.xyz, dot(surface.xyz, surface.xyz) > 0.001);
+    let local_x = cross(in.up, in.forward);
+    let world_normal = normalize(local_x * normal.x + in.up * normal.y + in.forward * normal.z);
 
     var pbr = pbr_input_new();
     pbr.material.base_color = vec4<f32>(albedo.rgb / albedo.a, 1.0);
@@ -249,5 +259,17 @@ fn fragment(in: ProxyOutput) -> @location(0) vec4<f32> {
     pbr.world_normal = world_normal;
     pbr.N = world_normal;
     pbr.V = normalize(view.world_position - in.world);
+    let broadleaf = ((1u << u32(in.tile)) & constants::BROADLEAF_TILE_MASK) != 0u;
+    if broadleaf && surface.a > 0.0 {
+        let crown_point = point + in.eye * ((p0.depth + p1.depth + p2.depth) / albedo.a);
+        var sun = vec3<f32>(0.0, 1.0, 0.0);
+        if lights.n_directional_lights > 0u {
+            let world_sun = lights.directional_lights[0].direction_to_light;
+            sun = vec3<f32>(dot(world_sun, local_x), dot(world_sun, in.up), dot(world_sun, in.forward));
+        }
+        // Filtered bark/leaf texels carry a fraction of the leaf's transmission.
+        let leaf_transmission = f32(constants::BROADLEAF_TRANSMISSION_BYTE) / 255.0;
+        shade_broadleaf(&pbr, crown_point, sun, saturate(surface.a / leaf_transmission));
+    }
     return main_pass_post_lighting_processing(pbr, apply_pbr_lighting(pbr));
 }

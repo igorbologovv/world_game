@@ -20,14 +20,20 @@ use bevy::{
         visibility::VisibilitySystems,
     },
     math::DVec3,
-    pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin},
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{
+        ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+        MaterialPlugin,
+    },
     prelude::*,
     reflect::TypePath,
     render::{
         mesh::Indices,
-        render_resource::{AsBindGroup, PrimitiveTopology},
+        render_resource::{
+            AsBindGroup, PrimitiveTopology, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+        },
     },
-    shader::ShaderRef,
+    shader::{ShaderDefVal, ShaderRef},
 };
 use world_core::{
     planet::{LEGACY_BAKED_RADIUS, RADIUS, SEA_LEVEL},
@@ -40,6 +46,7 @@ pub use lod::VegetationSettings;
 
 const VARIANTS: usize = 3;
 const FOLIAGE_CUTOFF: f32 = 0.39;
+const BROADLEAF_TRANSMISSION: f32 = 0.18;
 
 type FoliageMaterial = ExtendedMaterial<StandardMaterial, Wind>;
 
@@ -47,12 +54,15 @@ type FoliageMaterial = ExtendedMaterial<StandardMaterial, Wind>;
 struct Wind {
     #[uniform(100)]
     coverage: Vec4,
+    #[uniform(101)]
+    crown_frame: Vec2,
 }
 
 impl Default for Wind {
     fn default() -> Self {
         Self {
             coverage: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            crown_frame: Vec2::ZERO,
         }
     }
 }
@@ -64,6 +74,29 @@ impl MaterialExtension for Wind {
 
     fn fragment_shader() -> ShaderRef {
         "shaders/vegetation_fade.wesl".into()
+    }
+
+    fn specialize(
+        _: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _: &MeshVertexBufferLayoutRef,
+        _: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment
+                .shader_defs
+                .push(ShaderDefVal::Bool("TREE_CROWN".into(), true));
+        }
+        Ok(())
+    }
+}
+
+impl Wind {
+    fn for_crown(frame: impostor::Framing) -> Self {
+        Self {
+            crown_frame: Vec2::new(frame.center, frame.radius),
+            ..default()
+        }
     }
 }
 
@@ -91,6 +124,10 @@ impl Species {
             Self::Palm => 1,
             _ => VARIANTS,
         }
+    }
+
+    const fn broadleaf(self) -> bool {
+        matches!(self, Self::Oak | Self::Acacia | Self::Jungle)
     }
 
     fn colors(self) -> ([f32; 3], [f32; 3]) {
@@ -270,12 +307,22 @@ fn build_models(
     let mut variants = Vec::with_capacity(Species::ALL.len());
     for species in Species::ALL {
         let foliage_image = images.add(textures::canopy_texture(species));
-        let foliage_material = foliage_materials.add(cutout_material(foliage_image));
+        let shared_material = (!species.broadleaf())
+            .then(|| foliage_materials.add(cutout_material(foliage_image.clone())));
         let mut species_variants = Vec::with_capacity(species.variants());
         for variant in 0..species.variants() {
+            let (wood, leaves) = generate_tree(species, variant as u64, 0);
+            let foliage_material = shared_material.clone().unwrap_or_else(|| {
+                let mut material = cutout_material(foliage_image.clone());
+                let frame = impostor::Framing::from_parts([&wood, &leaves]);
+                material.extension = Wind::for_crown(frame);
+                material.base.diffuse_transmission = BROADLEAF_TRANSMISSION;
+                foliage_materials.add(material)
+            });
             let mut lods = Vec::with_capacity(3);
-            for level in 0..3 {
-                let (wood, leaves) = generate_tree(species, variant as u64, level);
+            for (wood, leaves) in std::iter::once((wood, leaves))
+                .chain((1..3).map(|level| generate_tree(species, variant as u64, level)))
+            {
                 lods.push(ModelLod::new(
                     Some(wood.finish()),
                     leaves.finish_canopy(variant as f32),

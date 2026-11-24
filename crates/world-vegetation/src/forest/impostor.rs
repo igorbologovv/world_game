@@ -18,7 +18,9 @@ use bevy::{
 
 use flate2::bufread::GzDecoder;
 
-use super::{generate_tree, textures, MeshBuilder, Species, FOLIAGE_CUTOFF, VARIANTS};
+use super::{
+    generate_tree, textures, MeshBuilder, Species, BROADLEAF_TRANSMISSION, FOLIAGE_CUTOFF, VARIANTS,
+};
 
 const SIDE: usize = 96;
 const HORIZON_VIEWS: usize = 16;
@@ -56,6 +58,7 @@ impl Portraits {
 
     fn fingerprint(&self) -> blake3::Hash {
         let mut hash = blake3::Hasher::new();
+        hash.update(b"linear-albedo-tangent-normals-v1");
         for source in &self.0 {
             hash.update(&[u8::from(source.is_some())]);
             let Some(source) = source else { continue };
@@ -88,6 +91,14 @@ impl Portraits {
                 hash.update(&size.height.to_le_bytes());
                 let count = size.width as usize * size.height as usize * 4;
                 hash.update(&part.diffuse.data.as_ref().expect("CPU image bytes")[..count]);
+                if let Some(mapped) = &part.mapped_normals {
+                    let size = mapped.texture.texture_descriptor.size;
+                    hash.update(&size.width.to_le_bytes());
+                    hash.update(&size.height.to_le_bytes());
+                    let count = size.width as usize * size.height as usize * 4;
+                    hash.update(&mapped.texture.data.as_ref().expect("CPU normal bytes")[..count]);
+                    update(&mut hash, &mapped.tangents);
+                }
                 update(&mut hash, &[part.tint.to_array()]);
                 update(&mut hash, &[[part.cutoff, part.transmission]]);
                 hash.update(&[u8::from(part.repeat), u8::from(part.double_sided)]);
@@ -99,6 +110,13 @@ impl Portraits {
     #[cfg(test)]
     pub fn contains(&self, species: Species, variant: usize) -> bool {
         self.0[tile(species, variant)].is_some()
+    }
+
+    #[cfg(test)]
+    pub fn has_leaf_normal_map(&self, species: Species, variant: usize) -> bool {
+        self.0[tile(species, variant)]
+            .as_ref()
+            .is_some_and(|source| source.parts[1].mapped_normals.is_some())
     }
 
     #[cfg(test)]
@@ -114,6 +132,7 @@ impl Portraits {
             Part {
                 mesh: Part::geometry(meshes[index]).unwrap(),
                 diffuse: Arc::clone(&template.diffuse),
+                mapped_normals: None,
                 tint: template.tint,
                 cutoff: template.cutoff,
                 repeat: template.repeat,
@@ -135,6 +154,23 @@ pub(super) struct Framing {
     pub radius: f32,
 }
 
+impl Framing {
+    pub fn from_parts(parts: [&MeshBuilder; 2]) -> Self {
+        let positions = || parts.iter().flat_map(|part| &part.positions);
+        let (min, max) = positions().fold((0.0_f32, 0.0_f32), |(lo, hi), p| {
+            (lo.min(p[1]), hi.max(p[1]))
+        });
+        let center = (min + max) * 0.5;
+        let radius = positions()
+            .map(|&p| (Vec3::from_array(p) - Vec3::Y * center).length())
+            .fold(0.0_f32, f32::max);
+        Self {
+            center,
+            radius: radius / (1.0 - 2.0 * INSET),
+        }
+    }
+}
+
 pub(super) type Frames = [Framing; TILES];
 
 pub(super) struct Atlas {
@@ -151,6 +187,7 @@ pub(super) struct Source {
 pub(super) struct Part {
     mesh: MeshBuilder,
     diffuse: Arc<Image>,
+    mapped_normals: Option<MappedNormals>,
     tint: Vec4,
     cutoff: f32,
     repeat: bool,
@@ -158,23 +195,19 @@ pub(super) struct Part {
     transmission: f32,
 }
 
+struct MappedNormals {
+    texture: Arc<Image>,
+    tangents: Vec<[f32; 4]>,
+}
+
 impl Source {
     pub fn new(parts: [Part; 2]) -> Self {
-        let positions = || parts.iter().flat_map(|part| &part.mesh.positions);
-        let (min, max) = positions().fold((0.0_f32, 0.0_f32), |(lo, hi), p| {
-            (lo.min(p[1]), hi.max(p[1]))
-        });
-        let center = (min + max) * 0.5;
-        let radius = positions()
-            .map(|&p| (Vec3::from_array(p) - Vec3::Y * center).length())
-            .fold(0.0_f32, f32::max);
-        Self {
-            parts,
-            frame: Framing {
-                center,
-                radius: radius / (1.0 - 2.0 * INSET),
-            },
-        }
+        let frame = Framing::from_parts([&parts[0].mesh, &parts[1].mesh]);
+        Self { parts, frame }
+    }
+
+    pub fn frame(&self) -> Framing {
+        self.frame
     }
 
     fn procedural(species: Species, variant: usize, bark: Arc<Image>, diffuse: Arc<Image>) -> Self {
@@ -183,6 +216,7 @@ impl Source {
             Part {
                 mesh: trunk,
                 diffuse: bark,
+                mapped_normals: None,
                 tint: Vec4::ONE,
                 cutoff: 0.0,
                 repeat: true,
@@ -192,11 +226,16 @@ impl Source {
             Part {
                 mesh: canopy,
                 diffuse,
+                mapped_normals: None,
                 tint: Vec4::ONE,
                 cutoff: FOLIAGE_CUTOFF,
                 repeat: false,
                 double_sided: true,
-                transmission: 0.34,
+                transmission: if species.broadleaf() {
+                    BROADLEAF_TRANSMISSION
+                } else {
+                    0.34
+                },
             },
         ])
     }
@@ -208,6 +247,7 @@ impl Part {
         diffuse: &Image,
         material: &StandardMaterial,
         repeat: bool,
+        normal_map: Option<&Image>,
     ) -> Option<Self> {
         if diffuse.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb {
             return None;
@@ -215,6 +255,15 @@ impl Part {
         Some(Self {
             mesh: Self::geometry(mesh)?,
             diffuse: Arc::new(diffuse.clone()),
+            mapped_normals: normal_map
+                .filter(|map| map.texture_descriptor.format == TextureFormat::Rgba8Unorm)
+                .and_then(|texture| match mesh.attribute(Mesh::ATTRIBUTE_TANGENT) {
+                    Some(VertexAttributeValues::Float32x4(tangents)) => Some(MappedNormals {
+                        texture: Arc::new(texture.clone()),
+                        tangents: tangents.clone(),
+                    }),
+                    _ => None,
+                }),
             tint: material.base_color.to_linear().to_vec4(),
             cutoff: match material.alpha_mode {
                 AlphaMode::Mask(cutoff) => cutoff,
@@ -474,6 +523,10 @@ impl Portrait {
             let texture_uv = indices.map(|i| Vec2::from_array(mesh.uvs[i]));
             let colors = indices.map(|i| Vec4::from_array(mesh.colors[i]));
             let normals = indices.map(|i| Vec3::from_array(mesh.normals[i]));
+            let tangents = part
+                .mapped_normals
+                .as_ref()
+                .map(|map| indices.map(|i| Vec4::from_array(map.tangents[i])));
             for y in min.y..=max.y {
                 for x in min.x..=max.x {
                     let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - a;
@@ -488,7 +541,8 @@ impl Portrait {
                     if depth < self.depth[index] {
                         continue;
                     }
-                    let texel = sample(&part.diffuse, blend(texture_uv, weights), part.repeat);
+                    let uv = blend(texture_uv, weights);
+                    let texel = sample(&part.diffuse, uv, part.repeat);
                     let tint = blend(colors, weights) * part.tint;
                     if f32::from(texel[3]) / 255.0 * tint.w < part.cutoff {
                         continue;
@@ -502,8 +556,18 @@ impl Portrait {
                         let albedo = Srgba::from(LinearRgba::rgb(albedo.x, albedo.y, albedo.z));
                         [byte(albedo.red), byte(albedo.green), byte(albedo.blue), 255]
                     };
-                    let normal = blend(normals, weights).normalize_or_zero()
-                        * if back_face { -1.0 } else { 1.0 };
+                    let mut normal = blend(normals, weights);
+                    if let Some((mapped, tangents)) = part.mapped_normals.as_ref().zip(tangents) {
+                        // Use the same interpolated MikkTSpace basis as the mesh shader.
+                        let tangent = blend(tangents, weights);
+                        let bitangent = normal.cross(tangent.xyz()) * tangent.w;
+                        let texel = sample(&mapped.texture, uv, part.repeat);
+                        let local = Vec3::new(texel[0] as f32, texel[1] as f32, texel[2] as f32)
+                            * (2.0 / 255.0)
+                            - Vec3::ONE;
+                        normal = tangent.xyz() * local.x + bitangent * local.y + normal * local.z;
+                    }
+                    let normal = if back_face { -normal } else { normal };
                     let [u, v] = encode_normal(normal);
                     self.normal[index] = [
                         u,
@@ -519,7 +583,7 @@ impl Portrait {
 }
 
 // Octahedral normals leave two channels for transmission and signed depth.
-fn encode_normal(normal: Vec3) -> [u8; 2] {
+pub(super) fn encode_normal(normal: Vec3) -> [u8; 2] {
     let normal = normal / normal.abs().element_sum().max(1e-6);
     let mut oct = normal.xy();
     if normal.z < 0.0 {
@@ -530,6 +594,15 @@ fn encode_normal(normal: Vec3) -> [u8; 2] {
         oct = (Vec2::ONE - oct.yx().abs()) * sign;
     }
     [byte(oct.x * 0.5 + 0.5), byte(oct.y * 0.5 + 0.5)]
+}
+
+pub(super) fn decode_normal([x, y]: [u8; 2]) -> Vec3 {
+    let mut normal = Vec3::new(x as f32, y as f32, 0.0) * (2.0 / 255.0) - Vec3::new(1.0, 1.0, 0.0);
+    normal.z = 1.0 - normal.x.abs() - normal.y.abs();
+    let fold = (-normal.z).max(0.0);
+    normal.x -= fold.copysign(normal.x);
+    normal.y -= fold.copysign(normal.y);
+    normal.normalize()
 }
 
 fn byte(value: f32) -> u8 {

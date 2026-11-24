@@ -154,6 +154,7 @@ fn build_material(mut commands: Commands, mut materials: ResMut<Assets<FoliageMa
             base: base.clone(),
             extension: Wind {
                 coverage: Vec4::new(coverage(low), coverage(high), start, end),
+                ..default()
             },
         })
     };
