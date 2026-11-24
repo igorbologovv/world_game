@@ -6,16 +6,16 @@ mod terrain_surface;
 
 use bevy::{
     asset::LoadState,
-    pbr::MaterialPlugin,
+    image::{
+        ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
+        ImageSamplerDescriptor,
+    },
     light::{atmosphere::ScatteringMedium, light_consts::lux, Atmosphere, SunDisk},
+    pbr::MaterialPlugin,
     prelude::*,
     reflect::TypePath,
+    render::render_resource::{AsBindGroup, TextureFormat, TextureViewDimension},
     shader::ShaderRef,
-    image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
-    render::{
-        render_resource::{AsBindGroup, TextureFormat, TextureViewDimension},
-
-    },
 };
 use world_core::{
     canopy::{CanopyLayout, ForestCanopy},
@@ -33,16 +33,14 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         clouds::install(app);
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
-        .insert_resource(ClearColor(Color::BLACK))
-        .add_systems(Startup, setup.after(WorldReady))
-        .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
-        .add_systems(Update, toggle_canopy_debug)
-        .add_systems(Update, update_canopy)
-        .add_systems(Update, terrain_surface::stream.after(WorldMovement));
+            .insert_resource(ClearColor(Color::BLACK))
+            .add_systems(Startup, setup.after(WorldReady))
+            .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
+            .add_systems(Update, toggle_canopy_debug)
+            .add_systems(Update, update_canopy)
+            .add_systems(Update, terrain_surface::stream.after(WorldMovement));
     }
 }
-
-const SUN_DIRECTION: Vec3 = Vec3::new(-0.78, 0.60, -0.18);
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 struct TerrainMaterial {
@@ -78,8 +76,9 @@ struct TerrainMaterial {
 impl TerrainMaterial {
     fn load(asset_server: &AssetServer) -> Self {
         // Base layers use the order sand, grass, dirt, rock, snow.
-        let albedo = asset_server.load_builder().with_settings(
-            |settings: &mut ImageLoaderSettings| {
+        let albedo = asset_server
+            .load_builder()
+            .with_settings(|settings: &mut ImageLoaderSettings| {
                 settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                     address_mode_u: ImageAddressMode::Repeat,
                     address_mode_v: ImageAddressMode::Repeat,
@@ -88,9 +87,10 @@ impl TerrainMaterial {
                     mipmap_filter: ImageFilterMode::Linear,
                     ..default()
                 });
-            },
-        ).load("textures/terrain/albedo.ktx2");
-        let normal_roughness = asset_server.load_builder()
+            })
+            .load("textures/terrain/albedo.ktx2");
+        let normal_roughness = asset_server
+            .load_builder()
             .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
             .load("textures/terrain/normal-roughness.ktx2");
         Self {
@@ -164,7 +164,8 @@ impl TerrainDetail {
         Self {
             material,
             albedo: assets.load("textures/terrain/detail-albedo.ktx2"),
-            normal_roughness: assets.load_builder()
+            normal_roughness: assets
+                .load_builder()
                 .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
                 .load("textures/terrain/detail-normal-roughness.ktx2"),
         }
@@ -258,7 +259,7 @@ fn setup(
 
     // Sun direction in the planet reference frame: afternoon/daylight at the
     // starter region, with an oblique angle to show terrain and tree relief.
-    let sun_direction = SUN_DIRECTION.normalize();
+    let sun_direction = Vec3::new(-0.78, 0.60, -0.18).normalize();
     commands.spawn((
         DirectionalLight {
             // Raw sunlight is attenuated by the atmosphere during rendering.
@@ -266,8 +267,7 @@ fn setup(
             shadow_maps_enabled: true,
             ..default()
         },
-        Transform::from_translation(sun_direction * 1_000.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(sun_direction * 1_000.0).looking_at(Vec3::ZERO, Vec3::Y),
         SunDisk::EARTH,
     ));
 
@@ -280,7 +280,10 @@ fn setup(
 mod tests {
     use std::time::{Duration, Instant};
 
-    use bevy::{asset::AssetPlugin, image::{CompressedImageFormats, ImageLoader, ImagePlugin}};
+    use bevy::{
+        asset::AssetPlugin,
+        image::{CompressedImageFormats, ImageLoader, ImagePlugin},
+    };
 
     use super::*;
 
