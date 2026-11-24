@@ -104,11 +104,19 @@ fn cloud_altitude_sweep() {
         ("04-inside-cloud-layer", 0.0, 2_350.0, 0.015),
         ("05-below-clouds", 0.0, 150.0, 0.28),
         ("06-palm-coast", shore_distance, 45.0, -0.12),
+        ("09-backlit", shore_distance, 80.0, 0.0),
+        ("09b-silver-lining", shore_distance, 80.0, 0.0),
+        ("10-cloud-core", 16_000.0, 2_100.0, -0.08),
     ] {
         if case.as_ref().is_some_and(|case| !name.contains(case)) {
             continue;
         }
         set_camera(app.world_mut(), distance, altitude, tilt);
+        match name {
+            "09-backlit" => aim_near_sun(app.world_mut(), 0.0),
+            "09b-silver-lining" => aim_near_sun(app.world_mut(), 164.0),
+            _ => {}
+        }
         for _ in 0..65 {
             render_frame(&mut app);
         }
@@ -193,6 +201,29 @@ fn cloud_altitude_sweep() {
         set_camera(app.world_mut(), 16_000.0, 2_100.0, -0.08);
         capture(&mut app, &target, output.join("08-camera-cut.png"));
     }
+
+    if case.as_deref().is_none_or(|name| name == "passage") {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )));
+        set_camera(app.world_mut(), 11_000.0, 2_100.0, -0.08);
+        for _ in 0..30 {
+            render_frame(&mut app);
+        }
+        for step in 0..=120 {
+            let distance = 11_000.0 + f64::from(step) * 100.0;
+            set_camera(app.world_mut(), distance, 2_100.0, -0.08);
+            if step % 15 == 0 {
+                capture(
+                    &mut app,
+                    &target,
+                    output.join(format!("11-cloud-passage-{step:03}.png")),
+                );
+            } else {
+                render_frame(&mut app);
+            }
+        }
+    }
 }
 
 fn toggle_renderer(app: &mut App) {
@@ -262,6 +293,28 @@ fn capture(app: &mut App, target: &Handle<Image>, path: PathBuf) {
         }
     }
     panic!("screenshot was not saved: {path:?}");
+}
+
+fn aim_near_sun(world: &mut World, offset: f64) {
+    let sun = world
+        .query_filtered::<&Transform, With<bevy::light::SunDisk>>()
+        .single(world)
+        .unwrap()
+        .back()
+        .as_vec3();
+    let root = world.resource::<PlanetRoot>().entity();
+    let grid = world.get::<ReferenceFrame>(root).unwrap().clone();
+    let mut cameras = world.query_filtered::<GridTransform, With<WorldCamera>>();
+    let mut camera = cameras.single_mut(world).unwrap();
+    let eye = grid.grid_position_double(&camera.cell, &camera.transform);
+    let up = eye.normalize();
+    let away_from_sun = (up * sun.as_dvec3().dot(up) - sun.as_dvec3()).normalize();
+    let radial = (eye + offset * away_from_sun).normalize();
+    let (cell, translation) = grid.translation_to_grid(radial * eye.length());
+    let up = radial.as_vec3();
+    let aim = (sun - up * 0.19).normalize();
+    *camera.cell = cell;
+    *camera.transform = Transform::from_translation(translation).looking_to(aim, up);
 }
 
 fn set_camera(world: &mut World, distance: f64, altitude: f64, tilt: f64) {

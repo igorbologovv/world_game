@@ -51,18 +51,22 @@ legacy renderer, and clear skies. The branch starts in volumetric mode.
 
 The ray march clips against two spherical decks, terrain depth, and the ocean
 radius. The liquid deck spans 1,450–4,650 m above the reference sphere and the
-ice deck spans 4,950–7,900 m. A weather cubemap shapes fronts and local cloud
-heights. A repeating 3D Worley and fractal value-noise field provides billows
-and erosion at several scales. Both fields and their mip chains are generated
-at startup.
+ice deck spans 4,950–7,900 m. The weather cubemap controls fronts and where the
+liquid deck forms shallow stratocumulus or taller cumulus. Wind shear draws
+the upper ice into cirrus filaments. The repeating 3D Worley and fractal
+value-noise field packs the cloud mass, billows, edge erosion, and interior
+density in one texture. Distorted fine erosion breaks up the billow edges,
+and the density varies continuously from thin pockets to opaque cores. Both
+fields and their mip chains are generated at startup.
 
-The integrator uses Beer–Lambert extinction, a two-lobe
-Henyey–Greenstein phase function, and density samples along the sunlight path
-for self-shadowing. It uses Bevy's atmosphere transmittance LUT, with
-approximations for multiple scattering, ambient fill, and aerial inscattering.
-The view march skips the gap between the decks, takes longer steps in clear
-weather, chooses step sizes and noise mips by the projected footprint, and
-stops once transmittance falls below 0.8%.
+The integrator uses Beer–Lambert extinction and density samples along the
+sunlight path for self-shadowing. A narrow Henyey–Greenstein forward lobe
+lights the thin edges facing the sun, while broader lobes and approximate
+multiple scattering soften interior shadows. Bevy's atmosphere transmittance
+LUT filters the sunlight. The view march reuses lighting over neighboring
+samples with similar density, skips the gap between the decks and clear space
+above local cloud tops, and stops once transmittance falls below 0.8%. The
+projected footprint controls step sizes and noise mips.
 
 The renderer marches at half width and height. It reprojects the previous
 frame at the cloud's opacity-weighted depth, accounting for camera movement
@@ -74,9 +78,9 @@ foreground edges.
 
 The client sweep uses the gameplay renderer and Palm Coast assets. It saves
 matched PNGs in all three modes at orbital, high-altitude, above-cloud,
-cloud-layer, and ground-level viewpoints, plus captures during a flyover
-and immediately after a camera cut. It reports median GPU timestamp
-measurements per pass. The legacy renderer shares the transparent pass with
+cloud-layer, ground-level, and backlit viewpoints. It also captures a flyover,
+a camera cut, and a 12 km horizontal transect through the liquid deck.
+It reports median GPU timestamp measurements per pass. The legacy renderer shares the transparent pass with
 water, so estimate its cloud cost by subtracting the clear-mode transparent
 pass median. The default output is `target/cloud-volumetric` at 1024 × 576.
 
@@ -87,15 +91,18 @@ CLOUD_CAPTURE_SIZE=1920x1080 CLOUD_CAPTURE_DIR=target/cloud-volumetric-1080 \
   cargo test --locked -p world-client cloud_altitude_sweep -- --ignored --nocapture
 ```
 
-Measured at 1920 × 1080 on a Radeon RX 6750 XT with RADV/Vulkan. Times are
-in milliseconds and cover the cloud passes. The legacy column is the estimated
-share of the transparent pass.
+Measured at 1920 × 1080 on a Radeon RX 6750 XT with RADV/Vulkan. Figures are
+milliseconds and sum the median timestamps of the three volumetric passes.
+The reference is commit `9e4e290`. The mean gives each matched pose equal weight.
 
-| View | Volumetric | Legacy |
+| View | Previous volumetric | Updated volumetric |
 | --- | ---: | ---: |
-| Orbit | 1.79 | 1.66 |
-| 34 km | 2.11 | 4.01 |
-| Above the decks, 9 km | 3.73 | 5.55 |
-| In the liquid deck, 2.35 km | 4.98 | 12.15 |
-| Below the decks, 150 m | 4.87 | 8.55 |
-| Palm Coast shoreline | 3.08 | 3.04 |
+| Orbit | 1.80 | 1.69 |
+| 34 km | 2.15 | 2.08 |
+| Above cloud, 9 km | 3.76 | 3.19 |
+| Cloud-layer edge, 2.35 km | 4.95 | 4.98 |
+| Below cloud, 150 m | 4.98 | 4.37 |
+| Palm Coast shoreline | 3.18 | 2.57 |
+| Backlit view | 3.26 | 3.12 |
+| Cloud core, 2.1 km | 7.23 | 5.90 |
+| Mean across views | 3.91 | 3.49 |

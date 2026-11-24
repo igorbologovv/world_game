@@ -69,7 +69,11 @@ fn weather_sample(direction: Vec3) -> [f32; 4] {
     let development = value_noise(q * 3.21, 0, 57);
     let upper = value_noise((shear + warp) * Vec3::new(1.7, 4.5, 1.7), 0, 97);
     let ice = (0.68 * upper + 0.32 * front - 0.44) / 0.30;
-    [cover, development, ice, 1.0]
+    // A separate lift field lets the same coverage form shallow sheets or
+    // taller convection. The first three channels also serve the legacy pass.
+    let lift = 0.72 * value_noise(q * 1.43 + Vec3::new(2.1, 5.8, 1.4), 0, 71)
+        + 0.28 * value_noise(shear * 3.34, 0, 53);
+    [cover, development, ice, lift]
 }
 
 pub(super) fn billows() -> Image {
@@ -104,16 +108,22 @@ pub(super) fn shape() -> Image {
     let size = BILLOW_SIZE;
     let low = Worley::new(4);
     let high = Worley::new(8);
-    let mut data = Vec::with_capacity((size.pow(3) * 2) as usize);
+    let mut data = Vec::with_capacity((size.pow(3) * 4) as usize);
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
                 let p = (UVec3::new(x, y, z).as_vec3() + 0.5) / size as f32;
+                let broad = low.sample(p);
+                let fine = high.sample(p);
                 let base = 0.67 * value_noise(p * 4.0, 4, 41)
                     + 0.24 * value_noise(p * 8.0, 8, 113)
                     + 0.09 * value_noise(p * 16.0, 16, 174);
-                let billow = 0.69 * low.sample(p) + 0.31 * high.sample(p);
-                data.extend([unorm(base * 0.68 + billow * 0.32), unorm(billow)]);
+                let billow = 0.69 * broad + 0.31 * fine;
+                let mass = 0.68 * base + 0.32 * billow;
+                let grain = value_noise(p * 16.0, 16, 397);
+                let erosion = 1.0 - (0.56 * fine + 0.27 * broad + 0.17 * grain);
+                let core = 0.62 * value_noise(p * 8.0, 8, 307) + 0.23 * grain + 0.15 * fine;
+                data.extend([mass, billow, erosion, core].map(unorm));
             }
         }
     }
@@ -121,7 +131,7 @@ pub(super) fn shape() -> Image {
         size,
         size,
         TextureDimension::D3,
-        TextureFormat::Rg8Unorm,
+        TextureFormat::Rgba8Unorm,
         data,
     );
     image.sampler = filtered(ImageAddressMode::Repeat);
@@ -239,7 +249,7 @@ fn with_mips(
     // Keep cube faces as separate layers in each mip. For the volume, each
     // texel averages a 2x2x2 block and the depth halves with width and height.
     let texels = image.data.as_mut().unwrap();
-    let channels = if dimension == TextureDimension::D3 {
+    let channels = if format == TextureFormat::Rg8Unorm {
         2
     } else {
         4

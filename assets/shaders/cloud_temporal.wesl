@@ -30,7 +30,7 @@ fn resolve_clouds(input: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let old_pixel = uv * vec2<f32>(size) - 0.5;
     let corner = vec2<i32>(floor(old_pixel));
     let fraction = fract(old_pixel);
-    let hit_tolerance = clamp(125.0 + clip.w * 0.003, 125.0, 9000.0);
+    let hit_tolerance = clamp(115.0 + clip.w * 0.0062, 115.0, 9000.0);
     var reprojected = vec4<f32>(0.0);
     var total = 0.0;
     for (var y = 0; y <= 1; y += 1) {
@@ -67,5 +67,6 @@ fn resolve_clouds(input: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
     let previous = clamp(reprojected / total, low, high);
     let alpha_change = 1.0 - smoothstep(0.10, 0.48, abs(previous.a - color.a));
-    return mix(color, previous, 0.89 * alpha_change * saturate(total * 1.4));
+    let history_weight = mix(0.79, 0.93, smoothstep(600.0, 16000.0, clip.w));
+    return mix(color, previous, history_weight * alpha_change * saturate(total * 1.4));
 }
