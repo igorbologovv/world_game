@@ -29,23 +29,13 @@ Keep `bevy_terrain` beside this checkout. Run
 working directory. For an isolated bake, see the
 [running and testing instructions](docs/ARCHITECTURE.md#running-and-testing).
 
-## Forest canopy transition experiment
+## Forest canopy coverage experiment
 
-This branch retains the original rendering for comparison:
-
-- **F9** cycles the existing forest-density and canopy-color diagnostics.
-- **F10** compares the original forest-canopy shading with the improved
-  multiscale optical-density and crown-shadow handoff. Improved is the default.
-- **F11** cycles four canopy diagnostics: source weights (six local cascades from blue through cyan, green,
-  yellow, orange, red; magenta: global cubemap), sampled
-  coverage versus displayed opacity, crown lighting, and geometry-to-canopy
-  handoff. Press again to return to the normal view.
-
-Compare at a fixed camera position after all local layers and the globe atlas
-have loaded. Toggle F10 with the same sun angle; measure full-frame GPU time.
-Diagnostic displays color the **terrain canopy only**, not tree meshes. The
-global atlas retains its normal mip streaming, and no artificial distance fog is
-introduced. The extra diagnostics are not a substitute for actual in-game GPU
-validation.
+The canopy atlas now uses the same coarse occupancy transfer as the global
+cubemap (average crown area, then convert to covered fraction). This is an
+isolated data-generation change intended to reduce coverage discontinuities.
+The experimental terrain shader and F10/F11 diagnostics were rolled back
+after an in-game terrain rendering regression. F9 retains its original
+diagnostics.
 
 [Architecture and crate ownership](docs/ARCHITECTURE.md) · [Agent development rules](AGENTS.md)

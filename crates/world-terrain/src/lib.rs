@@ -37,7 +37,6 @@ impl Plugin for TerrainPlugin {
             .add_systems(Startup, setup.after(WorldReady))
             .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
             .add_systems(Update, toggle_canopy_debug)
-            .add_systems(Update, toggle_canopy_lod_debug)
             .add_systems(Update, update_canopy)
             .add_systems(Update, terrain_surface::stream.after(WorldMovement));
     }
@@ -72,12 +71,6 @@ struct TerrainMaterial {
     #[texture(13, dimension = "cube")]
     #[sampler(14)]
     globe_canopy: Option<Handle<Image>>,
-    // F10: compare improved handoff with the untouched master shading.
-    #[uniform(15)]
-    canopy_fix_enabled: u32,
-    // F11: visualize local/global sources, coverage, and handoff.
-    #[uniform(16)]
-    canopy_debug_view: u32,
 }
 
 impl TerrainMaterial {
@@ -113,37 +106,7 @@ impl TerrainMaterial {
             canopy_layout: CanopyLayout::default(),
             crown_detail: None,
             globe_canopy: None,
-            canopy_fix_enabled: 1,
-            canopy_debug_view: 0,
         }
-    }
-}
-
-/// Compare the original canopy against corrected lighting, or inspect LOD boundaries.
-fn toggle_canopy_lod_debug(
-    keyboard: Option<Res<ButtonInput<KeyCode>>>,
-    terrain: Option<Res<terrain_surface::TerrainSurface>>,
-    mut materials: ResMut<Assets<TerrainMaterial>>,
-) {
-    let Some(keyboard) = keyboard else { return };
-    if !keyboard.just_pressed(KeyCode::F10) && !keyboard.just_pressed(KeyCode::F11) {
-        return;
-    }
-    let Some(terrain) = terrain else { return };
-    let Some(mut material) = materials.get_mut(&terrain.material) else { return };
-    if keyboard.just_pressed(KeyCode::F10) {
-        material.canopy_fix_enabled = 1 - material.canopy_fix_enabled;
-        info!("Forest canopy handoff [F10]: {}", if material.canopy_fix_enabled != 0 { "improved" } else { "original" });
-    }
-    if keyboard.just_pressed(KeyCode::F11) {
-        material.canopy_debug_view = (material.canopy_debug_view + 1) % 5;
-        info!("Forest canopy diagnostics [F11]: {}", match material.canopy_debug_view {
-            1 => "weighted cascade / globe sources",
-            2 => "canopy coverage, optical opacity, local detail",
-            3 => "crown lighting, macro shade, blend",
-            4 => "geometry-to-canopy handoff",
-            _ => "off",
-        });
     }
 }
 
