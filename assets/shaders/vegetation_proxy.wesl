@@ -32,6 +32,7 @@ struct ProxyOutput {
     @location(0) world: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) tile: f32,
+    @location(10) @interpolate(flat) broadleaf: u32,
     @location(3) @interpolate(flat) mask: vec2<f32>,
     @location(4) @interpolate(flat) up: vec3<f32>,
     @location(5) @interpolate(flat) forward: vec3<f32>,
@@ -62,7 +63,7 @@ fn vertex(mesh: ProxyVertex) -> ProxyOutput {
 
     if mask.y <= mask.x {
         return ProxyOutput(vec4<f32>(2.0, 2.0, 2.0, 1.0), vec3<f32>(0.0), vec2<f32>(0.0),
-            0.0, mask, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec2<f32>(0.0),
+            0.0, 0u, mask, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec2<f32>(0.0),
             vec3<i32>(0), vec3<f32>(0.0));
     }
     // The rotation in each vertex is the same site rotation used by the detailed mesh.
@@ -77,10 +78,11 @@ fn vertex(mesh: ProxyVertex) -> ProxyOutput {
     let side = axis.y * local_x - axis.x * forward;
     let rise = cross(to_eye, side);
     let tile = floor(mesh.tile_uv.x);
-    let uv = vec2<f32>((fract(mesh.tile_uv.x) - 0.25) * 2.0, mesh.tile_uv.y);
+    let broadleaf = mesh.tile_uv.y >= 2.0;
+    let uv = vec2<f32>((fract(mesh.tile_uv.x) - 0.25) * 2.0, mesh.tile_uv.y - select(0.0, 2.0, broadleaf));
     let world = center + mesh.forward_radius.w * (side * (2.0 * uv.x - 1.0) + rise * (1.0 - 2.0 * uv.y));
     let views = select_views(eye);
-    return ProxyOutput(position_world_to_clip(world), world, uv, tile, mask, up, forward, eye, axis, views.layers, views.weights);
+    return ProxyOutput(position_world_to_clip(world), world, uv, tile, u32(broadleaf), mask, up, forward, eye, axis, views.layers, views.weights);
 }
 
 const HORIZON_VIEWS: i32 = 16;
@@ -259,7 +261,7 @@ fn fragment(in: ProxyOutput) -> @location(0) vec4<f32> {
     pbr.world_normal = world_normal;
     pbr.N = world_normal;
     pbr.V = normalize(view.world_position - in.world);
-    let broadleaf = ((1u << u32(in.tile)) & constants::BROADLEAF_TILE_MASK) != 0u;
+    let broadleaf = in.broadleaf != 0u;
     if broadleaf && surface.a > 0.0 {
         let crown_point = point + in.eye * ((p0.depth + p1.depth + p2.depth) / albedo.a);
         var sun = vec3<f32>(0.0, 1.0, 0.0);

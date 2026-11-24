@@ -86,10 +86,12 @@ decimation can break fronds and cutout silhouettes. Procedural trees keep the
 same seeded trunk, branches and crown lobes across all mesh LODs. Coarser
 levels reduce subdivisions, roots and individual leaf details.
 
-The stock atlas uses 16 horizon views, eight elevated views, and one zenith
-view per tree. Its two mipmapped texture arrays occupy about 30.4 MiB on the
-GPU. The loader matches the packaged atlas to the decoded authored sources
-and bakes custom or missing variants asynchronously.
+The atlas uses 16 horizon views, eight elevated views, and one zenith view
+per tree. The complete pack carries 73 silhouettes, including the 13 stock
+slots, and uses about 76 MiB across two mipmapped GPU arrays. The views are
+64 pixels per side to keep the larger library within that footprint. The
+loader matches the packaged atlas to the decoded authored sources and
+bakes custom or missing variants asynchronously.
 
 Broadleaf meshes and impostors use the same rough leaf reflectance, diffuse
 transmission, and crown extinction. The shader estimates the incoming light's
@@ -152,6 +154,70 @@ The runtime assets are adaptations of **Coconut Palm** by evolveduk,
 **Tree (part9)** by YN14R, and **Low Poly Tree Scene Free** by Nicholas-3D.
 The adaptations separate trees from source scenes, normalize their geometry,
 simplify LODs, and repack textures. [Coconut Palm](https://sketchfab.com/3d-models/coconut-palm-26e787f2ff2e4c0fb004c3b0210805a3), [Tree (part9)](https://sketchfab.com/3d-models/tree-part9-6fbd1594b62b4f94951dcca9e74a7347), [Low Poly Tree Scene Free](https://sketchfab.com/3d-models/low-poly-tree-scene-free-89daa5e21f0d4f08a59dba0d566e88bd), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+## Tree asset library
+
+The library adds 30 tree types, two seeded shapes per type, and three indexed
+GLB meshes per shape. Each shape yields 25 impostor views from its LOD0 with
+the same albedo, alpha mask, and framing. Both mesh variants and the texture
+maps are shared across instances. The forest still batches the distant
+quads by chunk and uses its projected-size transitions.
+
+| Habitat | Library trees |
+| --- | --- |
+| Temperate broadleaf | European beech, English oak, silver birch, sugar maple, weeping willow, quaking aspen, American sycamore |
+| Cool evergreen | Norway spruce, Scots pine, Douglas fir, western red cedar, Colorado blue spruce |
+| Cold and snowy | White spruce, stone pine, subalpine fir, Siberian larch |
+| Dry woodland | Umbrella thorn, fever tree, desert ironwood, Joshua tree, ghaf |
+| Humid tropical | Kapok, bigleaf mahogany, rubber fig, red mangrove, breadfruit, silver tree fern |
+| Warm lowlands and coasts | Date palm, Mexican fan palm, Canary Island date palm |
+
+Tree placement uses the existing climate families and candidate density.
+Snow-covered conifers are selected at high latitudes or cold elevations.
+Red mangroves stay in lowland tropical sites. Terrain canopy color uses
+the alpha-masked mean of each foliage map in linear space, calibrated against
+lit impostor stands at the terrain handoff. The canopy bake uses the visible
+area of each zenith impostor for coverage and accounts for the terrain
+shader's two-layer zenith blend. The near canopy's crown radius and height
+come from the LOD0 geometry. See [asset sources and licenses](../../assets/models/vegetation/library/SOURCES.md).
+
+From the workspace root, rebuild with Python, NumPy, and Pillow. Blender is
+used for studio review. The source bark textures are included alongside the
+GLBs under the library's shared texture directory.
+
+```sh
+python3 tools/build_tree_library.py
+cargo test --locked -p world-vegetation bake_tree_impostors -- --ignored
+cargo run --locked -p world-vegetation --example bake_canopy -- assets
+blender -b --threads 6 --python-exit-code 1 --python tools/render_tree_library.py
+
+FOREST_CAPTURE_DIR="$PWD/target/tree-library-gameplay" \
+  cargo test --locked -p world-client tree_library_pilot -- --ignored --nocapture
+```
+
+The pilot reviewed Norway spruce, European beech, and umbrella thorn in
+Blender and at close and distant gameplay viewpoints before the remaining
+trees were generated. The studio sheet covers all 30 types. The asset test
+opens all 60 variants, checks decreasing triangle counts, and verifies the
+pack against their canonical meshes. LOD0 has a 6,000-triangle ceiling.
+
+The matched ground-to-orbit sweep used Vulkan on a Radeon RX 6750 XT at
+832 × 468. Frame times include client update and a GPU wait, measured over
+36 frames per pose after warmup. A separate run measured GPU timestamps for
+the opaque pass, which includes the forest and terrain.
+
+| Camera pose | Baseline median / P95 (ms) | Library median / P95 (ms) | Library opaque GPU median / P95 (ms) |
+| --- | ---: | ---: | ---: |
+| Ground | 22.76 / 24.20 | 22.54 / 23.54 | 5.83 / 6.41 |
+| Grazing | 28.12 / 29.91 | 22.65 / 25.67 | 2.95 / 4.19 |
+| Canopy handoff | 23.37 / 24.67 | 20.47 / 22.03 | 1.71 / 2.26 |
+| Aerial | 22.09 / 23.26 | 19.75 / 20.80 | 1.60 / 1.96 |
+| Orbit | 21.54 / 22.40 | 19.24 / 20.91 | 1.42 / 1.70 |
+
+The altitude sweep captures both terrain canopy and impostors from one
+fixed woodland viewpoint. The terrain canopy is slightly darker at this
+handoff. Use `FOREST_GPU_TIMESTAMPS=0` to collect frame times with GPU
+timestamp instrumentation disabled.
 
 ## Woodland Fern
 
@@ -245,7 +311,7 @@ across face boundaries and averages linear, premultiplied color and coverage
 over the texel solid angles. Camera-centered layers resolve finer stands and
 crowns for the impostor handoff. F9 cycles the coverage and color diagnostics.
 
-The default world ships its own bake at `assets/world/planet-canopy-v1.gz`.
+The default world ships its own bake at `assets/world/planet-canopy-v2.gz`.
 Regenerate it after changing the terrain inputs or the canopy sampling
 algorithm. When tree placement, terrain sampling, or the bake changes, bump
 the bake version and regenerate the packaged file.

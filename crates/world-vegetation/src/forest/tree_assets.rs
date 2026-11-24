@@ -1,6 +1,9 @@
 //! Load the standalone tree meshes into the shared forest model and portrait tables.
 
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use bevy::{
     asset::{LoadState, RecursiveDependencyLoadState},
@@ -14,12 +17,14 @@ use bevy::{
 use world_core::runtime::WorldAssets;
 
 use super::{
-    impostor, textures, FoliageMaterial, ForestModels, ModelLod, Species, VariantModels, Wind,
-    WoodLod, BROADLEAF_TRANSMISSION,
+    impostor, library, textures, FoliageMaterial, ForestModels, ModelLod, Species, VariantModels,
+    Wind, WoodLod, BROADLEAF_TRANSMISSION,
 };
 
 const LODS: usize = 3;
+const MAX_PENDING_PREFABS: usize = 8;
 
+#[derive(Clone, Copy)]
 struct Prefab {
     path: &'static str,
     species: Species,
@@ -61,23 +66,28 @@ const PREFABS: [Prefab; 4] = [
 
 #[derive(Resource, Default)]
 pub(super) struct TreeAssets {
-    pending: Vec<(&'static Prefab, [Handle<Gltf>; LODS])>,
+    queued: VecDeque<(Prefab, [String; LODS])>,
+    pending: Vec<(Prefab, [Handle<Gltf>; LODS])>,
     mipmaps: HashMap<AssetId<Image>, Handle<Image>>,
+    portrait_images: HashMap<AssetId<Image>, Arc<Image>>,
 }
 
 impl TreeAssets {
     pub fn is_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.queued.is_empty() || !self.pending.is_empty()
     }
 }
 
-pub(super) fn request_assets(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    assets: Res<WorldAssets>,
-) {
-    let pending = PREFABS
-        .iter()
+pub(super) fn request_assets(mut commands: Commands, assets: Res<WorldAssets>) {
+    let queued = PREFABS
+        .into_iter()
+        .chain(library::ASSETS.iter().enumerate().map(|(i, asset)| Prefab {
+            path: asset.path,
+            species: asset.species,
+            variant: library::variant(i),
+            repeat_leaves: false,
+            repeat_bark: true,
+        }))
         .filter_map(|prefab| {
             let paths: [String; LODS] = std::array::from_fn(|level| {
                 format!("models/vegetation/{}_lod{level}.glb", prefab.path)
@@ -85,11 +95,11 @@ pub(super) fn request_assets(
             paths
                 .iter()
                 .all(|path| assets.directory().join(path).is_file())
-                .then(|| (prefab, paths.map(|path| asset_server.load(path))))
+                .then_some((prefab, paths))
         })
         .collect();
     commands.insert_resource(TreeAssets {
-        pending,
+        queued,
         ..default()
     });
 }
@@ -107,7 +117,8 @@ pub(super) fn finish_loading(
     mut foliage: ResMut<Assets<FoliageMaterial>>,
 ) {
     let mut index = 0;
-    while index < loading.pending.len() {
+    let mut imports = 4;
+    while index < loading.pending.len() && imports > 0 {
         let (prefab, files) = &loading.pending[index];
         if files.iter().any(|file| {
             matches!(asset_server.load_state(file.id()), LoadState::Failed(_))
@@ -129,8 +140,10 @@ pub(super) fn finish_loading(
         }
 
         let (prefab, files) = loading.pending.swap_remove(index);
+        imports -= 1;
+        let state = &mut *loading;
         if let Some((model, portrait)) = build_variant(
-            prefab,
+            &prefab,
             &files,
             &gltfs,
             &gltf_meshes,
@@ -139,7 +152,8 @@ pub(super) fn finish_loading(
             &mut images,
             &mut materials,
             &mut foliage,
-            &mut loading.mipmaps,
+            &mut state.mipmaps,
+            &mut state.portrait_images,
         ) {
             models.variants[prefab.species as usize][prefab.variant] = model;
             models
@@ -153,8 +167,18 @@ pub(super) fn finish_loading(
             );
         }
     }
-    if loading.pending.is_empty() {
+    let available = MAX_PENDING_PREFABS - loading.pending.len();
+    let state = &mut *loading;
+    let requests = available.min(state.queued.len());
+    state.pending.extend(
+        state
+            .queued
+            .drain(..requests)
+            .map(|(prefab, paths)| (prefab, paths.map(|path| asset_server.load(path)))),
+    );
+    if !state.is_pending() {
         loading.mipmaps.clear();
+        loading.portrait_images.clear();
     }
 }
 
@@ -169,6 +193,7 @@ fn build_variant(
     materials: &mut Assets<StandardMaterial>,
     foliage: &mut Assets<FoliageMaterial>,
     mipmaps: &mut HashMap<AssetId<Image>, Handle<Image>>,
+    portrait_images: &mut HashMap<AssetId<Image>, Arc<Image>>,
 ) -> Option<(VariantModels, impostor::Source)> {
     let parts = |file, name: &str| {
         let gltf = gltfs.get(file)?;
@@ -198,24 +223,32 @@ fn build_variant(
     };
     let bark_image = bark.base_color_texture.as_ref()?;
     let leaf_image = leaves.base_color_texture.as_ref()?;
+    let mut shared = |handle: &Handle<Image>| {
+        let image = images.get(handle)?;
+        Some(Arc::clone(
+            portrait_images
+                .entry(handle.id())
+                .or_insert_with(|| Arc::new(image.clone())),
+        ))
+    };
     let leaf_normal = leaves
         .normal_map_texture
         .as_ref()
         .filter(|_| leaves.normal_map_channel == bevy::mesh::UvChannel::Uv0)
         .filter(|_| prefab.species.broadleaf())
-        .and_then(|handle| images.get(handle));
+        .and_then(&mut shared);
     let (wood, foliage_mesh) = geometry.first()?;
     let portrait = impostor::Source::new([
-        impostor::Part::authored(
+        impostor::Part::from_shared(
             meshes.get(wood)?,
-            images.get(bark_image)?,
+            shared(bark_image)?,
             &bark,
             prefab.repeat_bark,
             None,
         )?,
-        impostor::Part::authored(
+        impostor::Part::from_shared(
             meshes.get(foliage_mesh)?,
-            images.get(leaf_image)?,
+            shared(leaf_image)?,
             &leaves,
             prefab.repeat_leaves,
             leaf_normal,
@@ -334,7 +367,7 @@ mod tests {
         app.finish();
         app.cleanup();
 
-        let timeout = Instant::now() + Duration::from_secs(10);
+        let timeout = Instant::now() + Duration::from_secs(30);
         loop {
             app.update();
             if !app.world().resource::<TreeAssets>().is_pending()
@@ -360,8 +393,21 @@ mod tests {
         for prefab in PREFABS {
             assert!(forest.portraits.contains(prefab.species, prefab.variant));
         }
+        for (index, tree) in library::ASSETS.iter().enumerate() {
+            assert!(
+                forest
+                    .portraits
+                    .contains(tree.species, library::variant(index)),
+                "{}",
+                tree.path
+            );
+        }
         impostor::bake_to(
             &assets.directory().join(impostor::ATLAS_PATH),
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/forest/tree_coverage.rs"
+            )),
             &forest.portraits,
         )
         .unwrap();
@@ -381,6 +427,38 @@ mod tests {
         let meshes = world.resource::<Assets<Mesh>>();
         let images = world.resource::<Assets<Image>>();
         let materials = world.resource::<Assets<FoliageMaterial>>();
+        assert_eq!(library::ASSETS.len(), 60);
+        for (index, asset) in library::ASSETS.iter().enumerate() {
+            let crown_envelope = std::f32::consts::PI * (asset.width * asset.height).powi(2);
+            let zenith_area = library::ZENITH_AREAS[index];
+            assert!(
+                zenith_area > 0.0 && zenith_area <= crown_envelope,
+                "{}",
+                asset.path
+            );
+            let variant = library::variant(index);
+            assert!(
+                forest.portraits.contains(asset.species, variant),
+                "{}",
+                asset.path
+            );
+            let model = &forest.variants[asset.species as usize][variant];
+            assert_eq!(model.lods.len(), LODS);
+            let mut previous = 6_001;
+            for lod in &model.lods {
+                assert_eq!(lod.foliage_material, model.lods[0].foliage_material);
+                let wood = meshes.get(&lod.wood.as_ref().unwrap().mesh).unwrap();
+                let leaves = meshes.get(&lod.foliage).unwrap();
+                let triangles =
+                    (wood.indices().unwrap().len() + leaves.indices().unwrap().len()) / 3;
+                assert!(
+                    triangles < previous,
+                    "{} has {triangles} triangles",
+                    asset.path
+                );
+                previous = triangles;
+            }
+        }
         for prefab in PREFABS {
             let variant = &forest.variants[prefab.species as usize][prefab.variant];
             assert_eq!(variant.lods.len(), LODS);

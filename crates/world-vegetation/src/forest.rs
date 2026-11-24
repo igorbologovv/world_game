@@ -5,6 +5,7 @@ mod fern;
 mod ground_cover;
 mod hero_oak;
 mod impostor;
+mod library;
 mod lod;
 mod palm;
 mod placement;
@@ -119,11 +120,15 @@ impl Species {
         Self::Palm,
     ];
 
-    const fn variants(self) -> usize {
+    const fn stock_variants(self) -> usize {
         match self {
             Self::Palm => 1,
             _ => VARIANTS,
         }
+    }
+
+    const fn variants(self) -> usize {
+        self.stock_variants() + library::count(self)
     }
 
     const fn broadleaf(self) -> bool {
@@ -212,7 +217,12 @@ impl ForestModels {
                 .expect("hero models stay resident after loading");
             return (&hero.lods[level], &hero.bark);
         }
-        let model = &self.variants[species as usize][variant];
+        let family = &self.variants[species as usize];
+        let model = if family[variant].lods.is_empty() {
+            &family[variant % species.stock_variants()]
+        } else {
+            &family[variant]
+        };
         (
             &model.lods[level],
             model.bark.as_ref().unwrap_or(&self.bark_material),
@@ -310,7 +320,7 @@ fn build_models(
         let shared_material = (!species.broadleaf())
             .then(|| foliage_materials.add(cutout_material(foliage_image.clone())));
         let mut species_variants = Vec::with_capacity(species.variants());
-        for variant in 0..species.variants() {
+        for variant in 0..species.stock_variants() {
             let (wood, leaves) = generate_tree(species, variant as u64, 0);
             let foliage_material = shared_material.clone().unwrap_or_else(|| {
                 let mut material = cutout_material(foliage_image.clone());
@@ -332,6 +342,10 @@ fn build_models(
             }
             species_variants.push(VariantModels { lods, bark: None });
         }
+        species_variants.resize_with(species.variants(), || VariantModels {
+            lods: Vec::new(),
+            bark: None,
+        });
         variants.push(species_variants);
     }
     commands.insert_resource(ForestModels {
@@ -725,6 +739,9 @@ impl MeshBuilder {
 }
 
 fn tree_height(species: Species, variant: u64) -> f32 {
+    if let Some(entry) = library::asset(species, variant as usize) {
+        return entry.height;
+    }
     let offset = variant as f32 * 0.82;
     match species {
         Species::Oak => 14.0 + offset,

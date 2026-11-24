@@ -11,8 +11,10 @@ use bevy::time::TimeUpdateStrategy;
 use bevy::{
     app::PluginsState,
     camera::RenderTarget,
+    diagnostic::{DiagnosticPath, DiagnosticsStore},
     math::DVec3,
     render::{
+        diagnostic::RenderDiagnosticsPlugin,
         pipelined_rendering::PipelinedRenderingPlugin,
         render_resource::{PollType, TextureFormat},
         renderer::RenderDevice,
@@ -27,6 +29,131 @@ use bevy::{
 use world_core::{canopy::ForestCanopy, runtime::GridCell};
 
 use super::*;
+
+#[test]
+#[ignore = "requires a GPU adapter and writes gameplay screenshots"]
+fn tree_library_pilot() {
+    let output = std::env::var_os("FOREST_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/tree-library-pilot"));
+    fs::create_dir_all(&output).unwrap();
+    let (mut app, target) = render_app();
+    for mut hud in app
+        .world_mut()
+        .query_filtered::<&mut Node, Without<ChildOf>>()
+        .iter_mut(app.world_mut())
+    {
+        hud.display = Display::None;
+    }
+    for (species, direction, height) in [
+        (
+            "norway-spruce",
+            DVec3::new(-0.6533087936, 0.7499886686, 0.1034631195),
+            20.0,
+        ),
+        (
+            "european-beech",
+            DVec3::new(-0.4677238208, 0.7499886686, -0.4677086960),
+            16.0,
+        ),
+        (
+            "umbrella-thorn",
+            DVec3::new(-0.9918296980, 0.0499786832, 0.1173711264),
+            10.8,
+        ),
+    ] {
+        let up = direction.normalize();
+        set_camera(app.world_mut(), up, 2.5, 0.0);
+        let path = format!("library/{species}/");
+        for frame in 0..720 {
+            render_frame(&mut app);
+            if frame > 85 && frame % 15 == 0 {
+                let world = app.world_mut();
+                if world
+                    .query::<&Name>()
+                    .iter(world)
+                    .any(|name| name.as_str().starts_with(&path))
+                {
+                    break;
+                }
+            }
+        }
+        let world = app.world_mut();
+        let root = world.resource::<PlanetRoot>().entity();
+        let frame = world.get::<ReferenceFrame>(root).unwrap().clone();
+        let mut nearby = world.query::<(&Name, &GridCell, &Transform)>();
+        let sites: Vec<_> = nearby
+            .iter(world)
+            .filter(|(name, _, _)| {
+                name.as_str() == "Forest tree" || name.as_str().starts_with("library/")
+            })
+            .map(|(name, cell, transform)| {
+                (
+                    name.as_str().starts_with(&path),
+                    frame.grid_position_double(cell, transform),
+                )
+            })
+            .collect();
+        let heights = world.resource::<SurfaceHeights>();
+        let sun = DVec3::new(-0.78, 0.60, -0.18).normalize();
+        let mut best = None;
+        for (_, tree) in sites.iter().filter(|(selected, _)| *selected) {
+            let radial = tree.normalize();
+            let tangent = (sun - radial * sun.dot(radial)).normalize();
+            let focus = tree + radial * (height * 0.47);
+            for i in 0..12 {
+                let angle = f64::from(i) * std::f64::consts::TAU / 12.0;
+                let arm = tangent * angle.cos() + radial.cross(tangent) * angle.sin();
+                let eye = tree + radial * (height * 0.53) + arm * (height * 1.34);
+                if heights
+                    .sample(eye.normalize())
+                    .is_some_and(|ground| eye.length() < RADIUS + ground + 2.0)
+                {
+                    continue;
+                }
+                let ray = eye - focus;
+                let clearance = sites
+                    .iter()
+                    .filter(|(_, other)| *other != *tree)
+                    .map(|(_, other)| {
+                        let center = *other + other.normalize() * (height * 0.5);
+                        let t = ((center - focus).dot(ray) / ray.length_squared()).clamp(0.05, 1.0);
+                        center.distance(focus + ray * t)
+                    })
+                    .fold(35.0_f64, f64::min);
+                let score = clearance + tangent.dot(arm) * 2.5;
+                if best.is_none_or(|(old, _, _, _)| score > old) {
+                    best = Some((score, *tree, radial, arm));
+                }
+            }
+        }
+        let (_, tree, radial, arm) =
+            best.unwrap_or_else(|| panic!("{species} did not stream in its habitat"));
+        for (label, distance) in [("detail", height * 1.34), ("distance", height * 8.0)] {
+            let mut eye = tree + radial * (height * 0.53) + arm * distance;
+            if label == "distance" {
+                let direction = eye.normalize();
+                let ground = app
+                    .world()
+                    .resource::<SurfaceHeights>()
+                    .sample(direction)
+                    .unwrap_or(0.0);
+                let minimum = RADIUS + ground + height * 1.3;
+                eye = direction * eye.length().max(minimum);
+            }
+            aim_at_tree(
+                app.world_mut(),
+                eye,
+                tree + radial * (height * 0.47),
+                radial,
+            );
+            for _ in 0..64 {
+                render_frame(&mut app);
+            }
+            measure(&mut app, &target, &output, &format!("{species}-{label}"));
+        }
+    }
+}
 
 #[test]
 #[ignore = "requires a GPU adapter and writes screenshots"]
@@ -348,6 +475,9 @@ fn render_app() -> (App, Handle<Image>) {
                 ..default()
             }),
     );
+    if std::env::var("FOREST_GPU_TIMESTAMPS").as_deref() != Ok("0") {
+        app.add_plugins(RenderDiagnosticsPlugin);
+    }
     install_world(&mut app, assets, PALM_COAST_REGION);
     while app.plugins_state() == PluginsState::Adding {
         bevy::tasks::tick_global_task_pools_on_main_thread();
@@ -382,19 +512,42 @@ fn render_app() -> (App, Handle<Image>) {
 }
 
 fn measure(app: &mut App, target: &Handle<Image>, output: &std::path::Path, label: &str) {
-    let mut samples: Vec<_> = (0..36)
-        .map(|_| {
-            let start = Instant::now();
-            render_frame(app);
-            start.elapsed().as_secs_f64() * 1000.0
-        })
-        .collect();
-    samples.sort_by(f64::total_cmp);
-    println!(
-        "{label} median={:.2} ms p95={:.2} ms",
-        samples[samples.len() / 2],
-        samples[samples.len() * 95 / 100]
-    );
+    fn percentiles(mut samples: Vec<f64>) -> (f64, f64) {
+        samples.sort_by(f64::total_cmp);
+        (
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100],
+        )
+    }
+
+    let opaque_pass = DiagnosticPath::const_new("render/main_opaque_pass_3d/elapsed_gpu");
+    let gpu_measurement = |app: &App| {
+        app.world()
+            .get_resource::<DiagnosticsStore>()
+            .and_then(|store| store.get(&opaque_pass))
+            .and_then(|diagnostic| diagnostic.measurement())
+            .map(|sample| (sample.time, sample.value))
+    };
+    let mut last_gpu_measurement = gpu_measurement(app);
+    let mut samples = Vec::with_capacity(36);
+    let mut gpu_samples = Vec::with_capacity(36);
+    for _ in 0..36 {
+        let start = Instant::now();
+        render_frame(app);
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        if let Some((time, value)) = gpu_measurement(app) {
+            if last_gpu_measurement.is_none_or(|(previous, _)| previous != time) {
+                gpu_samples.push(value);
+                last_gpu_measurement = Some((time, value));
+            }
+        }
+    }
+    let (median, p95) = percentiles(samples);
+    println!("{label} median={median:.2} ms p95={p95:.2} ms",);
+    if !gpu_samples.is_empty() {
+        let (median, p95) = percentiles(gpu_samples);
+        println!("{label} opaque GPU median={median:.2} ms p95={p95:.2} ms");
+    }
 
     capture(app, target, output, label);
 }

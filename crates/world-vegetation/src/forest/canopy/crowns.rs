@@ -61,7 +61,7 @@ impl CrownRaster {
         // Yaw and scale come from the same per-tree seed as placement, and
         // remain stable when the camera-centered atlas is regenerated.
         let leaf_tone = (site.yaw * 2.73).sin() * 0.32 + 0.5;
-        let leaf = site.species.colors().1;
+        let leaf = crate::forest::library::leaf_color(site.species, site.variant);
         let warmth = (0.48 + (leaf[0] - leaf[2]) * 1.7 + (site.scale - 1.0) * 0.53).clamp(0.0, 1.0);
         // Broadleaf domes, flatter acacia crowns, conical pine tops and fanned palms
         // use different outlines and height profiles at the same canonical positions.

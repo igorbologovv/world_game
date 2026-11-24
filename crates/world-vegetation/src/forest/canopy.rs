@@ -265,10 +265,27 @@ fn stream(
 // The impostor width describes the crown span of its actual species and variant.
 // Area-weighted RGB gives wider trees proportionally more influence on canopy color.
 fn crown(site: Site) -> Vec4 {
-    let radius = half_width(site.species, site.variant) * site.height();
-    let area = std::f32::consts::PI * radius * radius;
-    let foliage =
-        Vec3::from_array(site.species.colors().1) * (0.46 + 0.045 * (site.yaw * 2.73).sin());
+    let (area, albedo) =
+        if let Some(index) = crate::forest::library::index(site.species, site.variant) {
+            let asset = &crate::forest::library::ASSETS[index];
+            // The terrain shader stacks two layers of coverage at zenith.
+            // The measured projection already includes the full crown depth.
+            let area = crate::forest::library::ZENITH_AREAS[index] * site.scale * site.scale
+                / bake::ZENITH_LAYER_COUNT;
+            // The terrain shader applies aggregate self-shadowing. Calibrate its
+            // diffuse response against the lit impostor stand at the handoff.
+            (
+                area,
+                Vec3::from_array(asset.color) * bake::AUTHORED_COLOR_RESPONSE,
+            )
+        } else {
+            let radius = half_width(site.species, site.variant) * site.height();
+            (
+                std::f32::consts::PI * radius * radius,
+                Vec3::from_array(site.species.colors().1),
+            )
+        };
+    let foliage = albedo * (0.46 + 0.045 * (site.yaw * 2.73).sin());
     foliage.extend(1.0) * area
 }
 

@@ -3,15 +3,13 @@ use std::collections::HashMap;
 
 use bevy::{
     asset::AssetId,
-    pbr::{ExtendedMaterial, MaterialExtension},
-    light::{NotShadowCaster, NotShadowReceiver},
-    prelude::*,
     camera::primitives::Aabb,
-    shader::ShaderRef,
+    light::{NotShadowCaster, NotShadowReceiver},
+    pbr::{ExtendedMaterial, MaterialExtension},
+    prelude::*,
     reflect::TypePath,
-    render::{
-        render_resource::AsBindGroup,
-    },
+    render::render_resource::AsBindGroup,
+    shader::ShaderRef,
 };
 use world_core::runtime::{
     GridTransform, PlanetRoot, ReferenceFrame, ReferenceFrames, WorldCamera,
@@ -279,9 +277,12 @@ pub(super) fn spawn_tree(
         ),
     );
     tree.insert(cell);
-    if site.species == Species::Palm {
+    if site.species == Species::Palm && site.variant == 0 {
         tree.insert(CoconutPalm);
     }
+    let name =
+        super::library::asset(site.species, site.variant).map_or("Forest tree", |asset| asset.path);
+    tree.insert(Name::new(name));
     let mut slots = [(Entity::PLACEHOLDER, Entity::PLACEHOLDER); 2];
     tree.with_children(|children| {
         for slot in &mut slots {

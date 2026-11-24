@@ -5,7 +5,7 @@ fn main() -> io::Result<()> {
     let assets = args.next().map_or_else(|| "assets".into(), PathBuf::from);
     let output = args
         .next()
-        .map_or_else(|| assets.join("world/planet-canopy-v1.gz"), PathBuf::from);
+        .map_or_else(|| assets.join("world/planet-canopy-v2.gz"), PathBuf::from);
     if args.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

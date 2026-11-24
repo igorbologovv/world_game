@@ -62,16 +62,8 @@ impl Material for ProxyMaterial {
             Mesh::ATTRIBUTE_COLOR.at_shader_location(3),
             Mesh::ATTRIBUTE_TANGENT.at_shader_location(4),
         ])?];
-        let broadleaf_tiles = Species::ALL
-            .into_iter()
-            .filter(|species| species.broadleaf())
-            .flat_map(|species| (0..species.variants()).map(move |variant| (species, variant)))
-            .fold(0, |mask, (species, variant)| {
-                mask | (1 << impostor::tile(species, variant))
-            });
         let defs = [
             ShaderDefVal::Bool("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into(), true),
-            ShaderDefVal::UInt("BROADLEAF_TILE_MASK".into(), broadleaf_tiles),
             ShaderDefVal::UInt(
                 "BROADLEAF_TRANSMISSION_BYTE".into(),
                 (BROADLEAF_TRANSMISSION * 255.0).round() as u32,
@@ -119,7 +111,10 @@ impl ProxyMesh {
             self.geometry.vertex(
                 center,
                 up,
-                Vec2::new(tile + 0.25 + x * 0.5, y),
+                Vec2::new(
+                    tile + 0.25 + x * 0.5,
+                    y + if site.species.broadleaf() { 2.0 } else { 0.0 },
+                ),
                 forward.extend(radius).to_array(),
             );
         }
@@ -144,6 +139,9 @@ impl ProxyMesh {
 }
 
 pub(super) fn half_width(species: Species, variant: usize) -> f32 {
+    if let Some(entry) = super::library::asset(species, variant) {
+        return entry.width;
+    }
     match (species, variant) {
         (Species::Oak, _) => 0.37,
         (Species::Pine, _) => 0.24,

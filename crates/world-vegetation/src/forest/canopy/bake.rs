@@ -22,9 +22,11 @@ pub(super) const SIDE: u32 = 1024;
 pub(super) const MIPS: u32 = SIDE.ilog2() + 1;
 pub(super) const PREVIEW_MIP: u32 = 4;
 pub(super) const FACES: u32 = 6;
-const BAKED_FILE: &str = "world/planet-canopy-v1.gz";
+pub(super) const AUTHORED_COLOR_RESPONSE: f32 = 2.65;
+pub(super) const ZENITH_LAYER_COUNT: f32 = 2.0;
+const BAKED_FILE: &str = "world/planet-canopy-v2.gz";
 // Increase the version when tree placement, world sampling, or bake inputs change.
-const MAGIC: &[u8; 8] = b"WLCNPY01";
+const MAGIC: &[u8; 8] = b"WLCNPY03";
 type Fingerprint = [u8; 32];
 
 pub(super) struct Mip {
@@ -42,7 +44,7 @@ impl Mip {
 /// Bake the planet's 1024²-per-face forest canopy to a compressed, terrain-keyed file.
 ///
 /// Use the same asset directory as the client. The output can be packaged at
-/// `assets/world/planet-canopy-v1.gz`. Camera-local clearings are applied at runtime.
+/// `assets/world/planet-canopy-v2.gz`. Camera-local clearings are applied at runtime.
 pub fn bake_planet_canopy(assets: &Path, output: &Path) -> io::Result<()> {
     let key = fingerprint(assets)?;
     let heights = SurfaceHeights::load(assets);
@@ -108,6 +110,10 @@ fn cache_file(key: Fingerprint) -> Option<PathBuf> {
 fn fingerprint(assets: &Path) -> io::Result<Fingerprint> {
     let mut hash = blake3::Hasher::new();
     hash.update(MAGIC);
+    hash.update(include_bytes!("../tree_catalog.rs"));
+    hash.update(include_bytes!("../tree_coverage.rs"));
+    hash.update(&AUTHORED_COLOR_RESPONSE.to_le_bytes());
+    hash.update(&ZENITH_LAYER_COUNT.to_le_bytes());
     for relative in (0..FACES)
         .map(|face| Path::new(HEIGHT_SOURCE_PATH).join(format!("face{face}.tif")))
         .chain([PathBuf::from(RIVER_ATLAS_PATH)])
