@@ -140,12 +140,13 @@ fn toggle_canopy_debug(
         return;
     };
     if let Some(mut material) = materials.get_mut(&terrain.material) {
-        material.terrain_debug_mode = (material.terrain_debug_mode + 1) % 3;
+        material.terrain_debug_mode = (material.terrain_debug_mode + 1) % 4;
         info!(
             "Planet forest diagnostic: {} (F9 to cycle)",
             match material.terrain_debug_mode {
                 1 => "forest coverage (grayscale)",
                 2 => "canopy colors",
+                3 => "canopy cascade contributions",
                 _ => "normal terrain",
             }
         );

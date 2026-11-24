@@ -35,7 +35,10 @@ The canopy atlas now uses the same coarse occupancy transfer as the global
 cubemap (average crown area, then convert to covered fraction). This is an
 isolated data-generation change intended to reduce coverage discontinuities.
 The experimental terrain shader and F10/F11 diagnostics were rolled back
-after an in-game terrain rendering regression. F9 retains its original
-diagnostics.
+after an in-game terrain rendering regression. F9 now has a fourth (diagnostic-only) mode showing the actual weighted
+local/globe contribution. Cascades 0..5 are blue/cyan/green/yellow/orange/red,
+while magenta denotes the global cubemap. Nearby tree geometry is unchanged.
+The diagnostic is composited after lighting, and the normal mode takes the
+original rendering path.
 
 [Architecture and crate ownership](docs/ARCHITECTURE.md) · [Agent development rules](AGENTS.md)

@@ -226,6 +226,52 @@ fn forest_canopy(direction: vec3<f32>, footprint: f32) -> vec4<f32> {
     return result + remaining * global_canopy(direction, footprint, globe_texel);
 }
 
+// Diagnostic only: visualize the actual cascade weights, not sampled color.
+// This duplicates forest_canopy's weight selection without modifying its
+// production sampling, lighting, bindings or texture data.
+fn canopy_cascade_debug(direction: vec3<f32>, footprint: f32) -> vec3<f32> {
+    let axis = max(abs(direction.x), max(abs(direction.y), abs(direction.z)));
+    let globe_texel = 2.0 * planet_radius * axis * axis / f32(textureDimensions(globe_canopy).x);
+    let resident_texel = globe_texel * exp2(canopy_layout.fade.z);
+    let colors = array(
+        vec3<f32>(0.10, 0.24, 1.00), // Cascade 0: blue
+        vec3<f32>(0.02, 0.82, 0.97), // Cascade 1: cyan
+        vec3<f32>(0.16, 0.90, 0.29), // Cascade 2: green
+        vec3<f32>(0.98, 0.87, 0.08), // Cascade 3: yellow
+        vec3<f32>(1.00, 0.45, 0.06), // Cascade 4: orange
+        vec3<f32>(0.92, 0.13, 0.16), // Cascade 5: red
+    );
+    var debug = vec3<f32>(0.0);
+    var remaining = 1.0;
+    for (var level = 0u; level < CANOPY_CASCADES; level++) {
+        let layer = canopy_layout.cascades[level];
+        if layer.center.w == 0.0 || footprint >= 2.7 * layer.north.w {
+            continue;
+        }
+        let cosine = dot(layer.center.xyz, direction);
+        if cosine <= 0.0 {
+            continue;
+        }
+        let square = vec2<f32>(dot(layer.east.xyz, direction), dot(layer.north.xyz, direction))
+            / (layer.east.w * cosine);
+        let edge = max(abs(square.x), abs(square.y));
+        let spatial = 1.0 - smoothstep(0.77, 0.99, edge);
+        let footprint_blend = 1.0 - smoothstep(0.85, 2.7, footprint / layer.north.w);
+        let finer = 1.0 - canopy_layout.fade.w
+            * smoothstep(1.0, 1.9, layer.north.w / resident_texel);
+        let weight = spatial * footprint_blend * layer.center.w * finer;
+        if weight > 0.0 {
+            debug += remaining * weight * colors[level];
+            remaining *= 1.0 - weight;
+            if remaining < 0.001 {
+                return debug;
+            }
+        }
+    }
+    // Global cubemap supplies the residual contribution after local cascades.
+    return debug + remaining * canopy_layout.fade.w * vec3<f32>(0.78, 0.17, 0.87);
+}
+
 fn crown_shading(direction: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, sun: vec3<f32>) -> vec4<f32> {
     let layer = canopy_layout.cascades[0];
     let cosine = dot(layer.center.xyz, direction);
@@ -592,6 +638,9 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         var debug_color = canopy.rgb;
         if terrain_debug_mode == 1u {
             debug_color = vec3<f32>(canopy.a);
+        } else if terrain_debug_mode == 3u {
+            debug_color = canopy_cascade_debug(
+                direction, max(sqrt(pixel_dx * pixel_dy), footprint * 0.35));
         }
         let diagnostic_blend = smoothstep(650.0, 1450.0, forest_distance);
         final_color = mix(final_color, vec4<f32>(debug_color, 1.0), diagnostic_blend);
