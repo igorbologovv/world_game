@@ -50,8 +50,17 @@ impl Basin {
     }
 
     fn relief(self, point: DVec3) -> f64 {
-        let distance = point.distance(self.center * RADIUS) / self.radius;
-        -self.depth * (1.0 - smoothstep(0.08, 1.0, distance)).powi(2)
+        let offset = point - self.center * RADIUS;
+        let distance = offset.length() / self.radius;
+        if distance >= 1.0 {
+            return 0.0;
+        }
+        let shape = value_noise(point / 11.0, 0x2F39_DADC);
+        let hummocks = value_noise(point / 3.8, 0x48B1_D822);
+        let edge = distance * (1.0 + 0.33 * shape * distance);
+        let bowl = (1.0 - smoothstep(0.12, 1.0, edge)).powi(2);
+        let margin = 1.0 - smoothstep(0.42, 1.0, distance);
+        margin * (-self.depth * bowl + hummocks * 0.34 * smoothstep(0.1, 0.63, distance))
     }
 }
 
@@ -134,6 +143,19 @@ pub(crate) fn detail(
     } else {
         legacy
     }
+}
+
+pub(crate) fn sediment_shelf(up: DVec3, base: f64, ground: f64, stage: f64, coast: bool) -> f64 {
+    let distance = (base - stage).abs();
+    let shelf = 1.0 - smoothstep(0.35, if coast { 4.0 } else { 6.0 }, distance);
+    if shelf == 0.0 {
+        return ground;
+    }
+    let point = up * RADIUS;
+    let bars = value_noise(point / 61.0, 0x57A1_D541);
+    let channel = value_noise(point / 17.0, 0xC81E_21AF);
+    let bed = value_noise(point / 3.8, 0xFDFB_A783);
+    ground + shelf * (base - ground + bars * 0.44 + channel * 0.24 + bed * 0.085)
 }
 
 fn biome_relief(up: DVec3, point: DVec3, elevation: f64, river_coverage: f64) -> f64 {
@@ -257,7 +279,7 @@ fn lattice_hash(x: i64, y: i64, z: i64, seed: u64) -> f64 {
     (v as f64 / u64::MAX as f64) * 2.0 - 1.0
 }
 
-fn value_noise(p: DVec3, seed: u64) -> f64 {
+pub(crate) fn value_noise(p: DVec3, seed: u64) -> f64 {
     let cell = p.floor();
     let x = cell.x as i64;
     let y = cell.y as i64;

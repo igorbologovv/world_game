@@ -81,6 +81,14 @@ The generator builds without the Bevy renderer or the path crate.
   Use `cube_direction` for baked tile UVs and `SurfaceHeights::sample` for a
   runtime direction. The river mask is queried from the same service.
   Generation uses the legacy scalar source mapping to preserve exact output.
+- **Hydrology.** The generator routes across all six faces using a priority
+  flood and steepest descent on the resulting spill surface. It grades visible
+  downstream reaches, retains lakes at their spill levels, and writes the height
+  faces, masks, and water geometry as a matched bake. At runtime `SurfaceHeights`
+  shares indexed reaches, lake stages and the connected ocean footprint.
+  Terrain, vegetation and the explorer use these queries for damp ground and
+  water depth. Inland rendering streams camera-relative detail through the
+  planet grid. See the [hydrology workflow](../crates/world-water/README.md).
 - **Forest canopy.** Vegetation publishes `world_core::canopy::ForestCanopy`
   for the terrain material. A versioned offline bake samples canonical tree
   patches to produce six 1024² cube faces. A background worker prepares their

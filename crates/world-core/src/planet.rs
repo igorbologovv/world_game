@@ -8,9 +8,8 @@ use bevy_math::DVec3;
 /// source maps only describe the global shape, not local surface detail.
 pub const RADIUS: f64 = 3_389_500.0;
 
-/// Radius in meters used when the currently checked-in binary river/lake
-/// positions were baked. These files are migrated in memory until the new
-/// hydrology baker produces assets at the current planet radius.
+/// Radius in meters used by older river and lake meshes. The reader preserves
+/// their elevations when placing them on the current reference sphere.
 pub const LEGACY_BAKED_RADIUS: f64 = 100_000.0;
 /// Datum used by the generator to classify land and bodies of water.
 pub const SEA_LEVEL: f64 = 0.0;

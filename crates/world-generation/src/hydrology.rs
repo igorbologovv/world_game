@@ -44,10 +44,11 @@ pub(super) struct Drainage {
 struct Front {
     elevation: f64,
     cell: u32,
+    queued: usize,
 }
 impl PartialEq for Front {
     fn eq(&self, other: &Self) -> bool {
-        self.cell == other.cell && self.elevation.total_cmp(&other.elevation) == Ordering::Equal
+        self.queued == other.queued && self.elevation.total_cmp(&other.elevation) == Ordering::Equal
     }
 }
 impl Eq for Front {}
@@ -62,7 +63,7 @@ impl Ord for Front {
         other
             .elevation
             .total_cmp(&self.elevation)
-            .then_with(|| other.cell.cmp(&self.cell))
+            .then_with(|| other.queued.cmp(&self.queued))
     }
 }
 
@@ -97,6 +98,7 @@ pub(super) fn route(heights: &[f64], ocean: &[bool]) -> Drainage {
     let mut queue = BinaryHeap::new();
     let mut order = Vec::with_capacity(heights.len());
     let mut neighbors = [0usize; 8];
+    let mut queued = 0;
 
     // Seed the priority queue with the *shoreline*, not millions of sea
     // cells. Inland sub-sea-level basins are not outlets: they must spill.
@@ -121,6 +123,7 @@ pub(super) fn route(heights: &[f64], ocean: &[bool]) -> Drainage {
         queue.push(Front {
             elevation: spill[lowest],
             cell: lowest as u32,
+            queued,
         });
     } else {
         for (cell, &sea) in ocean.iter().enumerate() {
@@ -135,18 +138,29 @@ pub(super) fn route(heights: &[f64], ocean: &[bool]) -> Drainage {
                 visited[next] = true;
                 outlets[next] = cell as u32;
                 spill[next] = heights[next].max(WATER_SURFACE_ELEVATION);
+                queued += 1;
                 queue.push(Front {
                     elevation: spill[next],
                     cell: next as u32,
+                    queued,
                 });
             }
         }
     }
 
-    while let Some(Front { elevation, cell }) = queue.pop() {
+    while let Some(Front {
+        elevation, cell, ..
+    }) = queue.pop()
+    {
         let cell = cell as usize;
         order.push(cell as u32);
         let count = adjacent(cell, &mut neighbors);
+        // The flood establishes the minimum spill and a flat route. On a
+        // real downhill slope, select the steepest outlet instead of the
+        // lowest absolute neighbor (which favors diagonals and sea seeds).
+        if outlets[cell] != NO_OUTLET {
+            outlets[cell] = downhill_outlet(cell, &neighbors[..count], &spill, outlets[cell]);
+        }
         for &next in &neighbors[..count] {
             if visited[next] {
                 continue;
@@ -154,9 +168,11 @@ pub(super) fn route(heights: &[f64], ocean: &[bool]) -> Drainage {
             visited[next] = true;
             outlets[next] = cell as u32;
             spill[next] = elevation.max(heights[next]);
+            queued += 1;
             queue.push(Front {
                 elevation: spill[next],
                 cell: next as u32,
+                queued,
             });
         }
     }
@@ -172,6 +188,43 @@ pub(super) fn route(heights: &[f64], ocean: &[bool]) -> Drainage {
         spill,
         order,
     }
+}
+
+fn downhill_outlet(cell: usize, neighbors: &[usize], spill: &[f64], flat_outlet: u32) -> u32 {
+    // Any strictly lower spill must already have left the priority queue.
+    // Preserve the FIFO flood parent on flats to keep the graph acyclic.
+    let mut candidates = neighbors
+        .iter()
+        .copied()
+        .filter(|&n| spill[n] < spill[cell]);
+    let Some(first) = candidates.next() else {
+        return flat_outlet;
+    };
+    let (face, x, y) = decode_index(cell);
+    let direction = grid_direction(face, x, y);
+    let grade = |next| {
+        let (face, x, y) = decode_index(next);
+        let distance = direction.distance(grid_direction(face, x, y));
+        // Duplicate boundary texels occupy one geographic position.
+        (spill[cell] - spill[next]) / distance.max(1.0 / (SIZE - 1) as f64)
+    };
+    let mut best = (first, grade(first));
+    for next in candidates {
+        let slope = grade(next);
+        if slope > best.1 {
+            best = (next, slope);
+        }
+    }
+    best.0 as u32
+}
+
+fn grid_direction(face: usize, x: usize, y: usize) -> bevy_math::DVec3 {
+    let last = (SIZE - 1) as f64;
+    bevy_math::DVec3::from_array(super::sphere_direction(
+        face,
+        x as f64 / last,
+        y as f64 / last,
+    ))
 }
 
 fn accumulate(cells: usize, outlets: &[u32], order: &[u32]) -> Vec<f32> {
@@ -407,6 +460,7 @@ mod tests {
             }],
         };
         let mut settings = HydrologySettings {
+            spillway_min_area_km2: 1.0,
             spillway_drawdown_m: 3.0,
             spillway_max_cells: 0,
             ..Default::default()
@@ -450,8 +504,12 @@ mod tests {
         heap.push(Front {
             elevation: 0.0,
             cell: 0,
+            queued: 0,
         });
-        while let Some(Front { elevation, cell }) = heap.pop() {
+        while let Some(Front {
+            elevation, cell, ..
+        }) = heap.pop()
+        {
             let c = cell as usize;
             for n in [c.checked_sub(1), (c + 1 < heights.len()).then_some(c + 1)]
                 .into_iter()
@@ -466,10 +524,32 @@ mod tests {
                 heap.push(Front {
                     cell: n as u32,
                     elevation: spill[n],
+                    queued: n,
                 });
             }
         }
         (outlets, spill)
+    }
+
+    #[test]
+    fn downhill_prefers_grade_and_keeps_flat_flood_routes() {
+        let middle = SIZE / 2;
+        let source = index(0, middle, middle);
+        let east = index(0, middle + 1, middle);
+        let diagonal = index(0, middle + 1, middle + 1);
+        let mut spill = vec![10.0; diagonal + 1];
+        spill[east] = 4.0;
+        spill[diagonal] = 3.0;
+        assert_eq!(
+            downhill_outlet(source, &[diagonal, east], &spill, diagonal as u32),
+            east as u32
+        );
+        spill[east] = 10.0;
+        spill[diagonal] = 10.0;
+        assert_eq!(
+            downhill_outlet(source, &[east, diagonal], &spill, diagonal as u32),
+            diagonal as u32
+        );
     }
 
     #[test]

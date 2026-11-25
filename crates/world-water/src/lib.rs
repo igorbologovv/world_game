@@ -30,6 +30,7 @@ pub struct WaterPlugin;
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         wetlands::install(app);
+        river_surface::install(app);
         app.add_plugins((
             MaterialPlugin::<ocean::OceanMaterial>::default(),
             MaterialPlugin::<river_surface::RiverMaterial>::default(),
@@ -69,8 +70,6 @@ type OceanPatches = IntoIter<(Mesh, ocean::OceanPatch)>;
 
 #[derive(Resource)]
 struct WaterLoading {
-    rivers: Option<Task<Option<(Mesh, river_surface::RiverCenterlines)>>>,
-    lakes: Option<Task<Option<Mesh>>>,
     ocean: Option<Task<Option<ocean::OceanSurface>>>,
     patches: Option<(Handle<ocean::OceanMaterial>, OceanPatches)>,
 }
@@ -79,18 +78,8 @@ fn request(mut commands: Commands, assets: Res<WorldAssets>, heights: Res<Surfac
     let pool = AsyncComputeTaskPool::get();
     let assets = assets.directory().to_path_buf();
     let heights = heights.clone();
-    let rivers = pool.spawn({
-        let (assets, heights) = (assets.clone(), heights.clone());
-        async move { river_surface::load(&assets, &heights) }
-    });
-    let lakes = pool.spawn({
-        let (assets, heights) = (assets.clone(), heights.clone());
-        async move { river_surface::load_lakes(&assets, &heights) }
-    });
     let ocean = pool.spawn(async move { ocean::load(&heights, &assets) });
     commands.insert_resource(WaterLoading {
-        rivers: Some(rivers),
-        lakes: Some(lakes),
         ocean: Some(ocean),
         patches: None,
     });
@@ -108,42 +97,11 @@ fn upload(
     pending: Option<ResMut<WaterLoading>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut river_materials: ResMut<Assets<river_surface::RiverMaterial>>,
     mut ocean_materials: ResMut<Assets<ocean::OceanMaterial>>,
 ) {
     let Some(mut pending) = pending else {
         return;
     };
-    if let Some((surface, centerlines)) = take_ready(&mut pending.rivers) {
-        commands.insert_resource(centerlines);
-        root.spawn(
-            &mut commands,
-            (
-                Mesh3d(meshes.add(surface)),
-                MeshMaterial3d(
-                    river_materials.add(river_surface::RiverMaterial { brightness: 1.0 }),
-                ),
-                NotShadowCaster,
-                river_surface::RiverWater,
-            ),
-        );
-    }
-
-    // Inland basins are generated at their individual spill elevations and
-    // cannot be represented by the global sea-level ocean sphere.
-    if let Some(lakes) = take_ready(&mut pending.lakes) {
-        root.spawn(
-            &mut commands,
-            (
-                Mesh3d(meshes.add(lakes)),
-                MeshMaterial3d(
-                    river_materials.add(river_surface::RiverMaterial { brightness: 0.93 }),
-                ),
-                NotShadowCaster,
-            ),
-        );
-    }
-
     if let Some(ocean::OceanSurface {
         mask,
         wave_normals,
@@ -174,11 +132,7 @@ fn upload(
             pending.patches = None;
         }
     }
-    if pending.rivers.is_none()
-        && pending.lakes.is_none()
-        && pending.ocean.is_none()
-        && pending.patches.is_none()
-    {
+    if pending.ocean.is_none() && pending.patches.is_none() {
         commands.remove_resource::<WaterLoading>();
     }
 }

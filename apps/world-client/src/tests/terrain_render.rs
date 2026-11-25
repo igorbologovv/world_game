@@ -38,7 +38,8 @@ struct Site {
 fn terrain_material_sweep() {
     let output = std::env::var_os("TERRAIN_CAPTURE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/terrain-materials"));
+        .unwrap_or_else(|| PathBuf::from("target/terrain-materials"));
+    let output = Path::new(WORKSPACE_ROOT).join(output);
     fs::create_dir_all(&output).unwrap();
     let case = std::env::var("TERRAIN_CAPTURE_CASE").ok();
 
@@ -110,7 +111,8 @@ fn terrain_material_sweep() {
         }
         let poses: &[(&str, f64, f64)] = match site.name {
             "distant" => &[("aerial", 4800.0, 0.92)],
-            "coastline" => &[("ground", 2.35, 0.14), ("elevated", 62.0, 0.56)],
+            "river-bank" => &[("ground", 2.35, 0.22), ("elevated", 36.0, 0.54)],
+            "coastline" | "lake-shore" => &[("ground", 2.35, 0.14), ("elevated", 62.0, 0.56)],
             _ => &[("ground", 2.35, 0.24), ("elevated", 62.0, 0.72)],
         };
         for &(view, altitude, tilt) in poses {
@@ -123,7 +125,13 @@ fn terrain_material_sweep() {
             for _ in 0..160 {
                 render_frame(&mut app);
             }
-            assert_terrain_pipeline(&app);
+            assert_material_pipeline(&app, "shaders/spherical.wesl");
+            if site.name == "coastline" {
+                assert_material_pipeline(&app, "shaders/ocean.wesl");
+            }
+            if matches!(site.name, "river-bank" | "lake-shore" | "wet-lowland") {
+                assert_material_pipeline(&app, "shaders/river_water.wesl");
+            }
             measure(&mut app, &label);
             capture(&mut app, &target, output.join(format!("{label}.png")));
         }
@@ -134,7 +142,7 @@ fn project(direction: DVec3, tangent: DVec3, meters: f64) -> DVec3 {
     (direction + tangent * (meters / RADIUS)).normalize()
 }
 
-fn sites(heights: &SurfaceHeights) -> [Site; 7] {
+fn sites(heights: &SurfaceHeights) -> [Site; 9] {
     let sun = DVec3::new(-0.90, 0.40, -0.21).normalize();
     let lit_side = |up: DVec3| (up * up.dot(sun) - sun + up.cross(sun) * 0.55).normalize();
     let site = |name, direction: DVec3| {
@@ -192,9 +200,84 @@ fn sites(heights: &SurfaceHeights) -> [Site; 7] {
         "distant",
         DVec3::new(-0.4024915160440224, 0.8031141035346536, 0.4393271175517328),
     );
+    let [river, lake] = inland_sites(heights);
     [
-        forest, conifer, wetland, mountain, meadow, coastline, distant,
+        forest, conifer, wetland, mountain, meadow, coastline, distant, river, lake,
     ]
+}
+
+fn inland_sites(heights: &SurfaceHeights) -> [Site; 2] {
+    use world_core::WaterKind;
+
+    let start = terrain_aligned_direction(STARTER_REGION.spawn.direction);
+    let classify = |up| {
+        heights
+            .sample(up)
+            .and_then(|h| heights.water_at(up, h))
+            .map(|water| water.kind)
+    };
+    let toward = |from: DVec3, to: DVec3| (to - from * to.dot(from)).normalize();
+    let reach = heights
+        .river_reaches()
+        .iter()
+        .filter(|reach| {
+            (15.0..650.0).contains(&reach.half_width(0.5))
+                && (3.0..850.0).contains(&reach.elevation(0.5))
+                && (reach.elevation(0.0) - reach.elevation(1.0)) / reach.length() < 0.016
+                && classify(reach.direction(0.5, 0.0)) == Some(WaterKind::River)
+        })
+        .min_by(|a, b| {
+            a.direction(0.5, 0.0)
+                .distance_squared(start)
+                .total_cmp(&b.direction(0.5, 0.0).distance_squared(start))
+        })
+        .expect("river reach near the starter region");
+    let river_center = reach.direction(0.5, 0.0);
+    let bank = reach.direction(0.5, 1.0 + 7.0 / reach.half_width(0.5));
+    let cross = toward(bank, river_center);
+    let river = Site {
+        name: "river-bank",
+        direction: bank,
+        heading: (cross * 0.62 + bank.cross(cross) * 0.78).normalize(),
+    };
+
+    let mut shore = None;
+    let mut distance = f64::INFINITY;
+    for tile in heights.lake_tiles() {
+        let center = tile.corners.iter().sum::<DVec3>().normalize();
+        let d = center.distance_squared(start);
+        if d >= distance || classify(center) != Some(WaterKind::Lake) {
+            continue;
+        }
+        for edge in 0..4 {
+            let land = (tile.corners[edge] + tile.corners[(edge + 1) % 4]).normalize();
+            if heights
+                .sample(land)
+                .is_none_or(|h| h < tile.elevation + 1.0)
+            {
+                continue;
+            }
+            let (mut wet, mut dry) = (center, land);
+            for _ in 0..20 {
+                let next = (wet + dry).normalize();
+                if heights.sample(next).is_some_and(|h| h < tile.elevation) {
+                    wet = next;
+                } else {
+                    dry = next;
+                }
+            }
+            let cross = toward(dry, center);
+            let bank = project(dry, -cross, 6.0);
+            shore = Some(Site {
+                name: "lake-shore",
+                direction: bank,
+                heading: (cross * 0.59 + bank.cross(cross) * 0.81).normalize(),
+            });
+            distance = d;
+            break;
+        }
+    }
+    [river, shore.expect("lake with an exposed sloping shore")]
 }
 
 fn find_mountain_slope(heights: &SurfaceHeights, center: DVec3) -> DVec3 {
@@ -239,22 +322,15 @@ fn set_camera(world: &mut World, site: &Site, altitude: f64, tilt: f64) -> f64 {
     *camera.cell = cell;
     *camera.transform =
         Transform::from_translation(translation).looking_to(forward.as_vec3(), up.as_vec3());
-    *mode = if altitude < 5.0 {
-        WorldCamera::FirstPerson
-    } else {
-        WorldCamera::Map
-    };
+    *mode = WorldCamera::Free;
     if let Projection::Perspective(perspective) = &mut *projection {
         perspective.near = 0.09;
     }
     ground
 }
 
-fn assert_terrain_pipeline(app: &App) {
-    let shader = app
-        .world()
-        .resource::<AssetServer>()
-        .load::<Shader>("shaders/spherical.wesl");
+fn assert_material_pipeline(app: &App, path: &'static str) {
+    let shader = app.world().resource::<AssetServer>().load::<Shader>(path);
     let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
     let mut ready = false;
     for pipeline in cache.pipelines() {
@@ -274,7 +350,7 @@ fn assert_terrain_pipeline(app: &App) {
             ready |= matches!(pipeline.state, CachedPipelineState::Ok(_));
         }
     }
-    assert!(ready, "terrain pipeline did not compile");
+    assert!(ready, "{path} pipeline did not compile");
 }
 
 fn measure(app: &mut App, label: &str) {

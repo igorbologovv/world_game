@@ -321,7 +321,7 @@ cargo run --locked -p world-vegetation --example bake_canopy -- assets
 ```
 
 The baker also accepts an optional output file. It hashes the source height
-faces, river atlas, and lake masks to detect stale bakes. The runtime loads and
+faces, river and ocean atlases, lake masks, and inland water meshes to detect stale bakes. The runtime loads and
 filters a matching packaged bake on a background thread. Custom worlds use
 the per-user cache under `$XDG_CACHE_HOME/world-client/canopy` or
 `~/.cache/world-client/canopy` on Linux. On a cache miss, a 64 × 64 preview

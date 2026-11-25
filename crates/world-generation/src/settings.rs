@@ -15,7 +15,7 @@ pub struct HydrologySettings {
     pub lake_min_area_km2: f64,
     /// Minimum maximum depth, in meters, for an ordinary retained lake.
     pub lake_min_depth_m: f64,
-    /// Nominal full river width at the 15 km² reference catchment, in meters.
+    /// Nominal full river width at the 90,000 km² reference catchment, in meters.
     pub river_reference_width_m: f64,
     /// Maximum full width of major rivers, in meters.
     pub river_max_width_m: f64,
@@ -26,11 +26,11 @@ pub struct HydrologySettings {
 impl Default for HydrologySettings {
     fn default() -> Self {
         Self {
-            river_catchment_km2: 65.0,
-            spillway_min_area_km2: 1.0,
+            river_catchment_km2: 90_000.0,
+            spillway_min_area_km2: 1_200.0,
             spillway_drawdown_m: 210.0,
             spillway_max_cells: 192,
-            lake_min_area_km2: 5.0,
+            lake_min_area_km2: 5_700.0,
             lake_min_depth_m: 8.0,
             river_reference_width_m: 82.0,
             river_max_width_m: 275.0,
@@ -52,16 +52,21 @@ impl HydrologySettings {
                 "river_catchment_km2",
                 self.river_catchment_km2,
                 0.1,
-                10_000.0,
+                5_000_000.0,
             ),
             (
                 "spillway_min_area_km2",
                 self.spillway_min_area_km2,
                 0.0,
-                20_000.0,
+                5_000_000.0,
             ),
             ("spillway_drawdown_m", self.spillway_drawdown_m, 0.0, 350.0),
-            ("lake_min_area_km2", self.lake_min_area_km2, 0.0, 20_000.0),
+            (
+                "lake_min_area_km2",
+                self.lake_min_area_km2,
+                0.0,
+                5_000_000.0,
+            ),
             ("lake_min_depth_m", self.lake_min_depth_m, 0.0, 1_000.0),
             (
                 "river_reference_width_m",

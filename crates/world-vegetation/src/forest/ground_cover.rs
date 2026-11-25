@@ -555,7 +555,9 @@ fn background(
             let Some(elevation) = heights.sample(direction) else {
                 continue;
             };
-            if !(1.35..3200.0).contains(&elevation) || heights.is_river(direction) {
+            if !(1.35..3200.0).contains(&elevation)
+                || heights.open_water_at(direction, elevation).is_some()
+            {
                 continue;
             }
             let slope_step = 3.0 / RADIUS;
