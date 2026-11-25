@@ -5,9 +5,10 @@ use bevy_math::{DVec2, DVec3, IVec3};
 
 use crate::{
     coordinates::{height_source_uv, source_face_uv, surface_uv},
+    inland_water::{smoothstep, InlandWater, LakeTile, RiverReach, WaterKind, WaterSample},
     planet::{
-        decode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, LAKE_MASK_PATH, RADIUS,
-        RIVER_ATLAS_PATH,
+        decode_height, HEIGHT_MAP_SIZE, HEIGHT_SOURCE_PATH, LAKE_MASK_PATH, OCEAN_ATLAS_PATH,
+        RADIUS, RIVER_ATLAS_PATH, WATER_SURFACE_ELEVATION,
     },
     terrain_detail::{self, Basin, BASIN_CELL},
 };
@@ -23,6 +24,8 @@ pub struct SurfaceHeights {
     faces: Option<Arc<[HeightFace; 6]>>,
     rivers: Option<Arc<image::GrayImage>>,
     lakes: [Option<Arc<image::GrayImage>>; 6],
+    inland: Arc<InlandWater>,
+    ocean: Option<Arc<image::GrayImage>>,
 }
 
 /// A shallow pool enclosed by a procedural wetland basin.
@@ -53,8 +56,8 @@ impl TerrainInput {
 }
 
 impl SurfaceHeights {
-    /// Read legacy TIFF height faces, the river atlas, and baked lake masks from an asset directory.
-    /// Height queries require all six TIFF faces. Missing water masks contribute zero coverage.
+    /// Load terrain, coverage masks and baked water geometry from an asset directory.
+    /// Height queries require all six TIFF faces. Inland meshes are optional.
     pub fn load(assets: &Path) -> Self {
         let source = assets.join(HEIGHT_SOURCE_PATH);
         let faces: Option<Vec<_>> = (0..6)
@@ -81,6 +84,16 @@ impl SurfaceHeights {
                 image::GrayImage::from_raw(width, height, coverage)
             });
         Self {
+            inland: Arc::new(InlandWater::load(assets)),
+            ocean: image::open(assets.join(OCEAN_ATLAS_PATH))
+                .ok()
+                .map(|image| image.into_luma8())
+                .filter(|image| {
+                    image.width() >= 3
+                        && image.width() % 3 == 0
+                        && image.height() == (image.width() / 3) * 2
+                })
+                .map(Arc::new),
             faces: faces.and_then(|faces| faces.try_into().ok()).map(Arc::new),
             rivers: rivers.map(Arc::new),
             lakes: std::array::from_fn(|face| {
@@ -98,10 +111,137 @@ impl SurfaceHeights {
         if faces[0].width() != HEIGHT_MAP_SIZE {
             return Some(sample_height(&faces[face], uv));
         }
-        Some(
-            self.terrain_input(direction, face, uv, faces)
-                .elevation(direction),
-        )
+        let up = direction.normalize();
+        let input = self.terrain_input(direction, face, uv, faces);
+        let mut height = input.elevation(up);
+        let lake = self.lake_level(up, face, uv);
+        if let Some(stage) = lake {
+            height = terrain_detail::sediment_shelf(up, input.base, height, stage, false);
+        } else if (WATER_SURFACE_ELEVATION - 4.0..=WATER_SURFACE_ELEVATION + 7.0)
+            .contains(&input.base)
+            && self.ocean_near(face, uv)
+        {
+            height = terrain_detail::sediment_shelf(
+                up,
+                input.base,
+                height,
+                WATER_SURFACE_ELEVATION,
+                true,
+            );
+        }
+        height = self.inland.grade_ground(up, height, lake);
+        Some(height)
+    }
+
+    /// Directed rivers decoded from the same assets used for terrain and gameplay.
+    pub fn river_reaches(&self) -> &[RiverReach] {
+        &self.inland.rivers
+    }
+
+    /// Spill-elevation tiles decoded from the baked lake surface.
+    pub fn lake_tiles(&self) -> &[LakeTile] {
+        &self.inland.lakes
+    }
+
+    /// Return freshwater influence at a direction and its terrain height.
+    /// Zero denotes dry terrain and one denotes saturated ground.
+    pub fn freshwater_influence(&self, up: DVec3, ground: f64) -> f64 {
+        let Some((face, uv)) = face_uv(up) else {
+            return 0.0;
+        };
+        let river = self.inland.channel(up).map_or(0.0, |channel| {
+            let exposed = ground - channel.stage;
+            channel.weight * (1.0 - smoothstep(0.0, 2.8, exposed))
+        });
+        let lake = self.lake_level(up, face, uv).map_or_else(
+            || self.lake_at(face, uv) * 0.38,
+            |stage| 1.0 - smoothstep(0.1, 3.1, ground - stage),
+        );
+        river.max(lake)
+    }
+
+    /// Sample the highest lake, river or ocean surface covering this point.
+    /// Supply the ground elevation from [Self::sample] to avoid resampling it.
+    pub fn open_water_at(&self, direction: DVec3, ground: f64) -> Option<WaterSample> {
+        let (face, uv) = face_uv(direction)?;
+        let up = direction.normalize();
+        let mut best = None;
+        let mut consider = |elevation, current, kind| {
+            let depth = elevation - ground;
+            if depth > 0.012
+                && best.is_none_or(|previous: WaterSample| previous.elevation < elevation)
+            {
+                best = Some(WaterSample {
+                    elevation,
+                    depth,
+                    current,
+                    kind,
+                });
+            }
+        };
+        if ground < WATER_SURFACE_ELEVATION && self.ocean_near(face, uv) {
+            consider(WATER_SURFACE_ELEVATION, DVec3::ZERO, WaterKind::Ocean);
+        }
+        if let Some(stage) = self.lake_level(up, face, uv) {
+            consider(stage, DVec3::ZERO, WaterKind::Lake);
+        }
+        if let Some(channel) = self
+            .inland
+            .channel(up)
+            .filter(|channel| channel.distance <= 1.0)
+        {
+            consider(channel.stage, channel.current, WaterKind::River);
+        }
+        best
+    }
+
+    /// Sample the highest water surface covering this point, including local marsh pools.
+    /// Supply the ground elevation from [Self::sample] to avoid resampling it.
+    pub fn water_at(&self, direction: DVec3, ground: f64) -> Option<WaterSample> {
+        let open_water = self.open_water_at(direction, ground);
+        if open_water.is_some() || !(2.5..=904.0).contains(&ground) {
+            return open_water;
+        }
+        let point = direction.normalize_or_zero() * RADIUS;
+        let basin = Basin::at_cell((point / BASIN_CELL).floor().as_ivec3())?;
+        if point.distance_squared(basin.center * RADIUS) > basin.radius * basin.radius {
+            return None;
+        }
+        let pool = self.fill_basin(basin)?;
+        let depth = pool.elevation - ground;
+        (depth > 0.012).then_some(WaterSample {
+            elevation: pool.elevation,
+            depth,
+            current: DVec3::ZERO,
+            kind: WaterKind::Wetland,
+        })
+    }
+
+    fn lake_level(&self, direction: DVec3, face: usize, uv: DVec2) -> Option<f64> {
+        self.inland.lake_level(face, uv).or_else(|| {
+            if uv.min(DVec2::ONE - uv).min_element() > 0.000_002 {
+                return None;
+            }
+            seam_neighbors(direction, face)
+                .find_map(|(face, uv, _)| self.inland.lake_level(face, uv))
+        })
+    }
+
+    fn ocean_near(&self, face: usize, uv: DVec2) -> bool {
+        let Some(mask) = &self.ocean else {
+            return self.inland.lakes.is_empty();
+        };
+        let side = mask.width() / 3;
+        let source = height_source_uv(uv, DVec2::splat(f64::from(side)));
+        let x_offset = (face as u32 % 3) * side;
+        let y_offset = (face as u32 / 3) * side;
+        // Filter inside one cube face, exactly as the bathymetry shader does.
+        // Older atlases used a lower intermediate value for inland basins.
+        bilinear(source, side, side, |x, y| {
+            f64::from(u8::from(
+                mask.get_pixel(x + x_offset, y + y_offset).0[0] >= 238,
+            ))
+        }) >= 0.025
     }
 
     fn terrain_input(
@@ -184,7 +324,10 @@ impl SurfaceHeights {
         if !(5.0..=900.0).contains(&base) || river > 85.0 || lake > 0.0 {
             return None;
         }
-        let center_height = input.elevation(basin.center);
+        let center_height = self.sample(basin.center)?;
+        if self.open_water_at(basin.center, center_height).is_some() {
+            return None;
+        }
         let (temperature, moisture) = terrain_detail::climate(basin.center, center_height);
         let wet = terrain_detail::wetland_weight(
             temperature,
@@ -213,10 +356,11 @@ impl SurfaceHeights {
         for up in ring(1.0, 48) {
             let (face, uv) = face_uv(up)?;
             let input = self.terrain_input(up, face, uv, faces);
-            if input.lake > 0.0 || input.river > 100.0 {
+            let ground = self.sample(up)?;
+            if input.lake > 0.0 || input.river > 100.0 || self.open_water_at(up, ground).is_some() {
                 return None;
             }
-            rim = rim.min(input.elevation(up));
+            rim = rim.min(ground);
         }
         let elevation = (floor + 0.70).min(rim - 0.16);
         (elevation >= floor + 0.16).then_some(LocalPool {
@@ -366,6 +510,8 @@ mod tests {
             }))),
             rivers: Some(Arc::new(rivers)),
             lakes: Default::default(),
+            inland: Default::default(),
+            ocean: Default::default(),
         };
 
         assert_eq!(heights.sample(DVec3::X), Some(decode_height(20_003.0)));
@@ -373,6 +519,52 @@ mod tests {
         assert_eq!(heights.sample(DVec3::ZERO), None);
         assert!(heights.is_river(DVec3::X));
         assert!(!heights.is_river(DVec3::NEG_X));
+    }
+
+    #[test]
+    fn shipped_river_stage_and_current_match_the_graded_channel() {
+        let heights = shipped_terrain();
+        let reach = heights
+            .river_reaches()
+            .iter()
+            .find(|reach| {
+                let up = reach.direction(0.49, 0.0);
+                let ground = heights.sample(up).unwrap();
+                heights
+                    .water_at(up, ground)
+                    .is_some_and(|water| water.kind == WaterKind::River)
+                    && reach.half_width(0.49) > 20.0
+                    && reach.elevation(0.49) > 4.0
+            })
+            .expect("an exposed river reach");
+        let up = reach.direction(0.49, 0.0);
+        let ground = heights.sample(up).unwrap();
+        let water = heights.water_at(up, ground).unwrap();
+        assert!(water.depth > 0.5 && water.depth < 6.0);
+        assert!(water.current.dot(reach.direction(0.51, 0.0) - up) > 0.0);
+        assert!(water.current.dot(up).abs() < 1e-10);
+        assert!(reach.elevation(1.0) <= reach.elevation(0.0));
+        let bank_up = reach.direction(0.49, 1.0 + 8.0 / reach.half_width(0.49));
+        let bank = heights.sample(bank_up).unwrap();
+        assert!((bank - water.elevation).abs() < 6.0);
+    }
+
+    #[test]
+    fn shipped_lake_query_uses_the_baked_surface_level() {
+        let heights = shipped_terrain();
+        let (tile, water) = heights
+            .lake_tiles()
+            .iter()
+            .find_map(|tile| {
+                let up = tile.corners.iter().sum::<DVec3>().normalize();
+                let ground = heights.sample(up)?;
+                let water = heights.water_at(up, ground)?;
+                (water.kind == WaterKind::Lake).then_some((tile, water))
+            })
+            .expect("a submerged lake tile");
+        assert!((water.elevation - tile.elevation).abs() < 0.001);
+        assert_eq!(water.current, DVec3::ZERO);
+        assert!(water.depth > 0.0);
     }
 
     #[test]

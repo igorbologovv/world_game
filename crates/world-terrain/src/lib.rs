@@ -23,7 +23,7 @@ use surface_materials::SurfaceTextures;
 use world_core::{
     canopy::{CanopyLayout, ForestCanopy},
     planet::RADIUS,
-    runtime::{PlanetRoot, WorldAssets, WorldMovement, WorldReady},
+    runtime::{PlanetRoot, WorldMovement, WorldReady},
 };
 
 /// Register terrain materials, chunk streaming, lighting, atmosphere, and clouds.
@@ -181,7 +181,6 @@ fn setup(
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
     assets: Res<AssetServer>,
-    world_assets: Res<WorldAssets>,
 ) {
     let material = materials.add(TerrainMaterial::load(&assets));
     let biome_materials = std::env::var_os("WORLD_TERRAIN_LEGACY_DETAIL").is_none();
@@ -192,7 +191,7 @@ fn setup(
     ));
     commands.insert_resource(terrain_surface::TerrainSurface::new(
         material,
-        biome_materials.then(|| surface_water::LakeMasks::load(world_assets.directory())),
+        biome_materials,
     ));
 
     // One physically based atmosphere centered on the actual spherical planet,

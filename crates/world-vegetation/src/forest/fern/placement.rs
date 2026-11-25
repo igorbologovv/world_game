@@ -155,7 +155,7 @@ fn dampness(position: DVec3) -> f32 {
 
 fn habitat(heights: &SurfaceHeights, up: DVec3, trees: &[DVec3]) -> Option<(f64, Vec3)> {
     let elevation = heights.sample(up)?;
-    if !(2.7..=1950.0).contains(&elevation) || heights.is_river(up) {
+    if !(2.7..=1950.0).contains(&elevation) || heights.open_water_at(up, elevation).is_some() {
         return None;
     }
     let position = up * (RADIUS + elevation);

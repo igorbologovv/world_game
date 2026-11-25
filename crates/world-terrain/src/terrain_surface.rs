@@ -17,10 +17,7 @@ use world_core::{
     SurfaceHeights,
 };
 
-use crate::{
-    surface_water::{self, LakeMasks},
-    TerrainMaterial,
-};
+use crate::{surface_water, TerrainMaterial};
 
 const GRID: usize = 20;
 const BASE_LEVEL: u8 = 1;
@@ -167,9 +164,9 @@ struct PreparedTile {
 }
 
 impl PreparedTile {
-    fn build(tile: Tile, heights: &SurfaceHeights, lakes: Option<&LakeMasks>) -> Self {
+    fn build(tile: Tile, heights: &SurfaceHeights, water_materials: bool) -> Self {
         let anchor = tile.anchor(heights);
-        let mesh = build_mesh(tile, anchor, heights, lakes);
+        let mesh = build_mesh(tile, anchor, heights, water_materials);
         let bounds = mesh.get_aabb().expect("terrain chunks contain a full grid");
         Self {
             tile,
@@ -188,7 +185,7 @@ struct TerrainJob {
 #[derive(Resource)]
 pub(super) struct TerrainSurface {
     pub(super) material: Handle<TerrainMaterial>,
-    lakes: Option<LakeMasks>,
+    water_materials: bool,
     leaves: HashMap<Tile, Chunk>,
     // Active internal nodes retain the exact sampled center without keeping
     // their mesh or resampling procedural elevation on every merge scan.
@@ -197,10 +194,10 @@ pub(super) struct TerrainSurface {
 }
 
 impl TerrainSurface {
-    pub(super) fn new(material: Handle<TerrainMaterial>, lakes: Option<LakeMasks>) -> Self {
+    pub(super) fn new(material: Handle<TerrainMaterial>, water_materials: bool) -> Self {
         Self {
             material,
-            lakes,
+            water_materials,
             leaves: HashMap::new(),
             parents: HashMap::new(),
             pending: Vec::new(),
@@ -209,7 +206,7 @@ impl TerrainSurface {
 
     fn request(&mut self, edit: Edit, heights: &SurfaceHeights) {
         let heights = heights.clone();
-        let lakes = self.lakes.clone();
+        let water_materials = self.water_materials;
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let tiles = match edit {
                 Edit::Roots => (0..6).map(Tile::root).collect(),
@@ -218,7 +215,7 @@ impl TerrainSurface {
             };
             tiles
                 .into_iter()
-                .map(|tile| PreparedTile::build(tile, &heights, lakes.as_ref()))
+                .map(|tile| PreparedTile::build(tile, &heights, water_materials))
                 .collect()
         });
         self.pending.push(TerrainJob { edit, task });
@@ -411,12 +408,7 @@ fn material_origin(anchor: DVec3) -> DVec3 {
     (anchor / MATERIAL_GRID).floor() * MATERIAL_GRID
 }
 
-fn build_mesh(
-    tile: Tile,
-    anchor: DVec3,
-    heights: &SurfaceHeights,
-    lakes: Option<&LakeMasks>,
-) -> Mesh {
+fn build_mesh(tile: Tile, anchor: DVec3, heights: &SurfaceHeights, water_materials: bool) -> Mesh {
     let stride = GRID + 1;
     let mut positions = Vec::with_capacity(stride * stride + 4 * GRID);
     let mut normals = Vec::with_capacity(positions.capacity());
@@ -427,12 +419,12 @@ fn build_mesh(
     // Cover the complete tile and a pool's influence beyond its border.
     // The pool API caps the query at 512 m. Baked water is available at all LODs.
     let pool_range = RADIUS * tile.unit() * 1.65 + 72.0;
-    let pools = if lakes.is_some() && pool_range <= 512.0 && anchor.length() - RADIUS < 950.0 {
+    let pools = if water_materials && pool_range <= 512.0 && anchor.length() - RADIUS < 950.0 {
         heights.local_pools(anchor.normalize(), pool_range)
     } else {
         Vec::new()
     };
-    if lakes.is_some() {
+    if water_materials {
         material_xy.reserve(positions.capacity());
         material_z_water.reserve(positions.capacity());
     }
@@ -447,12 +439,12 @@ fn build_mesh(
             positions.push((position - anchor).as_vec3().to_array());
             let planet = position.as_vec3();
             locations.push([planet.x, planet.y, planet.z, height as f32]);
-            if let Some(lakes) = lakes {
+            if water_materials {
                 let local = (position - material_origin).as_vec3();
                 material_xy.push([local.x, local.y]);
                 material_z_water.push([
                     local.z,
-                    surface_water::influence(heights, lakes, &pools, up, height),
+                    surface_water::influence(heights, &pools, up, height),
                 ]);
             }
         }
@@ -503,7 +495,7 @@ fn build_mesh(
         positions.push((lowered - anchor).as_vec3().to_array());
         normals.push(normals[a]);
         locations.push(locations[a]);
-        if lakes.is_some() {
+        if water_materials {
             material_xy.push(material_xy[a]);
             material_z_water.push(material_z_water[a]);
         }
@@ -519,7 +511,7 @@ fn build_mesh(
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     // Preserve a planet-local position across floating-origin shifts.
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, locations);
-    if lakes.is_some() {
+    if water_materials {
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, material_xy);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, material_z_water);
     }
@@ -639,8 +631,7 @@ mod tests {
             x: cells.x,
             y: cells.y,
         };
-        let lakes = LakeMasks::load(&assets);
-        let mesh = |tile| PreparedTile::build(tile, &heights, Some(&lakes));
+        let mesh = |tile| PreparedTile::build(tile, &heights, true);
         let a = mesh(parent);
         let b = mesh(parent.children()[3]);
 
@@ -699,7 +690,7 @@ mod tests {
             x: cells.x,
             y: cells.y,
         };
-        let mesh = PreparedTile::build(tile, &heights, Some(&LakeMasks::default()));
+        let mesh = PreparedTile::build(tile, &heights, true);
         let VertexAttributeValues::Float32x3(positions) =
             mesh.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
         else {

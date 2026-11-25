@@ -425,7 +425,7 @@ fn tree_site(
     rng: &mut Random,
 ) -> Option<(f64, Species)> {
     let ground = heights.sample(direction)?;
-    if !(3.5..=2600.0).contains(&ground) || heights.is_river(direction) {
+    if !(3.5..=2600.0).contains(&ground) || heights.open_water_at(direction, ground).is_some() {
         return None;
     }
     let species = select_species(direction, ground, rng, || {

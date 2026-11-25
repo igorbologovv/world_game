@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-RADIUS = 100_000.0
+RADIUS = 3_389_500.0
+LEGACY_RADIUS = 100_000.0
 CORRECTION = 0.87**2
 TEXEL_OFFSET = 0.5 / (508 * 16)
 HEIGHT_DIR = Path("terrains/spherical/source/height")
@@ -42,12 +43,28 @@ def runtime_positions(vector, size):
     return (direction * (np.linalg.norm(vector, axis=1) / np.linalg.norm(direction, axis=1))[:, None]).astype(np.float32).astype(np.float64)
 
 
+def planetary_positions(vector):
+    radius = np.linalg.norm(vector, axis=-1)
+    reference = np.where(np.abs(radius - LEGACY_RADIUS) < 30_000, LEGACY_RADIUS, RADIUS)
+    safe = np.where(radius > 0, radius, 1.0)
+    return vector * ((RADIUS + radius - reference) / safe)[..., None]
+
+
+def surface_interpolation(start, end, fraction):
+    start_radius = np.linalg.norm(start, axis=1, keepdims=True)
+    end_radius = np.linalg.norm(end, axis=1, keepdims=True)
+    direction = ((1 - fraction) * (start / np.maximum(start_radius, 1.0))
+                 + fraction * (end / np.maximum(end_radius, 1.0)))
+    radius = (1 - fraction) * start_radius + fraction * end_radius
+    return direction * (radius / np.maximum(np.linalg.norm(direction, axis=1, keepdims=True), 1e-12))
+
+
 def weighted_pixels(side):
     u = np.linspace(-1, 1, side)
     v = u[:, None]
     sx, sy = 1 + CORRECTION - CORRECTION * u**2, 1 + CORRECTION - CORRECTION * v**2
     scale = (2 * RADIUS / (side - 1) / 1000)**2
-    area = scale * (1 + CORRECTION)**2 / (sx * sy * (1 + u**2 / sx + v**2 / sy))**1.5
+    area = scale * (1 + CORRECTION)**2 / ((sx * sy) * (1 + u**2 / sx + v**2 / sy))**1.5
     area[[0, -1], :] *= 0.5
     area[:, [0, -1]] *= 0.5
     return area
@@ -118,8 +135,9 @@ def measure(assets, lake_vertices):
     river_path = world / "river_surface.bin"
     rivers = read_vertices(river_path, 30)
     baked = baked_mesh(river_path)
-    start = rivers[:, 6].astype(float)
-    end = (rivers[:, 1].astype(float) + rivers[:, 5]) / 2
+    river_stations = planetary_positions(rivers[:, [6, 1, 5, 0, 2]].astype(float))
+    start = river_stations[:, 0]
+    end = surface_interpolation(river_stations[:, 1], river_stations[:, 2], 0.5)
     start_norm = np.linalg.norm(start, axis=1)
     end_norm = np.linalg.norm(end, axis=1)
     nonzero = end_norm >= 0.5 * RADIUS
@@ -127,8 +145,8 @@ def measure(assets, lake_vertices):
     f = start[index] / start_norm[index, None]
     t = end[index] / end_norm[index, None]
     arc = RADIUS * np.arctan2(np.linalg.norm(np.cross(f, t), axis=1), np.sum(f * t, axis=1))
-    # A valid source-grid edge is far shorter than 1 km on this 1024² grid.
-    valid = arc < 1000
+    # D8 links are at most a few angular source texels, including seam splits.
+    valid = arc < 5 * RADIUS / (size - 1)
     index, arc = index[valid], arc[valid]
     a, b = cell(start[index], size, baked), cell(end[index], size, baked)
     heads = ~np.isin(np.ravel_multi_index(a, ocean.shape), np.ravel_multi_index(b, ocean.shape))
@@ -137,10 +155,12 @@ def measure(assets, lake_vertices):
         p, q = start[index][dry], end[index][dry]
     else:
         p = runtime_positions(start[index][dry], size)
-        q = (runtime_positions(rivers[index, 1][dry], size) + runtime_positions(rivers[index, 5][dry], size)) / 2
-    gaps = np.concatenate([terrain_depth(p + (q - p) * fraction, heights)
-                           for fraction in np.linspace(0.05, 0.95, 19)])
-    widths = np.linalg.norm(rivers[index, 0] - rivers[index, 2], axis=1)
+        q = runtime_positions(end[index][dry], size)
+    gaps = np.concatenate([
+        terrain_depth(surface_interpolation(p, q, fraction), heights)
+        for fraction in np.linspace(0.05, 0.95, 19)
+    ])
+    widths = np.linalg.norm(river_stations[index, 3] - river_stations[index, 4], axis=1)
     return {
         "inland_area_km2": area,
         "inland_water_percent_of_non_ocean": area / land_area * 100,

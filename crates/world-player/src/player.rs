@@ -1,15 +1,15 @@
+use crate::camera::DebugCameraController;
 use bevy::{
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     math::{DQuat, DVec3},
     prelude::*,
     window::{CursorOptions, PrimaryWindow},
 };
-use crate::camera::DebugCameraController;
 use world_core::{
     coordinates::terrain_aligned_direction,
-    planet::{ExplorerSpawn, MAX_HEIGHT, RADIUS, WATER_SURFACE_ELEVATION},
+    planet::{ExplorerSpawn, MAX_HEIGHT, RADIUS},
     runtime::{GridTransform, ReferenceFrames, WorldCamera},
-    SurfaceHeights,
+    SurfaceHeights, WaterSample,
 };
 
 use crate::trip::{TravelSpeed, TripPanelInput};
@@ -25,6 +25,8 @@ const POV_FAR_PLANE: f32 = 8_000.0;
 const MAX_LOOK_PITCH: f64 = 1.48;
 const LOOK_SENSITIVITY: f64 = 0.003;
 const WALK_SPEED: f64 = 5.5;
+const WADING_LIMIT: f64 = 1.15;
+const SWIM_SPEED: f64 = 2.15;
 const SPRINT_MULTIPLIER: f64 = 2.2;
 const FLIGHT_SPEED: f64 = 32.0;
 const FLIGHT_CLIMB_SPEED: f64 = 14.0;
@@ -107,7 +109,10 @@ struct FirstPersonView {
 
 impl FirstPersonView {
     fn new(heading: DVec3) -> Self {
-        Self { heading, pitch: -0.10 }
+        Self {
+            heading,
+            pitch: -0.10,
+        }
     }
 
     fn look(&mut self, up: DVec3, drag: Vec2) {
@@ -143,6 +148,7 @@ pub(super) struct Player {
     terrain_pace: f64,
     height: f64,
     grounded: bool,
+    water_depth: f64,
     flight: Option<Flight>,
     walk_phase: f32,
     moving: bool,
@@ -161,13 +167,14 @@ impl Player {
             terrain_pace: 1.0,
             height: spawn.elevation,
             grounded: false,
+            water_depth: 0.0,
             flight: None,
             walk_phase: 0.0,
             moving: false,
         }
     }
 
-    fn teleport(&mut self, up: DVec3, ground: f64, wet: bool) {
+    fn teleport(&mut self, up: DVec3, ground: f64, water: Option<WaterSample>) {
         let heading = DQuat::from_rotation_arc(self.up, up) * self.forward;
         self.up = up;
         self.forward = tangent(heading, up);
@@ -177,17 +184,16 @@ impl Player {
         self.terrain_pace = 1.0;
         self.walk_phase = 0.0;
         self.moving = false;
-        self.grounded = ground > WATER_SURFACE_ELEVATION && !wet;
+        self.water_depth = 0.0;
+        self.grounded = wadeable(water);
         self.flight = (!self.grounded).then_some(Flight { can_land: false });
-        self.height = if self.grounded {
-            ground
-        } else {
-            ground.max(WATER_SURFACE_ELEVATION) + FLIGHT_WATER_CLEARANCE
-        };
+        self.height = water
+            .filter(|_| !self.grounded)
+            .map_or(ground, |water| water.elevation + FLIGHT_WATER_CLEARANCE);
     }
 
-    fn toggle_flight(&mut self, ground: f64, wet: bool) {
-        let can_land = ground > WATER_SURFACE_ELEVATION && !wet;
+    fn toggle_flight(&mut self, ground: f64, water: Option<WaterSample>) {
+        let can_land = wadeable(water);
         if self.flight.is_some() {
             if can_land {
                 self.height = ground;
@@ -197,10 +203,10 @@ impl Player {
         } else {
             self.destination = None;
             self.route_blocked = false;
-            self.height = self
-                .height
-                .max(ground.max(WATER_SURFACE_ELEVATION) + TAKEOFF_CLEARANCE);
+            let surface = water.map_or(ground, |water| water.elevation);
+            self.height = self.height.max(surface + TAKEOFF_CLEARANCE);
             self.grounded = false;
+            self.water_depth = 0.0;
             self.flight = Some(Flight { can_land });
         }
     }
@@ -211,7 +217,7 @@ impl Player {
         distance: f64,
         climb: f64,
         ground_at: impl Fn(DVec3) -> f64,
-        wet_at: impl Fn(DVec3) -> bool,
+        water_at: impl Fn(DVec3, f64) -> Option<WaterSample>,
     ) {
         let Some(flight) = &mut self.flight else {
             return;
@@ -222,14 +228,28 @@ impl Player {
             self.facing = tangent(direction, self.up);
         }
         let ground = ground_at(self.up);
-        flight.can_land = ground > WATER_SURFACE_ELEVATION && !wet_at(self.up);
-        let clearance = if flight.can_land {
-            FLIGHT_GROUND_CLEARANCE
-        } else {
-            FLIGHT_WATER_CLEARANCE
-        };
-        let floor = ground.max(WATER_SURFACE_ELEVATION) + clearance;
-        self.height = (self.height + climb).clamp(floor, FLIGHT_CEILING);
+        let water = water_at(self.up, ground);
+        flight.can_land = wadeable(water);
+        let floor = water.map_or(ground + FLIGHT_GROUND_CLEARANCE, |water| {
+            water.elevation + FLIGHT_WATER_CLEARANCE
+        });
+        self.height = (self.height + climb).clamp(floor.min(FLIGHT_CEILING), FLIGHT_CEILING);
+    }
+
+    fn settle_on_surface(&mut self, ground: f64, water: Option<WaterSample>, dt: f64) {
+        self.water_depth = water.map_or(0.0, |water| water.depth);
+        if self.water_depth <= WADING_LIMIT {
+            self.height = ground;
+            return;
+        }
+        let water = water.unwrap();
+        let bob = 0.035 * self.walk_phase.sin() as f64;
+        let target = (water.elevation - 1.82 + bob).max(ground);
+        let blend = 1.0 - (-8.0 * dt).exp();
+        // Keep the explorer's head above water when entering a steep drop.
+        self.height = (self.height + (target - self.height) * blend)
+            .max(water.elevation - POV_EYE_HEIGHT + 0.15)
+            .max(ground);
     }
 
     pub(super) fn trip(&self) -> Option<(f64, bool, f64)> {
@@ -242,33 +262,36 @@ impl Player {
         })
     }
 
-    /// Walk on the sphere in an arbitrary tangent-space direction.
-    /// Movement intentionally uses the same terrain and river checks as click-to-move.
+    /// Move by small tangent steps so narrow shoals and steep banks are sampled.
     fn walk_direction(
         &mut self,
         direction: DVec3,
         distance: f64,
         ground_at: impl Fn(DVec3) -> f64,
-        river_at: impl Fn(DVec3) -> bool,
+        water_at: impl Fn(DVec3, f64) -> Option<WaterSample>,
     ) {
-        if !self.grounded || distance <= 0.0 {
+        if !self.grounded || distance <= 0.0 || direction == DVec3::ZERO {
             return;
         }
         self.destination = None;
         self.route_blocked = false;
         let mut remaining = distance;
         let mut ground = ground_at(self.up);
-        while remaining > 0.0 && ground > WATER_SURFACE_ELEVATION {
+        while remaining > 0.0 {
             let tangent_direction = tangent(direction, self.up);
             let probe = remaining.min(1.5);
             let next_up =
                 (self.up + tangent_direction * (probe / (RADIUS + self.height))).normalize();
             let ahead = ground_at(next_up);
-            if ahead <= WATER_SURFACE_ELEVATION || river_at(next_up) {
-                break;
-            }
+            let water = water_at(next_up, ahead);
+            let depth = water.map_or(0.0, |water| water.depth);
             let slope = (ahead - ground) / probe;
-            let pace = slope.hypot(1.0).recip().max(MIN_SLOPE_PACE);
+            let traction = if depth > WADING_LIMIT {
+                1.0
+            } else {
+                slope.hypot(1.0).recip().max(MIN_SLOPE_PACE)
+            };
+            let pace = traction * wading_pace(depth);
             let step = (probe * pace).min(remaining);
             let next_up =
                 (self.up + tangent_direction * (step / (RADIUS + self.height))).normalize();
@@ -277,11 +300,7 @@ impl Player {
             } else {
                 ground_at(next_up)
             };
-            if next_height <= WATER_SURFACE_ELEVATION || river_at(next_up) {
-                break;
-            }
             self.up = next_up;
-            self.height = next_height;
             self.facing = tangent(tangent_direction, next_up);
             self.walk_phase = (self.walk_phase + step as f32 * 4.0) % std::f32::consts::TAU;
             self.moving = true;
@@ -299,12 +318,12 @@ impl Player {
         mut budget: f64,
         mut ground: f64,
         ground_at: impl Fn(DVec3) -> f64,
-        river_at: impl Fn(DVec3) -> bool,
+        water_at: impl Fn(DVec3, f64) -> Option<WaterSample>,
     ) {
         let Some(target) = self.destination.filter(|_| !self.route_blocked) else {
             return;
         };
-        while budget > 0.0 && ground > WATER_SURFACE_ELEVATION {
+        while budget > 0.0 {
             let distance = self.distance_to(target);
             if distance < 0.35 {
                 self.destination = None;
@@ -316,12 +335,14 @@ impl Player {
             let probe = distance.min(2.0);
             let ahead_up = (self.up + direction * (probe / radius)).normalize();
             let ahead = ground_at(ahead_up);
-            if ahead <= WATER_SURFACE_ELEVATION || river_at(ahead_up) {
+            let water = water_at(ahead_up, ahead);
+            if !wadeable(water) {
                 self.route_blocked = true;
                 break;
             }
             let slope = (ahead - ground) / probe;
-            self.terrain_pace = slope.hypot(1.0).recip().max(MIN_SLOPE_PACE);
+            self.terrain_pace = slope.hypot(1.0).recip().max(MIN_SLOPE_PACE)
+                * wading_pace(water.map_or(0.0, |water| water.depth));
             let step = (budget * self.terrain_pace).min(probe);
             let (next_up, next_height) = if step == probe {
                 (ahead_up, ahead)
@@ -329,7 +350,7 @@ impl Player {
                 let up = (self.up + direction * (step / radius)).normalize();
                 (up, ground_at(up))
             };
-            if next_height <= WATER_SURFACE_ELEVATION || (step != probe && river_at(next_up)) {
+            if step != probe && !wadeable(water_at(next_up, next_height)) {
                 self.route_blocked = true;
                 break;
             }
@@ -514,12 +535,12 @@ pub(super) fn walk(
         return;
     };
     let ground_at = |up: DVec3| surface.sample(up).unwrap_or(0.0);
-    let wet_at = |up| surface.is_river(up);
+    let water_at = |up, ground| surface.water_at(up, ground);
     let mut ground = ground_at(player.up);
+    let mut water = water_at(player.up, ground);
     if toggle_flight {
         let taking_off = player.flight.is_none();
-        let wet = wet_at(player.up);
-        player.toggle_flight(ground, wet);
+        player.toggle_flight(ground, water);
         if taking_off && map.first_person.is_none() {
             *map = MapView::default();
         }
@@ -569,10 +590,7 @@ pub(super) fn walk(
         }
     }
 
-    if player.flight.is_none() && ground > WATER_SURFACE_ELEVATION {
-        if !player.grounded {
-            info!("Explorer spawned at {ground:.1} m above sea level");
-        }
+    if player.flight.is_none() && !player.grounded {
         player.height = ground;
         player.grounded = true;
     }
@@ -592,16 +610,19 @@ pub(super) fn walk(
         if let Some(ray) = ray {
             let origin = frame.grid_position_double(&camera.cell, &camera.transform)
                 + (ray.origin - camera_global.translation()).as_dvec3();
-            if let Some((target, elevation)) =
-                pick_surface(origin, ray.direction.as_dvec3(), ground_at)
-            {
-                let wet = wet_at(target);
+            if let Some((target, _)) = pick_surface(origin, ray.direction.as_dvec3(), |up| {
+                let ground = ground_at(up);
+                water_at(up, ground).map_or(ground, |water| water.elevation)
+            }) {
+                let elevation = ground_at(target);
+                let target_water = water_at(target, elevation);
                 if debug_teleport {
-                    player.teleport(target, elevation, wet);
+                    player.teleport(target, elevation, target_water);
                     *map = MapView::default();
                     ground = elevation;
+                    water = target_water;
                     teleported = true;
-                } else if elevation > WATER_SURFACE_ELEVATION && !wet {
+                } else if wadeable(target_water) {
                     player.destination = Some(target);
                     player.route_blocked = false;
                     player.terrain_pace = 1.0;
@@ -645,22 +666,40 @@ pub(super) fn walk(
             FLIGHT_SPEED * speed_multiplier * dt,
             rise * FLIGHT_CLIMB_SPEED * dt,
             ground_at,
-            wet_at,
+            water_at,
         );
-    } else if movement != DVec3::ZERO {
-        player.walk_direction(
-            movement,
-            WALK_SPEED * speed_multiplier * dt,
-            ground_at,
-            wet_at,
-        );
+        ground = ground_at(player.up);
     } else {
-        player.advance(
-            speed.meters_per_second() * time.delta_secs_f64(),
-            ground,
-            ground_at,
-            wet_at,
-        );
+        let depth = water.map_or(0.0, |water| water.depth);
+        if movement != DVec3::ZERO || depth > WADING_LIMIT {
+            // Current takes hold as the explorer loses contact with the bed.
+            let drift = water.map_or(DVec3::ZERO, |water| {
+                water.current * (water.depth / WADING_LIMIT).clamp(0.0, 1.0) * 0.66
+            });
+            let speed = if depth > WADING_LIMIT {
+                SWIM_SPEED
+            } else {
+                WALK_SPEED * speed_multiplier
+            };
+            let velocity = movement * speed + drift;
+            let drift_adjusted = velocity.length() / wading_pace(depth);
+            player.walk_direction(
+                velocity.normalize_or_zero(),
+                drift_adjusted * dt,
+                ground_at,
+                water_at,
+            );
+        } else {
+            player.advance(
+                speed.meters_per_second() * time.delta_secs_f64(),
+                ground,
+                ground_at,
+                water_at,
+            );
+        }
+        ground = ground_at(player.up);
+        let water = water_at(player.up, ground);
+        player.settle_on_surface(ground, water, dt);
     }
 
     let position = player.up * (RADIUS + player.height + 0.38);
@@ -713,6 +752,7 @@ pub(super) fn walk(
 }
 
 pub(super) const WALK_CONTROLS: &str = "F: fly     R: center on explorer     WASD: move     Shift: sprint\nRight-drag: look     Scroll: zoom     V: switch view     Click: travel     T: free camera\nCtrl+Click: debug map teleport";
+const SWIM_CONTROLS: &str = "Swimming     WASD: swim     F: fly     R: center on explorer     V: switch view\nRight-drag: look     Scroll: zoom     T: free camera";
 const FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nF: land     R: center on explorer     Right-drag: look     Scroll: zoom     V: switch view\nCtrl+Click: debug map teleport";
 const WET_FLIGHT_CONTROLS: &str = "Flying     WASD: steer     Space: rise     Ctrl: descend     Shift: boost\nFind dry ground to land     R: center on explorer     Right-drag: look     Scroll: zoom     V: switch view\nCtrl+Click: debug map teleport";
 const FREE_CONTROLS: &str = "Free camera     Arrow keys: move     Page Up / Down: rise / descend     Mouse: look\nR: return to explorer     F: toggle explorer flight     T: exit free camera";
@@ -725,11 +765,9 @@ pub(super) fn update_controls(
     camera: Query<&WorldCamera>,
     mut label: Query<&mut Text, With<Controls>>,
 ) {
-    let (Ok(player), Ok(camera), Ok(mut label)) = (
-        player.single(),
-        camera.single(),
-        label.single_mut(),
-    ) else {
+    let (Ok(player), Ok(camera), Ok(mut label)) =
+        (player.single(), camera.single(), label.single_mut())
+    else {
         return;
     };
     let text = if *camera == WorldCamera::Free {
@@ -738,6 +776,7 @@ pub(super) fn update_controls(
         match &player.flight {
             Some(Flight { can_land: true }) => FLIGHT_CONTROLS,
             Some(_) => WET_FLIGHT_CONTROLS,
+            None if player.water_depth > WADING_LIMIT => SWIM_CONTROLS,
             None => WALK_CONTROLS,
         }
     };
@@ -774,9 +813,11 @@ fn set_fov(projection: &mut Mut<Projection>, fov: f32) {
 }
 
 pub(super) fn animate(player: Query<&Player>, mut boots: Query<(&Boot, &mut Transform)>) {
-    let Ok(player) = player.single() else { return; };
+    let Ok(player) = player.single() else {
+        return;
+    };
     for (boot, mut transform) in &mut boots {
-        let swing = if player.moving {
+        let swing = if player.moving && player.water_depth <= WADING_LIMIT {
             player.walk_phase.sin() * boot.0
         } else {
             0.0
@@ -800,11 +841,11 @@ fn pick_surface(
     }
     let outer_crossing = (outer * outer - impact).sqrt();
     let start = (closest - outer_crossing).max(0.0);
-    let sea_level = RADIUS + WATER_SURFACE_ELEVATION;
-    let end = if impact <= sea_level * sea_level {
-        closest - (sea_level * sea_level - impact).sqrt()
+    let floor = RADIUS + world_core::planet::MIN_HEIGHT;
+    let end = if impact <= floor * floor {
+        closest - (floor * floor - impact).sqrt()
     } else {
-        closest + outer_crossing
+        closest.max(start)
     };
     if end < start {
         return None;
@@ -815,16 +856,13 @@ fn pick_surface(
     for index in 1..=steps {
         let distance = start + (end - start) * index as f64 / steps as f64;
         let point = origin + direction * distance;
-        if point.length() <= RADIUS + height(point.normalize()).max(WATER_SURFACE_ELEVATION) + 0.001
-        {
+        if point.length() <= RADIUS + height(point.normalize()) + 0.001 {
             let mut low = previous;
             let mut high = distance;
             for _ in 0..14 {
                 let mid = (low + high) * 0.5;
                 let sample = origin + direction * mid;
-                if sample.length()
-                    > RADIUS + height(sample.normalize()).max(WATER_SURFACE_ELEVATION)
-                {
+                if sample.length() > RADIUS + height(sample.normalize()) {
                     low = mid;
                 } else {
                     high = mid;
@@ -838,6 +876,14 @@ fn pick_surface(
     None
 }
 
+fn wadeable(water: Option<WaterSample>) -> bool {
+    water.is_none_or(|water| water.depth <= WADING_LIMIT)
+}
+
+fn wading_pace(depth: f64) -> f64 {
+    1.0 - 0.65 * (depth / WADING_LIMIT).clamp(0.0, 1.0)
+}
+
 fn tangent(direction: DVec3, up: DVec3) -> DVec3 {
     (direction - up * direction.dot(up)).normalize()
 }
@@ -846,6 +892,16 @@ fn tangent(direction: DVec3, up: DVec3) -> DVec3 {
 mod tests {
     const SPAWN_ELEVATION: f64 = world_regions::STARTER_REGION.spawn.elevation;
     use super::*;
+    use world_core::{planet::WATER_SURFACE_ELEVATION, WaterKind};
+
+    fn water(elevation: f64, ground: f64) -> Option<WaterSample> {
+        (elevation > ground).then_some(WaterSample {
+            elevation,
+            depth: elevation - ground,
+            current: DVec3::ZERO,
+            kind: WaterKind::River,
+        })
+    }
 
     #[test]
     fn map_near_plane_scales_with_altitude_to_preserve_depth_precision() {
@@ -886,24 +942,24 @@ mod tests {
         player.destination = Some((start + player.forward * (40.0 / RADIUS)).normalize());
         let slope = |up| SPAWN_ELEVATION + 4.0 * start.angle_between(up) * RADIUS;
 
-        player.advance(20.0, SPAWN_ELEVATION, slope, |_| false);
+        player.advance(20.0, SPAWN_ELEVATION, slope, |_, _| None);
         let climbed = start.angle_between(player.up) * RADIUS;
         assert!(climbed > 4.0 && climbed < 7.0);
         assert!(player.terrain_pace < 0.3);
         assert!(!player.route_blocked);
 
-        player.advance(300.0, slope(player.up), slope, |_| false);
+        player.advance(300.0, slope(player.up), slope, |_, _| None);
         assert!(player.destination.is_none());
         assert!(player.height > SPAWN_ELEVATION + 150.0);
     }
 
     #[test]
-    fn wasd_motion_follows_spherical_surface_and_stops_at_water() {
+    fn wasd_motion_slows_in_shallows_and_floats_in_deep_water() {
         let mut player = Player::new(world_regions::STARTER_REGION.spawn);
         player.grounded = true;
         let original = player.up;
         let direction = player.forward;
-        player.walk_direction(direction, 5.0, |_| SPAWN_ELEVATION, |_| false);
+        player.walk_direction(direction, 5.0, |_| SPAWN_ELEVATION, |_, _| None);
         let travelled = original.angle_between(player.up) * RADIUS;
         assert!(travelled > 4.0 && travelled < 5.1);
         assert!(player.moving);
@@ -911,37 +967,54 @@ mod tests {
 
         let blocked_at = player.up;
         player.moving = false;
-        player.walk_direction(direction, 3.0, |_| SPAWN_ELEVATION, |_| true);
-        assert!(player.up.abs_diff_eq(blocked_at, 1e-12));
-        assert!(!player.moving);
+        player.walk_direction(
+            direction,
+            3.0,
+            |_| SPAWN_ELEVATION,
+            |_, ground| water(ground + 0.8, ground),
+        );
+        let waded = blocked_at.angle_between(player.up) * RADIUS;
+        assert!((1.0..2.2).contains(&waded));
+        assert!(player.moving);
+
+        let level = SPAWN_ELEVATION + 3.0;
+        for _ in 0..60 {
+            player.settle_on_surface(SPAWN_ELEVATION, water(level, SPAWN_ELEVATION), 1.0 / 60.0);
+        }
+        assert!((player.height - (level - 1.82)).abs() < 0.05);
     }
 
     #[test]
     fn explorer_can_cross_a_river_in_flight_and_land_on_the_far_bank() {
         let mut player = Player::new(world_regions::STARTER_REGION.spawn);
-        let start = player.up;
         let direction = player.forward;
         let ground_at = |_| SPAWN_ELEVATION;
-        let river_at = |up: DVec3| (5.0..25.0).contains(&(up.dot(direction) * RADIUS));
+        let river_at = |up: DVec3, ground| {
+            (5.0..25.0)
+                .contains(&(up.dot(direction) * RADIUS))
+                .then(|| water(ground + 2.0, ground))
+                .flatten()
+        };
         player.grounded = true;
 
-        player.walk_direction(direction, 30.0, ground_at, river_at);
-        assert!(start.angle_between(player.up) * RADIUS < 5.0);
-        player.toggle_flight(SPAWN_ELEVATION, false);
+        player.toggle_flight(SPAWN_ELEVATION, None);
         assert_eq!(player.height, SPAWN_ELEVATION + TAKEOFF_CLEARANCE);
 
         player.fly(direction, 12.0, 0.0, ground_at, river_at);
-        assert!(river_at(player.up));
+        assert!(river_at(player.up, SPAWN_ELEVATION).is_some());
         assert!(!player.flight.as_ref().unwrap().can_land);
         let airborne = player.height;
-        player.toggle_flight(SPAWN_ELEVATION, true);
+        player.toggle_flight(
+            SPAWN_ELEVATION,
+            water(SPAWN_ELEVATION + 2.0, SPAWN_ELEVATION),
+        );
         assert_eq!(player.height, airborne);
         assert!(player.flight.is_some());
 
         player.fly(direction, 25.0, 0.0, ground_at, river_at);
         assert!(player.up.dot(direction) * RADIUS > 25.0);
         assert!(player.flight.as_ref().unwrap().can_land);
-        player.toggle_flight(SPAWN_ELEVATION, false);
+        player.toggle_flight(SPAWN_ELEVATION, None);
         assert_eq!(player.height, SPAWN_ELEVATION);
         assert!(player.grounded);
         assert!(player.flight.is_none());
@@ -951,15 +1024,21 @@ mod tests {
     fn flight_descent_respects_water_and_terrain_clearance() {
         let mut player = Player::new(world_regions::STARTER_REGION.spawn);
         let start = player.up;
-        player.toggle_flight(SPAWN_ELEVATION, false);
-        player.fly(DVec3::ZERO, 0.0, 15.0, |_| SPAWN_ELEVATION, |_| false);
+        player.toggle_flight(SPAWN_ELEVATION, None);
+        player.fly(DVec3::ZERO, 0.0, 15.0, |_| SPAWN_ELEVATION, |_, _| None);
         assert_eq!(player.height, SPAWN_ELEVATION + TAKEOFF_CLEARANCE + 15.0);
-        player.fly(DVec3::ZERO, 0.0, -600.0, |_| -10.0, |_| false);
+        player.fly(
+            DVec3::ZERO,
+            0.0,
+            -600.0,
+            |_| -10.0,
+            |_, ground| water(WATER_SURFACE_ELEVATION, ground),
+        );
         assert_eq!(
             player.height,
             WATER_SURFACE_ELEVATION + FLIGHT_WATER_CLEARANCE
         );
-        player.fly(DVec3::ZERO, 0.0, -3.0, |_| SPAWN_ELEVATION, |_| false);
+        player.fly(DVec3::ZERO, 0.0, -3.0, |_| SPAWN_ELEVATION, |_, _| None);
         assert_eq!(player.height, SPAWN_ELEVATION + FLIGHT_GROUND_CLEARANCE);
         assert_eq!(player.up, start);
     }
@@ -977,7 +1056,9 @@ mod tests {
                 SPAWN_ELEVATION
             }
         };
-        player.advance(100.0, SPAWN_ELEVATION, ground_at, |_| false);
+        player.advance(100.0, SPAWN_ELEVATION, ground_at, |_, ground| {
+            water(WATER_SURFACE_ELEVATION, ground)
+        });
         assert!(player.route_blocked);
         assert!(start.angle_between(player.up) * RADIUS < 10.0);
         assert!(player.destination.is_some());
@@ -988,7 +1069,12 @@ mod tests {
         let mut player = Player::new(world_regions::STARTER_REGION.spawn);
         let start = player.up;
         player.destination = Some((start + player.forward * (50.0 / RADIUS)).normalize());
-        let river_at = |up| (10.0..14.0).contains(&(start.angle_between(up) * RADIUS));
+        let river_at = |up, ground| {
+            (10.0..14.0)
+                .contains(&(start.angle_between(up) * RADIUS))
+                .then(|| water(ground + 2.0, ground))
+                .flatten()
+        };
         player.advance(100.0, SPAWN_ELEVATION, |_| SPAWN_ELEVATION, river_at);
         assert!(player.route_blocked);
         assert!(start.angle_between(player.up) * RADIUS < 10.0);
@@ -997,14 +1083,19 @@ mod tests {
     #[test]
     fn picks_visible_water_before_hidden_land_and_rejects_misses() {
         let origin = DVec3::X * (RADIUS * GLOBE_RADIUS_MULTIPLIER);
-        let (up, waterbed) = pick_surface(origin, -DVec3::X, |up| {
-            if up.x > 0.0 {
-                -100.0
-            } else {
-                2_000.0
-            }
-        })
-        .unwrap();
+        let (up, waterbed) =
+            pick_surface(
+                origin,
+                -DVec3::X,
+                |up| {
+                    if up.x > 0.0 {
+                        -100.0
+                    } else {
+                        2_000.0
+                    }
+                },
+            )
+            .unwrap();
         assert_eq!(up, DVec3::X);
         assert_eq!(waterbed, -100.0);
         assert!(pick_surface(origin, DVec3::Y, |_| 1_000.0).is_none());
@@ -1016,7 +1107,7 @@ mod tests {
         let opposite = -player.up;
         player.destination = Some(DVec3::Y);
         player.route_blocked = true;
-        player.teleport(opposite, -50.0, false);
+        player.teleport(opposite, -50.0, water(WATER_SURFACE_ELEVATION, -50.0));
         assert_eq!(player.up, opposite);
         assert!(player.forward.is_finite());
         assert!(player.forward.dot(opposite).abs() < 1e-10);
@@ -1029,11 +1120,11 @@ mod tests {
         assert!(player.trip().is_none());
         assert!(!player.route_blocked);
 
-        player.teleport(DVec3::Z, 30.0, true);
-        assert_eq!(player.height, 30.0 + FLIGHT_WATER_CLEARANCE);
+        player.teleport(DVec3::Z, 30.0, water(36.0, 30.0));
+        assert_eq!(player.height, 36.0 + FLIGHT_WATER_CLEARANCE);
         assert!(!player.grounded);
 
-        player.teleport(DVec3::Y, 14.0, false);
+        player.teleport(DVec3::Y, 14.0, None);
         assert_eq!(player.up, DVec3::Y);
         assert_eq!(player.height, 14.0);
         assert!(player.grounded);

@@ -11,7 +11,10 @@ use std::{
 use bevy::{math::DVec3, prelude::*};
 use flate2::{bufread::GzDecoder, write::GzEncoder, Compression};
 use world_core::{
-    planet::{HEIGHT_SOURCE_PATH, LAKE_MASK_PATH, RIVER_ATLAS_PATH},
+    planet::{
+        HEIGHT_SOURCE_PATH, LAKE_MASK_PATH, LAKE_SURFACE_PATH, OCEAN_ATLAS_PATH, RIVER_ATLAS_PATH,
+        RIVER_SURFACE_PATH,
+    },
     SurfaceHeights,
 };
 
@@ -26,7 +29,7 @@ pub(super) const AUTHORED_COLOR_RESPONSE: f32 = 2.65;
 pub(super) const ZENITH_LAYER_COUNT: f32 = 2.0;
 const BAKED_FILE: &str = "world/planet-canopy-v2.gz";
 // Increase the version when tree placement, world sampling, or bake inputs change.
-const MAGIC: &[u8; 8] = b"WLCNPY03";
+const MAGIC: &[u8; 8] = b"WLCNPY04";
 type Fingerprint = [u8; 32];
 
 pub(super) struct Mip {
@@ -116,7 +119,15 @@ fn fingerprint(assets: &Path) -> io::Result<Fingerprint> {
     hash.update(&ZENITH_LAYER_COUNT.to_le_bytes());
     for relative in (0..FACES)
         .map(|face| Path::new(HEIGHT_SOURCE_PATH).join(format!("face{face}.tif")))
-        .chain([PathBuf::from(RIVER_ATLAS_PATH)])
+        .chain(
+            [
+                RIVER_ATLAS_PATH,
+                RIVER_SURFACE_PATH,
+                LAKE_SURFACE_PATH,
+                OCEAN_ATLAS_PATH,
+            ]
+            .map(PathBuf::from),
+        )
         .chain((0..FACES).map(|face| Path::new(LAKE_MASK_PATH).join(format!("face{face}.png"))))
     {
         hash.update(relative.to_str().expect("canonical asset path").as_bytes());

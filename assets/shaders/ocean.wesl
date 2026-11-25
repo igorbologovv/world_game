@@ -1,5 +1,5 @@
 import super::water_common::{wave_slope, water_normal, water_light};
-import super::ocean_projection::{cube_chart, ocean_plane, atlas_gradient, OceanPlane};
+import super::ocean_projection::{cube_chart, ocean_plane, atlas_gradient, CubeChart, OceanPlane};
 import super::ocean_waves::{TAU, wave_position, wave_phase, wind_field, swell_field};
 import bevy_pbr::render::forward_io::{Vertex, decompress_vertex};
 import bevy_pbr::render::mesh_functions::get_world_from_local;
@@ -95,9 +95,20 @@ fn storm_strength(up: vec3<f32>) -> f32 {
     return strength * (1.0 - smoothstep(22000.0, 65000.0, distance));
 }
 
+fn detail_plane(up: vec3<f32>, chart: CubeChart, size: f32, distance: f32, altitude: f32) -> OceanPlane {
+    var plane = ocean_plane(up, chart, settings.geometry.w, settings.geometry.x,
+                            size, settings.projection.x, settings.projection.y);
+    // Keep the playable coast at the actual sea datum. Rejoin the orbital
+    // shell's coarser triangles only where the detail disc hands off.
+    let handoff = max(smoothstep(settings.geometry.y * 0.72, settings.geometry.y, distance),
+        smoothstep(settings.geometry.z * 0.62, settings.geometry.z, altitude));
+    plane.altitude *= handoff;
+    plane.normal = normalize(mix(up, plane.normal, handoff));
+    return plane;
+}
+
 fn read_shore(plane: OceanPlane, up: vec3<f32>, face: u32, size: f32) -> Shore {
     let uv = plane.uv;
-    let nearest = vec2<i32>(round(uv));
     let origin = vec2<i32>(i32(face % 3u), i32(face / 3u)) * i32(size);
     let last = origin + i32(size) - 1;
     let base = vec2<i32>(floor(uv));
@@ -119,26 +130,20 @@ fn read_shore(plane: OceanPlane, up: vec3<f32>, face: u32, size: f32) -> Shore {
     let grade = length(slope);
     var distance = max(depth, 0.0) / max(grade, 0.0035);
     var offshore = slope / max(grade, 0.0001);
-    var mask_distance = 1e7;
 
-    // A baked mask edge can meet water before the bottom rises to the
-    // surface. Detect that edge in the same four texels used for depth.
-    let row = select(vec2<f32>(c.r, d.r), vec2<f32>(a.r, b.r), nearest.y == lo.y);
-    let col = select(vec2<f32>(b.r, d.r), vec2<f32>(a.r, c.r), nearest.x == lo.x);
-    let offset = uv - vec2<f32>(nearest);
-    let edge = (0.5 - abs(offset)) / vec2<f32>(length(grad.u), length(grad.v));
-    if select(row.x, row.y, nearest.x == lo.x) < 0.9309 {
-        mask_distance = edge.x;
-        if edge.x < distance {
-            distance = edge.x;
-            offshore = -sign(offset.x) * normalize(grad.u);
-        }
-    }
-    if select(col.x, col.y, nearest.y == lo.y) < 0.9309 {
-        mask_distance = min(mask_distance, edge.y);
-        if edge.y < distance {
-            distance = edge.y;
-            offshore = -sign(offset.y) * normalize(grad.v);
+    // Interpolate connected-ocean coverage over the same quad as bathymetry.
+    // The waterline normally follows depth. Only stop at the mask where a
+    // low neighboring basin belongs to a different body of water.
+    let flags = step(vec4<f32>(0.93), vec4<f32>(a.r, b.r, c.r, d.r));
+    let connected = mix(mix(flags.x, flags.y, w.x), mix(flags.z, flags.w, w.x), w.y);
+    let mask_gradient = mix(flags.y - flags.x, flags.w - flags.z, w.y) * grad.u
+        + mix(flags.z - flags.x, flags.w - flags.y, w.x) * grad.v;
+    var mask_distance = select(-1.0, 1e7, connected >= 0.025);
+    if connected < 0.999 && length(mask_gradient) > 0.00001 {
+        mask_distance = (connected - 0.025) / length(mask_gradient);
+        if mask_distance < distance {
+            distance = max(mask_distance, 0.0);
+            offshore = normalize(mask_gradient);
         }
     }
     return Shore(depth, distance, offshore, grade, mask_distance);
@@ -223,17 +228,16 @@ fn vertex(input: Vertex) -> OceanVertex {
     let direction = (radial + offset / radius) * k;
     let size = vec2<f32>(textureDimensions(ocean_mask));
     let chart = cube_chart(direction, settings.projection.x);
-    let plane = ocean_plane(direction, chart, settings.geometry.w, radius,
-                            size.y * 0.5, settings.projection.x, settings.projection.y);
+    let distance = sqrt(r2);
+    let plane = detail_plane(direction, chart, size.y * 0.5, distance, altitude);
     let chord = -r2 * k / (p_radius + radius);
     let world = eye + offset * k + radial * (chord - altitude)
         + direction * plane.altitude;
     let sample = textureSampleLevel(ocean_mask, ocean_sampler, (plane.uv + 0.5) / size, 0.0);
     var depth = decode_depth(sample.ba) + plane.altitude;
-    let distance = sqrt(r2);
     let spacing = max(mesh.uv_b.x, mesh.uv_b.y);
     var rise = 0.0;
-    if sample.r > 0.49 && depth > -2.0 && distance < settings.geometry.y - 200.0 {
+    if sample.r > 0.04 && depth > -2.0 && distance < settings.geometry.y - 200.0 {
         let storm = storm_strength(direction);
         var shore = Shore(depth, 1e7, vec3<f32>(0.0), 0.0, 1e7);
         let near_contact = (1.0 - smoothstep(12.0, 18.0, spacing))
@@ -452,8 +456,7 @@ fn fragment(mesh: OceanVertex) -> @location(0) vec4<f32> {
         discard;
     }
     let chart = cube_chart(up, settings.projection.x);
-    plane = ocean_plane(up, chart, settings.geometry.w, settings.geometry.x,
-                        size.y * 0.5, settings.projection.x, settings.projection.y);
+    plane = detail_plane(up, chart, size.y * 0.5, length(lateral), camera_altitude);
 } @else {
     let plane_normal = normalize(cross(dx, dy));
     let sheet_normal = select(plane_normal, -plane_normal, dot(up, plane_normal) < 0.0);
@@ -466,11 +469,11 @@ fn fragment(mesh: OceanVertex) -> @location(0) vec4<f32> {
     let uv = plane.uv;
     let nearest = vec2<i32>(round(uv));
     let texel = textureLoad(ocean_mask, nearest, 0);
-    if texel.r < 0.5371 {
+    let filtered = textureSampleLevel(ocean_mask, ocean_sampler, (uv + 0.5) / size, 0.0);
+    if filtered.r < 0.025 {
         discard;
     }
-    let filtered = textureSampleLevel(ocean_mask, ocean_sampler, (uv + 0.5) / size, 0.0);
-    if texel.r <= 0.9309 {
+    if texel.r >= 0.5371 && texel.r <= 0.9309 {
         @if(VERTEX_UVS_B) { discard; }
         @else {
             let encoded = mix(filtered.g, texel.g, smoothstep(50.0, 120.0, footprint));
@@ -480,6 +483,9 @@ fn fragment(mesh: OceanVertex) -> @location(0) vec4<f32> {
     @if(!VERTEX_UVS_B) { if inside_detail { discard; } }
 
     let coarse_depth = decode_depth(filtered.ba) + plane.altitude;
+    if coarse_depth < -1.4 {
+        discard;
+    }
     var shore = Shore(coarse_depth, 1e7, vec3<f32>(0.0), 0.0, 1e7);
     if (footprint < 55.0 && coarse_depth < 44.0) || filtered.r < 0.995 {
         let face = vec2<u32>(nearest) / u32(size.y * 0.5);
@@ -489,8 +495,9 @@ fn fragment(mesh: OceanVertex) -> @location(0) vec4<f32> {
     // Fade nearly coplanar seabed contact and antialias the inside of the
     // baked edge. Fully transparent fragments need no wave or reflection work.
     let contact_width = clamp(shore.grade * max(0.6, footprint * 0.7), 0.016, 0.16);
-    let contact = mix(smoothstep(-0.012, contact_width, shore.depth), 1.0,
-                      smoothstep(18.0, 52.0, footprint));
+    // The terrain depth test resolves the exposed edge of sub-texel sand
+    // bars. A small optical tolerance keeps their troughs connected to surf.
+    let contact = smoothstep(-0.34, contact_width, shore.depth);
     let coverage = saturate(shore.mask_distance / max(0.10, footprint * 0.65));
     let visibility = contact * coverage;
     if visibility == 0.0 {

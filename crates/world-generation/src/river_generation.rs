@@ -18,7 +18,7 @@ use super::{
 
 const MASK_SIDE: u32 = (SIZE * 2) as u32;
 const LAKE_SURFACE_OFFSET: f64 = 0.08;
-const REFERENCE_CATCHMENT: f64 = 15.0;
+const REFERENCE_CATCHMENT: f64 = 90_000.0;
 
 pub(super) fn generate(
     heights: &mut [f64],
@@ -715,9 +715,12 @@ mod tests {
     #[test]
     fn width_grows_with_runoff_and_caps_at_the_major_river_width() {
         let settings = HydrologySettings::default();
-        assert!(channel_width(&settings, 600.0) > channel_width(&settings, 65.0));
+        assert!(
+            channel_width(&settings, REFERENCE_CATCHMENT * 3.0)
+                > channel_width(&settings, REFERENCE_CATCHMENT)
+        );
         assert_eq!(
-            channel_width(&settings, 100_000.0),
+            channel_width(&settings, REFERENCE_CATCHMENT * 100.0),
             settings.river_max_width_m
         );
     }

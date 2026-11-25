@@ -69,7 +69,11 @@ fn habitat_scores(
     let pine = clamp(max(boreal * 0.95, temperate * 0.29) - tropical * 0.50, 0.0, 1.0);
     let broadleaf = forest * (1.0 - 0.78 * pine);
     let coast = smoothstep(0.04, 0.85, water) * (1.0 - smoothstep(0.37, 0.66, grade));
-    let fresh = smoothstep(0.035, 0.74, -water);
+    let fresh = smoothstep(0.025, 0.76, -water + pocket * 0.16);
+    let submerged = smoothstep(1.02, 1.62, -water);
+    let bank = fresh * (1.0 - smoothstep(0.25, 0.69, grade));
+    let washed = max(submerged * 0.77,
+        bank * smoothstep(0.36, 0.78, 0.52 + 0.60 * patch_field - 0.42 * pocket));
     let damp = saturate(moisture + 0.35 * fresh + 0.25 * patch_field + 0.12 * pocket);
     let lowland = (1.0 - smoothstep(120.0, 850.0, elevation))
         * (1.0 - smoothstep(0.08, 0.31, grade));
@@ -79,7 +83,7 @@ fn habitat_scores(
     let alpine = smoothstep(1400.0, 3000.0, elevation + (0.47 - temperature) * 1250.0 + patch_field * 290.0);
     let mineral = smoothstep(0.16, 0.74, grade + patch_field * 0.20 + alpine * 0.22);
     let low_cover = (1.0 - 0.81 * forest) * (1.0 - 0.80 * wetland) * (1.0 - 0.84 * coast);
-    let organic = (1.0 - 0.82 * mineral) * (1.0 - 0.91 * coast);
+    let organic = (1.0 - 0.82 * mineral) * (1.0 - 0.91 * coast) * (1.0 - 0.61 * submerged);
     let wet_leaf = smoothstep(0.36, 0.78, damp);
     let dry_cover = (1.0 - arid * 0.82) * (1.0 - alpine * 0.81);
 
@@ -99,13 +103,13 @@ fn habitat_scores(
         organic * low_cover * dry_cover * (0.77 + 0.29 * damp + 0.52 * patch_field - 0.41 * pocket),
         organic * forest * (0.40 + 0.23 * mineral + 0.72 * pocket - 1.17 * litter),
         // Saturated organic soil, mud, and exposed drying flats.
-        organic * wetland * (0.88 + 0.90 * patch_field + 0.42 * litter),
-        organic * wetland * (0.63 + 0.42 * fresh - 0.59 * patch_field - 0.92 * litter),
+        organic * wetland * (0.88 + 0.90 * patch_field + 0.42 * litter) * (1.0 - 0.56 * washed),
+        organic * wetland * (0.63 + 0.54 * fresh - 0.59 * patch_field - 0.92 * litter),
         organic * (arid * lowland + fresh * (1.0 - wet_leaf)) * (0.51 + 0.74 * pocket + 0.40 * litter),
         // Talus and sorted gravel, sand and clay-rich exposed soil.
-        (0.13 + 0.57 * mineral + 0.20 * coast) * (1.0 - 0.62 * forest)
+        (0.13 + 0.57 * mineral + 0.20 * coast + 1.05 * washed) * (1.0 - 0.62 * forest)
             * (1.0 + 0.82 * patch_field + 0.33 * litter),
-        (arid * 0.88 + coast * 0.72) * (1.0 - 0.80 * mineral)
+        (arid * 0.88 + coast * 0.72 + 0.55 * washed) * (1.0 - 0.80 * mineral)
             * (0.77 + 0.79 * pocket - 0.40 * patch_field),
         (arid * 0.66 + mineral * 0.24 + (1.0 - forest) * (1.0 - damp) * 0.31)
             * (1.0 - coast * 0.85) * (1.0 - 0.73 * pocket - 0.54 * litter),
@@ -236,7 +240,12 @@ fn biome_ground(
         total += weight;
     }
     let normalization = 1.0 / max(total, 0.00000001);
-    let surface = SurfaceSample(color * normalization, normal_offset * normalization, roughness * normalization);
+    let soaked = smoothstep(0.36, 0.94, abs(water) + 0.10 * pocket + 0.08 * patch_field);
+    let wet = soaked * (1.0 - smoothstep(0.46, 0.78, grade));
+    let surface = SurfaceSample(color * normalization * mix(vec3<f32>(1.0),
+        vec3<f32>(0.69, 0.74, 0.72), wet * 0.68),
+        normal_offset * normalization * (1.0 - 0.22 * wet),
+        mix(roughness * normalization, 0.44, wet * 0.66));
     let occlusion = mix(0.86, 1.0, smoothstep(0.05, 0.63, relief * normalization));
     return BiomeGround(surface, coverage, occlusion);
 }

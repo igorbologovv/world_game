@@ -205,7 +205,9 @@ fn weighted(weights: &[f32], rng: &mut Random) -> Option<usize> {
 
 fn land(heights: &SurfaceHeights, up: DVec3) -> Option<(f64, f32, Vec3)> {
     let elevation = heights.sample(up)?;
-    if !(WATER_SURFACE_ELEVATION + 0.28..=3300.0).contains(&elevation) || heights.is_river(up) {
+    if !(WATER_SURFACE_ELEVATION + 0.28..=3300.0).contains(&elevation)
+        || heights.open_water_at(up, elevation).is_some()
+    {
         return None;
     }
     let (east, north) = tangent_basis(up);
@@ -251,9 +253,7 @@ fn habitat(heights: &SurfaceHeights, up: DVec3, elevation: f64, grade: f32, coas
     let rain = noise3(direction * 17.0 + Vec3::new(-2.1, 9.4, 4.6));
     let p = up * (RADIUS + elevation);
     let pockets = forest_field(p / 16.0, 0x8fa2_763a) as f32;
-    // The shared coverage atlas includes river channels and elevated lakes.
-    let coverage = heights.river_coverage(up) as f32;
-    let fresh_water = smoothstep(5.0, 135.0, coverage) * (1.0 - 0.77 * coast);
+    let fresh_water = heights.freshwater_influence(up, elevation) as f32 * (1.0 - 0.77 * coast);
     let regional_moisture = 0.50 + 0.96 * weather + 0.32 * rain;
     let moisture =
         (regional_moisture + 0.24 * pockets + 0.33 * fresh_water + 0.16 * coast).clamp(0.0, 1.0);
