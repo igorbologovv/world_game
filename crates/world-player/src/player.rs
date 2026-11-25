@@ -439,6 +439,7 @@ pub(super) fn spawn_model(
 }
 
 pub(super) fn walk(
+    settlement: Res<world_core::runtime::SettlementMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<MouseWheel>,
@@ -475,6 +476,9 @@ pub(super) fn walk(
         ),
     >,
 ) {
+    if settlement.active {
+        return;
+    }
     let Ok((camera_entity, mut camera, mut debug, view, camera_global, mut projection, mut mode)) =
         cameras.single_mut()
     else {

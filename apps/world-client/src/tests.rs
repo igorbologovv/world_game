@@ -82,6 +82,52 @@ fn client_plugins_share_the_planet_and_starting_camera() {
     assert_eq!(RADIUS, 3_389_500.0);
     assert!(ground > WATER_SURFACE_ELEVATION);
     assert_explorer_at(world, root, spawn, ground);
+    let local_grid = world_core::construction::ConstructionGrid {
+        origin: spawn,
+        origin_cell: 500_000,
+    };
+    let planet_position = local_grid.position_at(500_002.5, 500_002.5, ground);
+    let frame = world.get::<ReferenceFrame>(root).unwrap();
+    let (cell, translation) = frame.translation_to_grid(planet_position);
+    let restored = frame.grid_position_double(&cell, &Transform::from_translation(translation));
+    assert!(restored.distance(planet_position) < 0.001);
+    app.world_mut().write_message(KeyboardInput {
+        key_code: KeyCode::KeyB,
+        logical_key: Key::Character("b".into()),
+        state: ButtonState::Pressed,
+        window,
+        text: None,
+        repeat: false,
+    });
+    app.update();
+    let world = app.world_mut();
+    assert_eq!(
+        *world.query::<&WorldCamera>().single(world).unwrap(),
+        WorldCamera::Settlement
+    );
+    app.world_mut().write_message(KeyboardInput {
+        key_code: KeyCode::KeyB,
+        logical_key: Key::Character("b".into()),
+        state: ButtonState::Released,
+        window,
+        text: None,
+        repeat: false,
+    });
+    app.update();
+    app.world_mut().write_message(KeyboardInput {
+        key_code: KeyCode::KeyB,
+        logical_key: Key::Character("b".into()),
+        state: ButtonState::Pressed,
+        window,
+        text: None,
+        repeat: false,
+    });
+    app.update();
+    let world = app.world_mut();
+    assert_eq!(
+        *world.query::<&WorldCamera>().single(world).unwrap(),
+        WorldCamera::FirstPerson
+    );
     let sun = world
         .query::<(&Transform, &bevy::light::SunDisk)>()
         .iter(world)

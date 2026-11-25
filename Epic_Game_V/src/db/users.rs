@@ -36,8 +36,8 @@ pub async fn charge_placement_mt(
 
     if result.rows_affected() == 0 {
         return Err(ApiError::conflict(
-            "insufficient_mt",
-            "not enough MT to place building",
+            "insufficient_ke_tse",
+            "not enough KE-TSE to place building",
         ));
     }
 

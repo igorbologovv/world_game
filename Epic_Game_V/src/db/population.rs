@@ -23,6 +23,7 @@ pub async fn load_population(db: &PgPool, uid: &str) -> Result<Population, ApiEr
     })
 }
 
+#[allow(deprecated)] // Populate legacy protobuf fields during the KE-TSE transition.
 pub async fn increase_player_population(
     db: &PgPool,
     uid: &str,
@@ -52,8 +53,10 @@ pub async fn increase_player_population(
         }),
         added_population: non_negative_i64_to_u32(i64::from(row.get::<i32, _>("added_population"))),
         mt_cost: row.get("mt_cost"),
+        ke_tse_cost: row.get("mt_cost"),
         food_cost: row.get("food_cost"),
         remaining_mt_balance: row.get("remaining_mt_balance"),
+        remaining_ke_tse_balance: row.get("remaining_mt_balance"),
         food_balance: Some(Balance {
             asset_code: "food".to_string(),
             tier: 0,

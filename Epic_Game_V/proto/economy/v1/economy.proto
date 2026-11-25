@@ -12,6 +12,7 @@ message SnapshotResponse {
   repeated Balance balances = 3;
   repeated Building buildings = 4;
   BuildBudget build_budget = 5;
+  string ke_tse_balance = 6;
 }
 
 message SettleRequest {}
@@ -27,11 +28,35 @@ message PlaceBuildingRequest {
   int32 tile_x = 3;
   int32 tile_y = 4;
   int32 tile_z = 5;
+  // Required for planetary construction; a stale quote is rejected.
+  string expected_total_cost = 6;
+}
+
+message QuoteBuildingRequest {
+  string map_code = 1;
+  string building_type_code = 2;
+  int32 tile_x = 3;
+  int32 tile_y = 4;
+  int32 tile_z = 5;
+}
+
+message QuoteBuildingResponse {
+  string base_cost = 1;
+  string earthwork_cost = 2;
+  string vegetation_cost = 3;
+  string total_cost = 4;
+  double earthwork_m3 = 5;
+  double clearance_m2 = 6;
+  double pad_elevation = 7;
+  double planet_x = 8;
+  double planet_y = 9;
+  double planet_z = 10;
 }
 
 message PlaceBuildingResponse {
   Building building = 1;
   BuildBudget build_budget = 2;
+  string ke_tse_balance = 3;
 }
 
 message SetWorkersRequest {
@@ -59,10 +84,12 @@ message IncreasePopulationRequest {
 message IncreasePopulationResponse {
   Population population = 1;
   uint32 added_population = 2;
-  string mt_cost = 3;
+  string mt_cost = 3 [deprecated = true];
   string food_cost = 4;
-  string remaining_mt_balance = 5;
+  string remaining_mt_balance = 5 [deprecated = true];
   Balance food_balance = 6;
+  string ke_tse_cost = 7;
+  string remaining_ke_tse_balance = 8;
 }
 
 message SettlementSummary {
@@ -94,6 +121,12 @@ message Building {
   int32 level = 10;
   int32 assigned_workers = 11;
   uint32 flags = 12;
+  double planet_x = 13;
+  double planet_y = 14;
+  double planet_z = 15;
+  double pad_elevation = 16;
+  double earthwork_m3 = 17;
+  double clearance_m2 = 18;
 }
 
 message BuildBudget {

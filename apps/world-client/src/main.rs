@@ -1,4 +1,5 @@
 mod palm_guide;
+mod settlement;
 
 use std::path::Path;
 
@@ -110,6 +111,7 @@ fn install_world(app: &mut App, assets: WorldAssets, region: Region) {
     if region.id == PALM_COAST_REGION.id {
         player = player.with_first_person_view();
         palm_guide::install(app);
+        app.add_plugins(settlement::SettlementPlugin);
     }
     app.add_plugins((
         WorldSpacePlugin::new(assets),

@@ -3,6 +3,7 @@ pub mod build_budget;
 pub mod building_types;
 pub mod buildings;
 pub mod maps;
+pub mod migrate;
 pub mod player;
 pub mod population;
 pub mod rows;

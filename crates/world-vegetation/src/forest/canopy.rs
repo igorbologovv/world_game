@@ -42,6 +42,7 @@ const MAX_JOBS: usize = 3;
 
 #[derive(Resource, Default)]
 struct AtlasStream {
+    construction_revision: u64,
     renderer: bool,
     jobs: [Option<Task<Layer>>; LAYERS],
     centers: [Option<DVec3>; CANOPY_CASCADES],
@@ -166,6 +167,11 @@ fn stream(
     let Some(up) = eye.try_normalize() else {
         return;
     };
+    if stream.construction_revision != heights.construction_revision() {
+        stream.construction_revision = heights.construction_revision();
+        stream.jobs = std::array::from_fn(|_| None);
+        stream.centers = [None; CANOPY_CASCADES];
+    }
     let fade = settings.proxy_range();
     if canopy.layout.fade.truncate().truncate() != fade {
         canopy.layout.fade.x = fade.x;

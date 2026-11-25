@@ -1,9 +1,16 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, RwLock,
+    },
+};
 
 use bevy_ecs::prelude::Resource;
 use bevy_math::{DVec2, DVec3, IVec3};
 
 use crate::{
+    construction::ConstructionEdit,
     coordinates::{height_source_uv, source_face_uv, surface_uv},
     inland_water::{smoothstep, InlandWater, LakeTile, RiverReach, WaterKind, WaterSample},
     planet::{
@@ -26,6 +33,9 @@ pub struct SurfaceHeights {
     lakes: [Option<Arc<image::GrayImage>>; 6],
     inland: Arc<InlandWater>,
     ocean: Option<Arc<image::GrayImage>>,
+    construction: Arc<RwLock<Vec<ConstructionEdit>>>,
+    construction_revision: Arc<AtomicU64>,
+    has_construction: Arc<AtomicBool>,
 }
 
 /// A shallow pool enclosed by a procedural wetland basin.
@@ -84,6 +94,9 @@ impl SurfaceHeights {
                 image::GrayImage::from_raw(width, height, coverage)
             });
         Self {
+            construction: Arc::default(),
+            construction_revision: Arc::default(),
+            has_construction: Arc::default(),
             inland: Arc::new(InlandWater::load(assets)),
             ocean: image::open(assets.join(OCEAN_ATLAS_PATH))
                 .ok()
@@ -109,7 +122,7 @@ impl SurfaceHeights {
         let (face, uv) = face_uv(direction)?;
         let faces = self.faces.as_ref()?;
         if faces[0].width() != HEIGHT_MAP_SIZE {
-            return Some(sample_height(&faces[face], uv));
+            return Some(self.apply_construction(direction, sample_height(&faces[face], uv)));
         }
         let up = direction.normalize();
         let input = self.terrain_input(direction, face, uv, faces);
@@ -130,7 +143,60 @@ impl SurfaceHeights {
             );
         }
         height = self.inland.grade_ground(up, height, lake);
-        Some(height)
+        Some(self.apply_construction(up, height))
+    }
+
+    fn apply_construction(&self, up: DVec3, height: f64) -> f64 {
+        if !self.has_construction.load(Ordering::Relaxed) {
+            return height;
+        }
+        let edits = self
+            .construction
+            .read()
+            .expect("construction edits lock poisoned");
+        edits
+            .iter()
+            .fold(height, |ground, edit| edit.height(up, ground))
+    }
+
+    /// Replace server-authoritative terrain pads after loading a settlement snapshot.
+    pub fn set_construction_edits(&self, edits: Vec<ConstructionEdit>) {
+        let mut current = self
+            .construction
+            .write()
+            .expect("construction edits lock poisoned");
+        if *current == edits {
+            return;
+        }
+        self.has_construction
+            .store(!edits.is_empty(), Ordering::Relaxed);
+        *current = edits;
+        self.construction_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Current terrain edit version for renderers and vegetation streamers.
+    pub fn construction_revision(&self) -> u64 {
+        self.construction_revision.load(Ordering::Relaxed)
+    }
+
+    /// Copy the small set of approved construction pads for mesh invalidation.
+    pub fn construction_edits(&self) -> Vec<ConstructionEdit> {
+        self.construction
+            .read()
+            .expect("construction edits lock poisoned")
+            .clone()
+    }
+
+    /// Whether a server-approved construction footprint removes vegetation here.
+    pub fn construction_clears(&self, direction: DVec3) -> bool {
+        if !self.has_construction.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.construction
+            .read()
+            .expect("construction edits lock poisoned")
+            .iter()
+            .any(|edit| edit.clears(direction))
     }
 
     /// Directed rivers decoded from the same assets used for terrain and gameplay.
@@ -505,6 +571,9 @@ mod tests {
             }
         }
         let heights = SurfaceHeights {
+            construction: Arc::default(),
+            construction_revision: Arc::default(),
+            has_construction: Arc::default(),
             faces: Some(Arc::new(std::array::from_fn(|face| {
                 HeightFace::from_pixel(2, 2, image::Luma([20_000 + face as u16]))
             }))),
@@ -519,6 +588,20 @@ mod tests {
         assert_eq!(heights.sample(DVec3::ZERO), None);
         assert!(heights.is_river(DVec3::X));
         assert!(!heights.is_river(DVec3::NEG_X));
+        let original = heights.sample(DVec3::X).unwrap();
+        let edit = ConstructionEdit {
+            center: DVec3::X * RADIUS,
+            half_width: 2.5,
+            half_height: 2.5,
+            blend: 3.0,
+            elevation: original + 4.0,
+        };
+        heights.set_construction_edits(vec![edit]);
+        assert_eq!(heights.sample(DVec3::X), Some(original + 4.0));
+        assert!(heights.construction_clears(DVec3::X));
+        assert_eq!(heights.construction_revision(), 1);
+        heights.set_construction_edits(vec![edit]);
+        assert_eq!(heights.construction_revision(), 1);
     }
 
     #[test]

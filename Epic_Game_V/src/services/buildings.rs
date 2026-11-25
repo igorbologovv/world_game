@@ -3,12 +3,55 @@ use crate::{
     db::rows::{BuildingTypeRow, MapRow, building_cells, row_to_building},
     error::{ApiError, map_place_building_error, map_uuid_error},
     pb::{
-        PlaceBuildingRequest, PlaceBuildingResponse, SetWorkersRequest, SetWorkersResponse,
-        UpgradeBuildingRequest, UpgradeBuildingResponse,
+        PlaceBuildingRequest, PlaceBuildingResponse, QuoteBuildingRequest, QuoteBuildingResponse,
+        SetWorkersRequest, SetWorkersResponse, UpgradeBuildingRequest, UpgradeBuildingResponse,
     },
     services,
 };
 use sqlx::{PgPool, Row};
+
+pub async fn quote_building(
+    db: &PgPool,
+    uid: &str,
+    request: QuoteBuildingRequest,
+) -> Result<QuoteBuildingResponse, ApiError> {
+    services::player::ensure_player_rows(db, uid).await?;
+    let mut tx = db.begin().await.map_err(ApiError::from_sqlx)?;
+    let map = db::maps::load_map(&mut tx, &request.map_code).await?;
+    let building =
+        db::building_types::load_building_type(&mut tx, &request.building_type_code).await?;
+    let placement = PlaceBuildingRequest {
+        map_code: request.map_code,
+        building_type_code: request.building_type_code,
+        tile_x: request.tile_x,
+        tile_y: request.tile_y,
+        tile_z: request.tile_z,
+        expected_total_cost: String::new(),
+    };
+    validate_building_bounds(&placement, &map, &building)?;
+    if placement.tile_x < 0 || placement.tile_y < 0 || placement.tile_z < 0 {
+        return Err(ApiError::bad_request(
+            "out_of_bounds",
+            "building coordinates must be non-negative",
+        ));
+    }
+    let occupied: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM economy_buildings WHERE map_id = $1 AND status <> 'demolished' \
+         AND int4range(tile_x - 3, tile_x + footprint_width + 3, '[)') && int4range($2 - 3, $2 + $5 + 3, '[)') \
+         AND int4range(tile_y - 3, tile_y + footprint_height + 3, '[)') && int4range($3 - 3, $3 + $6 + 3, '[)') \
+         AND int4range(tile_z, tile_z + footprint_depth, '[)') && int4range($4, $4 + $7, '[)'))",
+    )
+    .bind(map.id).bind(placement.tile_x).bind(placement.tile_y).bind(placement.tile_z)
+    .bind(building.footprint_width).bind(building.footprint_height).bind(building.footprint_depth)
+    .fetch_one(&mut *tx).await.map_err(ApiError::from_sqlx)?;
+    if occupied {
+        return Err(ApiError::conflict(
+            "building_overlap",
+            "building footprint overlaps another building",
+        ));
+    }
+    services::construction::estimate(&map, placement.tile_x, placement.tile_y, &building)
+}
 
 pub async fn place_building(
     db: &PgPool,
@@ -39,7 +82,21 @@ pub async fn place_building(
         db::building_types::load_building_type(&mut tx, &request.building_type_code).await?;
 
     validate_building_bounds(&request, &map, &building_type)?;
-    db::users::charge_placement_mt(&mut tx, uid, &building_type.placement_cost_mt).await?;
+    if request.expected_total_cost.is_empty() {
+        return Err(ApiError::bad_request(
+            "quote_required",
+            "request a construction quote before placement",
+        ));
+    }
+    let quote =
+        services::construction::estimate(&map, request.tile_x, request.tile_y, &building_type)?;
+    if quote.total_cost != request.expected_total_cost {
+        return Err(ApiError::conflict(
+            "stale_quote",
+            "construction price changed; request a new quote",
+        ));
+    }
+    db::users::charge_placement_mt(&mut tx, uid, &quote.total_cost).await?;
 
     let budget = db::build_budget::lock_build_budget(&mut tx, uid).await?;
     let required_cells = building_cells(
@@ -55,9 +112,10 @@ pub async fn place_building(
         ));
     }
 
-    let building_row = db::buildings::insert_building(&mut tx, uid, &map, &building_type, &request)
-        .await
-        .map_err(map_place_building_error)?;
+    let building_row =
+        db::buildings::insert_building(&mut tx, uid, &map, &building_type, &request, Some(&quote))
+            .await
+            .map_err(map_place_building_error)?;
 
     tx.commit().await.map_err(ApiError::from_sqlx)?;
 
@@ -68,6 +126,11 @@ pub async fn place_building(
                 .await?
                 .into_proto(),
         ),
+        ke_tse_balance: sqlx::query_scalar("SELECT balance::text FROM users WHERE uid = $1")
+            .bind(uid)
+            .fetch_one(db)
+            .await
+            .map_err(ApiError::from_sqlx)?,
     })
 }
 

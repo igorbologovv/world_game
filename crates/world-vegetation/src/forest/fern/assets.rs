@@ -1,12 +1,12 @@
 //! Load and validate the supplied fern GLBs once.
 use bevy::{
+    asset::RenderAssetUsages,
     asset::{LoadState, RecursiveDependencyLoadState},
-    gltf::{Gltf, GltfMesh, GltfNode, GltfMaterial},
+    camera::primitives::{Aabb, MeshAabb},
+    gltf::{Gltf, GltfMaterial, GltfMesh, GltfNode},
+    mesh::{PrimitiveTopology, VertexAttributeValues},
     pbr::gltf::standard_material_from_gltf_material,
     prelude::*,
-    asset::RenderAssetUsages,
-    camera::primitives::{Aabb, MeshAabb},
-    mesh::{VertexAttributeValues, PrimitiveTopology},
 };
 
 use crate::forest::{textures, MeshBuilder};
@@ -123,9 +123,7 @@ pub(super) fn finish(
         for (geometry, _) in sources {
             let mut mesh = geometry.finish();
             mesh.asset_usage = RenderAssetUsages::RENDER_WORLD;
-            let bounds = mesh
-                .get_aabb()
-                .ok_or("Woodland Fern mesh has no bounds")?;
+            let bounds = mesh.get_aabb().ok_or("Woodland Fern mesh has no bounds")?;
             detail.push((meshes.add(mesh), bounds));
         }
         Ok(Models {
@@ -269,8 +267,11 @@ fn append(builder: &mut MeshBuilder, source: &Mesh, cards: bool) -> Result<(), &
 mod tests {
     use super::*;
     use bevy::{
-        asset::AssetPlugin, gltf::GltfPlugin, image::{CompressedImageFormats, ImageLoader, ImagePlugin}, scene::ScenePlugin,
-    world_serialization::WorldSerializationPlugin,
+        asset::AssetPlugin,
+        gltf::GltfPlugin,
+        image::{CompressedImageFormats, ImageLoader, ImagePlugin},
+        scene::ScenePlugin,
+        world_serialization::WorldSerializationPlugin,
     };
     use std::time::{Duration, Instant};
 
@@ -284,7 +285,7 @@ mod tests {
                 ..default()
             },
             WorldSerializationPlugin,
-        ScenePlugin,
+            ScenePlugin,
             ImagePlugin::default(),
             GltfPlugin::default(),
         ))

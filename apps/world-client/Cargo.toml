@@ -12,6 +12,11 @@ world-regions.workspace = true
 world-terrain.workspace = true
 world-vegetation.workspace = true
 world-water.workspace = true
+prost = "0.13"
+reqwest = { version = "0.11", features = ["blocking"] }
+
+[build-dependencies]
+prost-build = "0.13"
 
 # Retain dynamic Bevy linkage on Linux for faster client rebuilds.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -89,6 +89,7 @@ impl Patch {
 
 #[derive(Resource, Default)]
 struct GroundCover {
+    construction_revision: u64,
     patches: HashMap<Patch, PatchState>,
     order: Vec<Patch>,
     next_tick: f64,
@@ -191,12 +192,26 @@ fn stream(
         return;
     };
     let eye = frame.grid_position_double(&camera.cell, &camera.transform);
+    if cover.construction_revision != heights.construction_revision() {
+        cover.construction_revision = heights.construction_revision();
+        for state in cover.patches.drain().map(|(_, state)| state) {
+            if let PatchState::Resident(patch) = state {
+                commands.entity(patch.compact).despawn();
+                if let Some(detail) = patch.detail {
+                    commands.entity(detail).despawn();
+                }
+            }
+        }
+        cover.order.clear();
+        cover.next_tick = 0.0;
+    }
     let now = time.elapsed_secs_f64();
     let discover = now >= cover.next_tick;
     let GroundCover {
         patches,
         order,
         next_tick,
+        ..
     } = &mut *cover;
     if discover {
         *next_tick = now + 0.12;

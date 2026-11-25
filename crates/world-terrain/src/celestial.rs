@@ -100,9 +100,9 @@ impl MoonOrbit {
     fn inertial_position(&self, seconds: f64) -> DVec3 {
         // Positive right-handed rotation about the ecliptic normal is
         // prograde, matching the spin of the planet about +Y.
-        let position = DQuat::from_axis_angle(
-            ecliptic_normal(), angle(seconds, self.period) + self.phase,
-        ) * ecliptic_reference();
+        let position =
+            DQuat::from_axis_angle(ecliptic_normal(), angle(seconds, self.period) + self.phase)
+                * ecliptic_reference();
         self.orbit_tilt() * position * self.radius
     }
 }
@@ -137,8 +137,8 @@ fn ecliptic_reference() -> DVec3 {
 fn star_direction(seconds: f64) -> DVec3 {
     let (sin, cos) = AXIAL_TILT.sin_cos();
     let initial = solstice_heading() * cos + DVec3::Y * sin;
-    let star_to_planet =
-        DQuat::from_axis_angle(ecliptic_normal(), angle(seconds, YEAR)) * (-initial * STAR_DISTANCE);
+    let star_to_planet = DQuat::from_axis_angle(ecliptic_normal(), angle(seconds, YEAR))
+        * (-initial * STAR_DISTANCE);
     -star_to_planet.normalize()
 }
 

@@ -14,6 +14,11 @@ pub struct MapRow {
     pub width: i32,
     pub height: i32,
     pub depth: i32,
+    pub origin_x: Option<f64>,
+    pub origin_y: Option<f64>,
+    pub origin_z: Option<f64>,
+    pub origin_cell: i32,
+    pub clearing_radius_m: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -51,6 +56,12 @@ pub fn row_to_building(row: &PgRow) -> Building {
         level,
         assigned_workers,
         flags: building_flags(&status, assigned_workers, level, max_level),
+        planet_x: row.try_get("planet_x").unwrap_or(0.0),
+        planet_y: row.try_get("planet_y").unwrap_or(0.0),
+        planet_z: row.try_get("planet_z").unwrap_or(0.0),
+        pad_elevation: row.try_get("pad_elevation").unwrap_or(0.0),
+        earthwork_m3: row.try_get("earthwork_m3").unwrap_or(0.0),
+        clearance_m2: row.try_get("clearance_m2").unwrap_or(0.0),
     }
 }
 

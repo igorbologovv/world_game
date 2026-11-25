@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! Shared planetary data and optional Bevy client contracts.
 
+pub mod construction;
 pub mod coordinates;
 pub mod planet;
 

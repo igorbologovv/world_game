@@ -5,10 +5,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy::{ecs::system::{EntityCommands, SystemParam}, prelude::*};
+use bevy::{
+    ecs::system::{EntityCommands, SystemParam},
+    prelude::*,
+};
 use big_space::prelude::{BigSpaceCommands, BigSpaceDefaultPlugins, Grid};
 
-pub use big_space::prelude::{CellCoord as GridCell, CellTransform as GridTransform, Grid as ReferenceFrame};
+pub use big_space::prelude::{
+    CellCoord as GridCell, CellTransform as GridTransform, Grid as ReferenceFrame,
+};
 /// Single-planet compatibility adapter for the new BigSpace Grid API.
 /// All world objects belong to the same planet-root Grid.
 #[derive(SystemParam)]
@@ -76,6 +81,15 @@ pub enum WorldCamera {
     FirstPerson,
     /// Free camera.
     Free,
+    /// Overhead settlement construction and management.
+    Settlement,
+}
+
+/// Pauses explorer camera input while the settlement camera owns the view.
+#[derive(Resource, Default)]
+pub struct SettlementMode {
+    /// Whether settlement controls are active.
+    pub active: bool,
 }
 
 /// Marker for the primary explorer entity.
@@ -95,7 +109,11 @@ impl PlanetRoot {
     /// Spawn a floating-origin child at the planet origin with a custom bundle.
     pub fn spawn<'a>(&self, commands: &'a mut Commands, bundle: impl Bundle) -> EntityCommands<'a> {
         // Bevy 0.20 has no SpatialBundle; transform/visibility use required components.
-        let mut child = commands.spawn((Transform::default(), Visibility::default(), GridCell::default()));
+        let mut child = commands.spawn((
+            Transform::default(),
+            Visibility::default(),
+            GridCell::default(),
+        ));
         // The bundle's Transform is already local to the planet Grid. Parenting
         // must not recompute it from a newly spawned entity's GlobalTransform:
         // set_parent_in_place() would overwrite the intended cell-local position.

@@ -27,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
         .connect(&env::var("DATABASE_URL")?)
         .await?;
 
+    db::migrate::migrate(&db).await?;
+
     let app = app::router(AppState::new(db));
 
     let addr: SocketAddr = env::var("ECONOMY_SERVICE_ADDR")

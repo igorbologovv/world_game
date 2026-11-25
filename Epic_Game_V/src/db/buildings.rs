@@ -1,7 +1,7 @@
 use crate::{
     db::rows::{BuildingTypeRow, MapRow, row_to_building},
     error::ApiError,
-    pb::{Building, PlaceBuildingRequest},
+    pb::{Building, PlaceBuildingRequest, QuoteBuildingResponse},
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 
@@ -38,6 +38,8 @@ pub async fn load_buildings(db: &PgPool, uid: &str) -> Result<Vec<Building>, Api
             eb.assigned_workers,
             eb.status,
             btd.max_level
+            ,eb.planet_x, eb.planet_y, eb.planet_z, eb.pad_elevation,
+            eb.earthwork_m3, eb.clearance_m2
         FROM economy_buildings eb
         JOIN building_type_definitions btd ON btd.id = eb.building_type_id
         JOIN economy_maps em ON em.id = eb.map_id
@@ -59,6 +61,7 @@ pub async fn insert_building(
     map: &MapRow,
     building_type: &BuildingTypeRow,
     request: &PlaceBuildingRequest,
+    quote: Option<&QuoteBuildingResponse>,
 ) -> Result<PgRow, sqlx::Error> {
     sqlx::query(
         r#"
@@ -72,9 +75,12 @@ pub async fn insert_building(
                 tile_z,
                 footprint_width,
                 footprint_height,
-                footprint_depth
+                footprint_depth,
+                planet_x, planet_y, planet_z, pad_elevation,
+                earthwork_m3, clearance_m2, construction_cost
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15, $16::numeric)
             RETURNING *
         )
         SELECT
@@ -90,7 +96,9 @@ pub async fn insert_building(
             inserted.level,
             inserted.assigned_workers,
             inserted.status,
-            btd.max_level
+            btd.max_level,
+            inserted.planet_x, inserted.planet_y, inserted.planet_z,
+            inserted.pad_elevation, inserted.earthwork_m3, inserted.clearance_m2
         FROM inserted
         JOIN building_type_definitions btd ON btd.id = inserted.building_type_id
         JOIN economy_maps em ON em.id = inserted.map_id
@@ -105,6 +113,13 @@ pub async fn insert_building(
     .bind(building_type.footprint_width)
     .bind(building_type.footprint_height)
     .bind(building_type.footprint_depth)
+    .bind(quote.map(|q| q.planet_x))
+    .bind(quote.map(|q| q.planet_y))
+    .bind(quote.map(|q| q.planet_z))
+    .bind(quote.map(|q| q.pad_elevation))
+    .bind(quote.map(|q| q.earthwork_m3))
+    .bind(quote.map(|q| q.clearance_m2))
+    .bind(quote.map(|q| q.total_cost.as_str()))
     .fetch_one(&mut **tx)
     .await
 }

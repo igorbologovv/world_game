@@ -112,6 +112,7 @@ struct ProxyAtlas {
 
 #[derive(Resource, Default)]
 pub(super) struct ForestStream {
+    construction_revision: u64,
     nodes: HashMap<NodeKey, Node>,
     order: Vec<NodeKey>,
     mask: HashMap<PatchKey, (f32, f32)>,
@@ -567,6 +568,24 @@ pub(super) fn stream(
     let Some(up) = eye.try_normalize() else {
         return;
     };
+    if forest.construction_revision != heights.construction_revision() {
+        forest.construction_revision = heights.construction_revision();
+        let mut old_nodes = std::mem::take(&mut forest.nodes);
+        let mut retiring = std::mem::take(&mut forest.retiring);
+        let mut retiring_batches = std::mem::take(&mut forest.retiring_batches);
+        for node in old_nodes.values_mut() {
+            node.parent.retire(&mut commands, &mut retiring_batches);
+            for leaf in &mut node.leaves {
+                leaf.impostor.retire(&mut commands, &mut retiring_batches);
+                retiring.append(&mut leaf.trees);
+            }
+        }
+        forest.order.clear();
+        forest.mask.clear();
+        for entity in retiring.into_iter().chain(retiring_batches) {
+            commands.entity(entity).despawn();
+        }
+    }
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
     let band = View::new(view, projection).impostor_band(&settings);
     let range = settings.impostor_range.clamp(200.0, 600.0);

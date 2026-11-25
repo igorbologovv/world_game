@@ -114,7 +114,9 @@ impl PatchKey {
                     (latitude + rng.unit64() * ANGLE).clamp(-HALF_PI, HALF_PI),
                     (f64::from(self.1) + rng.unit64()) * step,
                 );
-                if clearing.is_some_and(|clearing| clearing.contains(up)) {
+                if clearing.is_some_and(|clearing| clearing.contains(up))
+                    || heights.construction_clears(up)
+                {
                     return None;
                 }
                 let (ground, species) = tree_site(heights, up, &mut rng)?;

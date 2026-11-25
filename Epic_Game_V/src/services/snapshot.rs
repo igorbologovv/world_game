@@ -8,7 +8,7 @@ use crate::{
     pb::SnapshotResponse,
     services,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 pub async fn snapshot(
     db: &PgPool,
@@ -50,6 +50,12 @@ pub async fn snapshot(
         } else {
             None
         },
+        ke_tse_balance: sqlx::query("SELECT balance::text AS balance FROM users WHERE uid = $1")
+            .bind(uid)
+            .fetch_one(db)
+            .await
+            .map_err(ApiError::from_sqlx)?
+            .get("balance"),
     })
 }
 
