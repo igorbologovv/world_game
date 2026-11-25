@@ -275,3 +275,5 @@ fn client_assets_match_the_checkout_unless_packaged_or_overridden() {
 mod forest_render;
 
 mod cloud_render;
+
+mod terrain_render;

@@ -1,3 +1,5 @@
+import super::terrain_coordinates::{macro_noise, filtered_noise, Projection, SurfaceSample, triplanar_projections, terrain_sampler};
+import super::terrain_materials::{biome_ground, biome_enabled, blend_surface};
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 import bevy_pbr::render::mesh_view_bindings::{lights, view};
 import bevy_pbr::render::pbr_types::{PbrInput, pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT};
@@ -5,8 +7,6 @@ import bevy_pbr::render::pbr_functions::{calculate_view, apply_pbr_lighting, mai
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0)
 var terrain_albedo: texture_2d_array<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(1)
-var terrain_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2)
 var terrain_normal_roughness: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(3)
@@ -52,42 +52,13 @@ const MATERIAL_PERIODS = array(96.0, 128.0, 112.0, 160.0, 96.0);
 // Gravelly sand, rocky terrain, lichen rock, Ice003.
 const DETAIL_PERIODS = array(3.6, 5.4, 3.8, 4.6);
 
-fn noise_hash(cell: vec3<f32>) -> f32 {
-    var h = fract(cell * vec3<f32>(0.1031, 0.1030, 0.0973));
-    h += dot(h, h.yxz + 33.33);
-    return fract((h.x + h.y) * h.z);
-}
-
-fn macro_noise(position: vec3<f32>) -> f32 {
-    let cell = floor(position);
-    let t = fract(position);
-    let w = t * t * (3.0 - 2.0 * t);
-    let near = mix(
-        mix(noise_hash(cell), noise_hash(cell + vec3<f32>(1.0, 0.0, 0.0)), w.x),
-        mix(noise_hash(cell + vec3<f32>(0.0, 1.0, 0.0)), noise_hash(cell + vec3<f32>(1.0, 1.0, 0.0)), w.x),
-        w.y,
-    );
-    let far_cell = cell + vec3<f32>(0.0, 0.0, 1.0);
-    let far = mix(
-        mix(noise_hash(far_cell), noise_hash(far_cell + vec3<f32>(1.0, 0.0, 0.0)), w.x),
-        mix(noise_hash(far_cell + vec3<f32>(0.0, 1.0, 0.0)), noise_hash(far_cell + vec3<f32>(1.0, 1.0, 0.0)), w.x),
-        w.y,
-    );
-    return mix(near, far, w.z) - 0.5;
-}
-
-fn filtered_noise(position: vec3<f32>, strength: f32) -> f32 {
-    if strength > 0.0 {
-        return macro_noise(position) * strength;
-    }
-    return 0.0;
-}
-
 // A biome is climate, not simply a height band. Direction is in the planet's
 // local frame, so climate stays fixed when the high-precision origin shifts.
 struct BiomeSurface {
     weights: array<f32, 5>,
     vegetation_tint: vec3<f32>,
+    moisture: f32,
+    temperature: f32,
 }
 
 fn biome_surface(
@@ -169,6 +140,8 @@ fn biome_surface(
             snow,
         ),
         foliage,
+        moisture,
+        temperature,
     );
 }
 
@@ -346,47 +319,6 @@ fn grove_shading(point: vec3<f32>, footprint: f32, sun: vec3<f32>) -> vec3<f32> 
     return max(vec3<f32>(0.37), vec3<f32>(shade + warmth, shade, shade - warmth * 0.68));
 }
 
-struct Projection {
-    uv: vec2<f32>,
-    dx: vec2<f32>,
-    dy: vec2<f32>,
-    tangent: vec3<f32>,
-    bitangent: vec3<f32>,
-    weight: f32,
-}
-
-struct SurfaceSample {
-    color: vec3<f32>,
-    normal_offset: vec3<f32>,
-    roughness: f32,
-}
-
-fn triplanar_projections(
-    position: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, normal: vec3<f32>,
-) -> array<Projection, 3> {
-    let sign = select(vec3<f32>(-1.0), vec3<f32>(1.0), normal >= vec3<f32>(0.0));
-    let squared = normal * normal;
-    let axis_weights = squared * squared;
-    let normalized = axis_weights / dot(axis_weights, vec3<f32>(1.0));
-    // Fade negligible projections to zero before sampling. Renormalizing
-    // keeps both the color and the normal blend continuous across slopes.
-    let contributing = normalized * smoothstep(vec3<f32>(0.005), vec3<f32>(0.02), normalized);
-    let weights = contributing / dot(contributing, vec3<f32>(1.0));
-
-    // Flip the V axis on negative faces so each normal map has a right-handed basis.
-    let x_uv = vec2<f32>(1.0, sign.x);
-    let y_uv = vec2<f32>(1.0, sign.y);
-    let z_uv = vec2<f32>(1.0, sign.z);
-    return array(
-        Projection(position.yz * x_uv, dx.yz * x_uv, dy.yz * x_uv,
-            vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, sign.x), weights.x),
-        Projection(position.zx * y_uv, dx.zx * y_uv, dy.zx * y_uv,
-            vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(sign.y, 0.0, 0.0), weights.y),
-        Projection(position.xy * z_uv, dx.xy * z_uv, dy.xy * z_uv,
-            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, sign.z, 0.0), weights.z),
-    );
-}
-
 fn sample_layer(
     albedo: texture_2d_array<f32>, normal_roughness: texture_2d_array<f32>,
     layer: i32, scale: f32, projections: array<Projection, 3>,
@@ -503,42 +435,114 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
     // F9 diagnostics are composited after terrain PBR lighting, and
     // never replace the actual grass/soil/rock directly under the camera.
     var weights = biome.weights;
-    if ground_cover > 0.0 && weights[1] > 0.0 {
-        // Soil shows between stands of grass. The plant streamer uses this
-        // same field to concentrate clumps in the greener areas.
-        let cover = macro_noise(position * 0.21 + vec3<f32>(4.1, 11.8, -7.3));
-        let soil = weights[1] * ground_cover * 0.64 * (1.0 - smoothstep(-0.19, 0.12, cover));
-        weights[1] -= soil;
-        weights[2] += soil;
-    }
-    var projections: array<Projection, 3>;
-    if albedo_detail > 0.0 {
-        projections = triplanar_projections(position, dx, dy, surface_normal);
-    }
-    var periods = MATERIAL_PERIODS;
-
-    var surface = SurfaceSample(vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
-    var dominant_layer = 0;
-    for (var layer = 0; layer < 5; layer++) {
-        let weight = weights[layer];
-        if weight > weights[dominant_layer] {
-            dominant_layer = layer;
-        }
-        if weight > 0.0 {
-            let sample = sample_layer(terrain_albedo, terrain_normal_roughness,
-                layer, 1.0 / periods[layer], projections, albedo_detail, normal_detail, 1.0);
-            var albedo = sample.color;
-            if layer == 1 || layer == 2 {
-                albedo *= biome.vegetation_tint;
-            }
-            surface.color += albedo * weight;
-            surface.normal_offset += sample.normal_offset * weight;
-            surface.roughness += sample.roughness * weight;
-        }
-    }
-
-    var occlusion = 1.0;
     let forest_distance = distance(input.world_position.xyz, view.world_position.xyz);
+    var surface = SurfaceSample(vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
+    var occlusion = 1.0;
+    var biome_blend = 0.0;
+    @if(VERTEX_UVS_B)
+    {
+        let local = vec3<f32>(input.uv, input.uv_b.x);
+        let local_dx = dpdx(local);
+        let local_dy = dpdy(local);
+        let surface_footprint = max(length(local_dx), length(local_dy));
+        let snow = weights[4];
+        let detail_range = (1.0 - smoothstep(310.0, 850.0, forest_distance))
+            * (1.0 - smoothstep(1.25, 4.6, surface_footprint))
+            * smoothstep(-9.0, 1.0, height) * (1.0 - smoothstep(0.93, 1.0, snow));
+        if biome_enabled != 0u && detail_range > 0.0 {
+            let origin = round((position - local) / 128.0);
+            let clearing = canopy_layout.clearing;
+            let clearing_edge = smoothstep(clearing.w * 0.78, clearing.w + 1.0,
+                distance(direction, clearing.xyz) * planet_radius);
+            let ground = biome_ground(local, origin, local_dx, local_dy, direction, surface_normal,
+                height, slope, input.uv_b.y, biome.moisture, biome.temperature, clearing_edge,
+                planet_radius, forest_distance);
+            surface = ground.surface;
+            occlusion = ground.occlusion;
+            if snow > 0.0 {
+                let axes = triplanar_projections(position, dx, dy, surface_normal);
+                let snow_surface = sample_layer(terrain_albedo, terrain_normal_roughness,
+                    4, 1.0 / MATERIAL_PERIODS[4], axes, albedo_detail, normal_detail, 1.0);
+                surface = blend_surface(surface, snow_surface, snow);
+                occlusion = mix(occlusion, 1.0, snow);
+            }
+            biome_blend = detail_range * ground.coverage;
+        }
+    }
+
+    if biome_blend < 1.0 {
+        if ground_cover > 0.0 && weights[1] > 0.0 {
+            // Soil shows between stands of grass. The plant streamer uses this
+            // same field to concentrate clumps in the greener areas.
+            let cover = macro_noise(position * 0.21 + vec3<f32>(4.1, 11.8, -7.3));
+            let soil = weights[1] * ground_cover * 0.64 * (1.0 - smoothstep(-0.19, 0.12, cover));
+            weights[1] -= soil;
+            weights[2] += soil;
+        }
+        var legacy_occlusion = 1.0;
+        var projections: array<Projection, 3>;
+        if albedo_detail > 0.0 {
+            projections = triplanar_projections(position, dx, dy, surface_normal);
+        }
+        var periods = MATERIAL_PERIODS;
+
+        var legacy = SurfaceSample(vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
+        var dominant_layer = 0;
+        for (var layer = 0; layer < 5; layer++) {
+            let weight = weights[layer];
+            if weight > weights[dominant_layer] {
+                dominant_layer = layer;
+            }
+            if weight > 0.0 {
+                let sample = sample_layer(terrain_albedo, terrain_normal_roughness,
+                    layer, 1.0 / periods[layer], projections, albedo_detail, normal_detail, 1.0);
+                var albedo = sample.color;
+                if layer == 1 || layer == 2 {
+                    albedo *= biome.vegetation_tint;
+                }
+                legacy.color += albedo * weight;
+                legacy.normal_offset += sample.normal_offset * weight;
+                legacy.roughness += sample.roughness * weight;
+            }
+        }
+
+        if ground_detail > 0.0 {
+            // A second, tighter sample gives dirt, stones and grass their own
+            // visible grain at walking distance. The broad texture supplies color.
+            var dominant = projections[0];
+            if projections[1].weight > dominant.weight {
+                dominant = projections[1];
+            }
+            if projections[2].weight > dominant.weight {
+                dominant = projections[2];
+            }
+            let scale = 0.38;
+            let uv = (dominant.uv * scale) + vec2<f32>(0.17, 0.36);
+            let close_dx = dominant.dx * scale;
+            let close_dy = dominant.dy * scale;
+            let grain = textureSampleGrad(terrain_albedo, terrain_sampler, uv, dominant_layer, close_dx, close_dy).rgb;
+            let finish = textureSampleGrad(terrain_normal_roughness, terrain_sampler, uv, dominant_layer, close_dx, close_dy);
+            let mip = i32(textureNumLevels(terrain_albedo)) - 1;
+            let average = textureLoad(terrain_albedo, vec2<i32>(0), dominant_layer, mip).rgb;
+            let grain_tint = clamp(grain / max(average, vec3<f32>(0.03)), vec3<f32>(0.48), vec3<f32>(1.65));
+            let strength = ground_detail * smoothstep(0.36, 0.69, dominant.weight);
+            legacy.color *= mix(vec3<f32>(1.0), grain_tint, strength * 0.43);
+            legacy.roughness = mix(legacy.roughness, finish.a, strength * 0.66);
+            let bump = finish.xyz * 2.0 - 1.0;
+            legacy.normal_offset += (dominant.tangent * bump.x + dominant.bitangent * bump.y)
+                * (strength * 0.26 / max(bump.z, 0.35));
+            legacy_occlusion = mix(1.0, 0.79, strength * (1.0 - smoothstep(0.5, 1.02, dot(grain_tint, vec3<f32>(0.21, 0.72, 0.07)))));
+        }
+
+        let fine_detail = 1.0 - smoothstep(0.15, 0.95, footprint);
+        if detail_enabled != 0u && fine_detail > 0.0 {
+            legacy = surface_detail(legacy, weights, projections, position, slope, fine_detail);
+        }
+
+        surface = blend_surface(legacy, surface, biome_blend);
+        occlusion = mix(legacy_occlusion, occlusion, biome_blend);
+    }
+
     var canopy = vec4<f32>(0.0);
     var canopy_coverage = 0.0;
     var handoff = 0.0;
@@ -555,39 +559,6 @@ fn fragment(input: VertexOutput) -> FragmentOutput {
         let crown_depth = mix(2.0, 12.0, grazing * grazing);
         let crown_influence = 1.0 - pow(1.0 - canopy.a, crown_depth);
         canopy_coverage = soil * exposed_land * crown_influence;
-    }
-
-    if ground_detail > 0.0 {
-        // A second, tighter sample gives dirt, stones and grass their own
-        // visible grain at walking distance. The broad texture supplies color.
-        var dominant = projections[0];
-        if projections[1].weight > dominant.weight {
-            dominant = projections[1];
-        }
-        if projections[2].weight > dominant.weight {
-            dominant = projections[2];
-        }
-        let scale = 0.38;
-        let uv = (dominant.uv * scale) + vec2<f32>(0.17, 0.36);
-        let close_dx = dominant.dx * scale;
-        let close_dy = dominant.dy * scale;
-        let grain = textureSampleGrad(terrain_albedo, terrain_sampler, uv, dominant_layer, close_dx, close_dy).rgb;
-        let finish = textureSampleGrad(terrain_normal_roughness, terrain_sampler, uv, dominant_layer, close_dx, close_dy);
-        let mip = i32(textureNumLevels(terrain_albedo)) - 1;
-        let average = textureLoad(terrain_albedo, vec2<i32>(0), dominant_layer, mip).rgb;
-        let grain_tint = clamp(grain / max(average, vec3<f32>(0.03)), vec3<f32>(0.48), vec3<f32>(1.65));
-        let strength = ground_detail * smoothstep(0.36, 0.69, dominant.weight);
-        surface.color *= mix(vec3<f32>(1.0), grain_tint, strength * 0.43);
-        surface.roughness = mix(surface.roughness, finish.a, strength * 0.66);
-        let bump = finish.xyz * 2.0 - 1.0;
-        surface.normal_offset += (dominant.tangent * bump.x + dominant.bitangent * bump.y)
-            * (strength * 0.26 / max(bump.z, 0.35));
-        occlusion = mix(1.0, 0.79, strength * (1.0 - smoothstep(0.5, 1.02, dot(grain_tint, vec3<f32>(0.21, 0.72, 0.07)))));
-    }
-
-    let fine_detail = 1.0 - smoothstep(0.15, 0.95, footprint);
-    if detail_enabled != 0u && fine_detail > 0.0 {
-        surface = surface_detail(surface, weights, projections, position, slope, fine_detail);
     }
 
     var shaded_normal = surface_normal;

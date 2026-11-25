@@ -234,7 +234,7 @@ fn toggle_renderer(app: &mut App) {
     press_key(app, KeyCode::F6, Key::F6);
 }
 
-fn press_key(app: &mut App, key_code: KeyCode, logical_key: Key) {
+pub(super) fn press_key(app: &mut App, key_code: KeyCode, logical_key: Key) {
     for state in [ButtonState::Pressed, ButtonState::Released] {
         app.world_mut().write_message(KeyboardInput {
             key_code,
@@ -377,7 +377,7 @@ fn assert_cloud_pipelines(app: &App, experimental: bool) {
     }
 }
 
-fn capture(app: &mut App, target: &Handle<Image>, path: PathBuf) {
+pub(super) fn capture(app: &mut App, target: &Handle<Image>, path: PathBuf) {
     if path.exists() {
         fs::remove_file(&path).unwrap();
     }
@@ -449,7 +449,7 @@ fn set_camera(world: &mut World, distance: f64, altitude: f64, tilt: f64) {
     projection.near = (height * 0.0005).max(0.05) as f32;
 }
 
-fn render_frame(app: &mut App) {
+pub(super) fn render_frame(app: &mut App) {
     app.update();
     assert!(app.should_exit().is_none(), "the render app requested exit");
     app.sub_app(RenderApp)

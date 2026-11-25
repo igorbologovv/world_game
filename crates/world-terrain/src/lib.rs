@@ -3,10 +3,11 @@
 
 mod celestial;
 mod clouds;
+mod surface_materials;
+mod surface_water;
 mod terrain_surface;
 
 use bevy::{
-    asset::LoadState,
     image::{
         ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
         ImageSamplerDescriptor,
@@ -15,13 +16,14 @@ use bevy::{
     pbr::MaterialPlugin,
     prelude::*,
     reflect::TypePath,
-    render::render_resource::{AsBindGroup, TextureFormat, TextureViewDimension},
+    render::render_resource::AsBindGroup,
     shader::ShaderRef,
 };
+use surface_materials::SurfaceTextures;
 use world_core::{
     canopy::{CanopyLayout, ForestCanopy},
     planet::RADIUS,
-    runtime::{PlanetRoot, WorldMovement, WorldReady},
+    runtime::{PlanetRoot, WorldAssets, WorldMovement, WorldReady},
 };
 
 /// Register terrain materials, chunk streaming, lighting, atmosphere, and clouds.
@@ -37,7 +39,10 @@ impl Plugin for TerrainPlugin {
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
             .insert_resource(ClearColor(Color::BLACK))
             .add_systems(Startup, setup.after(WorldReady))
-            .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>))
+            .add_systems(
+                Update,
+                surface_materials::load.run_if(resource_exists::<SurfaceTextures>),
+            )
             .add_systems(Update, toggle_canopy_debug)
             .add_systems(Update, update_canopy)
             .add_systems(Update, terrain_surface::stream.after(WorldMovement));
@@ -73,6 +78,12 @@ struct TerrainMaterial {
     #[texture(13, dimension = "cube")]
     #[sampler(14)]
     globe_canopy: Option<Handle<Image>>,
+    #[texture(15, dimension = "2d_array")]
+    biome_albedo_height: Handle<Image>,
+    #[texture(16, dimension = "2d_array")]
+    biome_normal_roughness: Handle<Image>,
+    #[uniform(17)]
+    biome_enabled: u32,
 }
 
 impl TerrainMaterial {
@@ -99,6 +110,9 @@ impl TerrainMaterial {
             // Valid array bindings let the base terrain render during detail loading.
             detail_albedo: albedo.clone(),
             detail_normal_roughness: normal_roughness.clone(),
+            biome_albedo_height: albedo.clone(),
+            biome_normal_roughness: normal_roughness.clone(),
+            biome_enabled: 0,
             albedo,
             normal_roughness,
             detail_enabled: 0,
@@ -155,81 +169,6 @@ fn toggle_canopy_debug(
     }
 }
 
-#[derive(Resource)]
-struct TerrainDetail {
-    material: Handle<TerrainMaterial>,
-    albedo: Handle<Image>,
-    normal_roughness: Handle<Image>,
-}
-
-impl TerrainDetail {
-    fn request(material: Handle<TerrainMaterial>, assets: &AssetServer) -> Self {
-        Self {
-            material,
-            albedo: assets.load("textures/terrain/detail-albedo.ktx2"),
-            normal_roughness: assets
-                .load_builder()
-                .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
-                .load("textures/terrain/detail-normal-roughness.ktx2"),
-        }
-    }
-}
-
-fn load_detail(
-    mut commands: Commands,
-    detail: Res<TerrainDetail>,
-    assets: Res<AssetServer>,
-    images: Res<Assets<Image>>,
-    mut materials: ResMut<Assets<TerrainMaterial>>,
-) {
-    match (
-        images.get(&detail.albedo),
-        images.get(&detail.normal_roughness),
-    ) {
-        (Some(albedo), Some(normal_roughness)) => {
-            if valid_detail_pair(albedo, normal_roughness) {
-                if let Some(mut material) = materials.get_mut(&detail.material) {
-                    material.detail_albedo = detail.albedo.clone();
-                    material.detail_normal_roughness = detail.normal_roughness.clone();
-                    material.detail_enabled = 1;
-                }
-            } else {
-                warn!("Terrain detail arrays have an incompatible layout. Using the base terrain material.");
-            }
-        }
-        _ if [&detail.albedo, &detail.normal_roughness]
-            .iter()
-            .any(|map| matches!(assets.load_state(map.id()), LoadState::Failed(_))) =>
-        {
-            warn!("Terrain detail arrays failed to load. Using the base terrain material.");
-        }
-        _ => return,
-    }
-    commands.remove_resource::<TerrainDetail>();
-}
-
-fn valid_detail_pair(albedo: &Image, normal_roughness: &Image) -> bool {
-    [
-        (albedo, TextureFormat::Rgba8UnormSrgb),
-        (normal_roughness, TextureFormat::Rgba8Unorm),
-    ]
-    .into_iter()
-    .all(|(image, format)| {
-        let descriptor = &image.texture_descriptor;
-        let size = descriptor.size;
-        image
-            .texture_view_descriptor
-            .as_ref()
-            .and_then(|view| view.dimension)
-            == Some(TextureViewDimension::D2Array)
-            && descriptor.format == format
-            && size.depth_or_array_layers == 4
-            && size.width == size.height
-            && size.width.is_power_of_two()
-            && descriptor.mip_level_count == size.width.ilog2() + 1
-    }) && albedo.texture_descriptor.size == normal_roughness.texture_descriptor.size
-}
-
 impl Material for TerrainMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/spherical.wesl".into()
@@ -242,10 +181,19 @@ fn setup(
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
     assets: Res<AssetServer>,
+    world_assets: Res<WorldAssets>,
 ) {
     let material = materials.add(TerrainMaterial::load(&assets));
-    commands.insert_resource(TerrainDetail::request(material.clone(), &assets));
-    commands.insert_resource(terrain_surface::TerrainSurface::new(material));
+    let biome_materials = std::env::var_os("WORLD_TERRAIN_LEGACY_DETAIL").is_none();
+    commands.insert_resource(SurfaceTextures::request(
+        material.clone(),
+        &assets,
+        biome_materials,
+    ));
+    commands.insert_resource(terrain_surface::TerrainSurface::new(
+        material,
+        biome_materials.then(|| surface_water::LakeMasks::load(world_assets.directory())),
+    ));
 
     // One physically based atmosphere centered on the actual spherical planet,
     // not on a ground-level flat plane. RADIUS is in meters, as required by
@@ -263,80 +211,4 @@ fn setup(
     // The atmosphere's generated environment lighting supplies the blue sky
     // fill. A large uniform ambient term would wash out shadow contrast.
     commands.insert_resource(GlobalAmbientLight::NONE);
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use bevy::{
-        asset::AssetPlugin,
-        image::{CompressedImageFormats, ImageLoader, ImagePlugin},
-    };
-
-    use super::*;
-
-    fn check_detail_loading(missing_albedo: bool) {
-        let mut app = App::new();
-        app.add_plugins((
-            MinimalPlugins,
-            AssetPlugin {
-                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").into(),
-                ..default()
-            },
-            ImagePlugin::default(),
-        ))
-        .init_asset::<TerrainMaterial>()
-        .register_asset_loader(ImageLoader::new(CompressedImageFormats::empty()))
-        .add_systems(Update, load_detail.run_if(resource_exists::<TerrainDetail>));
-        app.finish();
-        app.cleanup();
-
-        let world = app.world_mut();
-        let assets = world.resource::<AssetServer>().clone();
-        let material = world
-            .resource_mut::<Assets<TerrainMaterial>>()
-            .add(TerrainMaterial::load(&assets));
-        let mut detail = TerrainDetail::request(material.clone(), &assets);
-        if missing_albedo {
-            detail.albedo = assets.load("textures/terrain/absent-detail.ktx2");
-        }
-        let detail_albedo = detail.albedo.clone();
-        let detail_normal = detail.normal_roughness.clone();
-        world.insert_resource(detail);
-
-        let start = Instant::now();
-        while app.world().contains_resource::<TerrainDetail>() {
-            assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "detail load stalled"
-            );
-            app.update();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let loaded = app
-            .world()
-            .resource::<Assets<TerrainMaterial>>()
-            .get(&material)
-            .unwrap();
-        if missing_albedo {
-            assert_eq!(loaded.detail_enabled, 0);
-            assert_eq!(loaded.detail_albedo, loaded.albedo);
-            assert_eq!(loaded.detail_normal_roughness, loaded.normal_roughness);
-        } else {
-            assert_eq!(loaded.detail_enabled, 1);
-            assert_eq!(loaded.detail_albedo, detail_albedo);
-            assert_eq!(loaded.detail_normal_roughness, detail_normal);
-        }
-    }
-
-    #[test]
-    fn shipped_detail_arrays_replace_the_base_bindings_together() {
-        check_detail_loading(false);
-    }
-
-    #[test]
-    fn missing_detail_map_keeps_the_base_terrain_renderable() {
-        check_detail_loading(true);
-    }
 }

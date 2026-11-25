@@ -1,32 +1,109 @@
 # World terrain
 
-The spherical terrain material uses planet-space triplanar projection. Its
-close-range layers add gravelly sand to coasts and bare soil, rocky terrain to
-meadows and exposed ground, lichen rock to outcrops and cliffs, and frosted ice
-to patches of snow. The shader blends those layers by slope, biome weight, and
-pixel footprint. It applies the photos' local contrast around the original
-biome colors so a change in viewing distance leaves the landscape palette
-stable. The base terrain also renders while the detail pair loads or if the
-pair is missing or incompatible.
+## Biome surface materials
 
-The shipped detail arrays have four 512 × 512 layers, in the order above.
-Albedo is sRGB. The linear companion array packs the OpenGL tangent-space
-normal in RGB and perceptual roughness in alpha. The triplanar shader accounts
-for the OpenGL normal's upward green axis when sampling textures with a
-downward V axis. Both arrays include mips down to 1 × 1. The terrain mesh
-supplies the surface shape.
+The terrain uses two 512 × 512 variants per material family. The shader derives
+biome and prospective vegetation cover from the same temperature, rainfall,
+elevation, and grove fields used by tree placement. It combines those fields
+with terrain grade and local patch noise. River coverage, baked lake masks,
+streamed pool basins, and nearby sea-level terrain supply the water influence.
+Dry forest litter gives way to damp leaves, moss, peat, and mud as soil
+moisture rises. Above the tree line and on steep slopes, talus and bedrock
+gain coverage.
 
-To rebuild both terrain arrays and the Hero Oak bark maps, run the material
-baker with NumPy, ImageMagick 7 with OpenEXR support, and zstd installed.
+The texture arrays contain sRGB albedo and linear height in one RGBA texture
+and OpenGL normals and perceptual roughness in the other. They have complete
+mip chains and occupy about 91 MiB of GPU texture memory. The shader chooses
+up to three layers per pixel and uses height to bias their existing overlap.
+Height also adds a small amount of ambient occlusion in recesses. The sampled
+normal, roughness, and color all use the same material weights.
+
+The renderer uses triplanar projection with 2 m and 8 m periods for most
+materials and 4 m and 16 m periods for bedrock. Planet-space variation shifts
+texture phase and rotates paired variants. Vertex coordinates retain
+sub-meter precision by subtracting a shared-period grid origin in double
+precision before interpolation. Neighboring chunk origins differ by whole
+texture periods. The material fades by pixel footprint and viewing distance
+between 310 m and 850 m into the original planetary shading. Existing terrain
+draw submissions carry both shading paths. The original detail textures also
+provide the fallback while biome assets load or if either array is unavailable.
+
+### Texture sources and licenses
+
+All input maps are distributed under CC0 1.0. Entries with two names in one
+cell are composites. Humus, dry moss, peat, wet litter, wet mud, and alpine
+variants have additional albedo or roughness treatment in the baker.
+[Poly Haven license](https://polyhaven.com/license) · [ambientCG license](https://docs.ambientcg.com/license/) · [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/)
+
+| Layers | Material | First variant | Second variant |
+| --- | --- | --- | --- |
+| 0–1 | Forest soil and humus | [Forest Ground 06](https://polyhaven.com/a/forest_ground_06) | [Dirt Floor](https://polyhaven.com/a/dirt_floor) |
+| 2–3 | Dry fallen leaves | [Forest Leaves 04](https://polyhaven.com/a/forest_leaves_04) | [Dry Decay Leaves](https://polyhaven.com/a/dry_decay_leaves) |
+| 4–5 | Wet fallen leaves | [Brown Mud Leaves 01](https://polyhaven.com/a/brown_mud_leaves_01) | [Mud Forest](https://polyhaven.com/a/mud_forest) |
+| 6–7 | Pine needles and conifer litter | [Forest Ground 03](https://polyhaven.com/a/forrest_ground_03) | [Forest Sand 01](https://polyhaven.com/a/forrest_sand_01) |
+| 8–9 | Green moss | [Moss 001](https://ambientcg.com/view?id=Moss001) | [Moss 002](https://ambientcg.com/view?id=Moss002) |
+| 10–11 | Dry moss | [Moss 001](https://ambientcg.com/view?id=Moss001), [Forest Ground 01](https://polyhaven.com/a/forrest_ground_01) | [Moss 002](https://ambientcg.com/view?id=Moss002), [Withered Grass](https://polyhaven.com/a/withered_grass) |
+| 12–13 | Grass-covered soil | [Sparse Grass](https://polyhaven.com/a/sparse_grass) | [Leafy Grass](https://polyhaven.com/a/leafy_grass) |
+| 14–15 | Roots and organic debris | [Roots](https://polyhaven.com/a/roots) | [Wood Chip Path](https://polyhaven.com/a/wood_chip_path) |
+| 16–17 | Peat and swamp soil | [Forest Ground 05](https://polyhaven.com/a/forest_ground_05), [Mud Forest](https://polyhaven.com/a/mud_forest) | [Brown Mud](https://polyhaven.com/a/brown_mud), [Brown Mud 02](https://polyhaven.com/a/brown_mud_02) |
+| 18–19 | Wet mud | [Brown Mud 03](https://polyhaven.com/a/brown_mud_03) | [Ground 094 B](https://ambientcg.com/view?id=Ground094B) |
+| 20–21 | Dry cracked mud | [Mud Cracked Dry 03](https://polyhaven.com/a/mud_cracked_dry_03) | [Mud Cracked Dry Riverbed 002](https://polyhaven.com/a/mud_cracked_dry_riverbed_002) |
+| 22–23 | Gravel and small stones | [Rocky Gravel](https://polyhaven.com/a/rocky_gravel) | [Gravel Stones](https://polyhaven.com/a/gravel_stones) |
+| 24–25 | Sand | [Sand 01](https://polyhaven.com/a/sand_01) | [Dense Sand](https://polyhaven.com/a/dense_sand) |
+| 26–27 | Clay-rich soil | [Cracked Red Ground](https://polyhaven.com/a/cracked_red_ground) | [Red Mud Stones](https://polyhaven.com/a/red_mud_stones) |
+| 28–29 | Exposed mountain rock | [Dark Rock](https://polyhaven.com/a/dark_rock) | [Dark Rock 02](https://polyhaven.com/a/dark_rock_02) |
+| 30–31 | Alpine ground | [Rocky Trail 02](https://polyhaven.com/a/rocky_trail_02) | [Rocky Trail](https://polyhaven.com/a/rocky_trail), [Withered Grass](https://polyhaven.com/a/withered_grass) |
+| 32–33 | Coastal sediment | [Damp Beach Sand 02](https://polyhaven.com/a/damp_beach_sand_02) | [Coral Mud 01](https://polyhaven.com/a/coral_mud_01) |
+
+To reproduce the arrays with Python, NumPy, ImageMagick 7, and zstd:
 
 ```sh
-python3 tools/build_surface_textures.py
+python3 tools/build_biome_surface_textures.py /tmp/terrain-source-maps --fetch
 ```
 
-The source packs are `gravelly_sand_2k.blend/`,
-`rocky_terrain_02_4k.blend/`, `lichen_rock_4k.blend/`,
-`Ice003_1K-JPG/`, and `jolcham_oak_bark_01_4k.blend/` at the checkout
-root. Use `--source-root` when those packs are in a separate directory.
+The baker can rebuild offline from the cached maps. The separate
+`tools/build_surface_textures.py` continues to build the original detail
+arrays and Hero Oak bark from the checked-in source packs.
+
+### GPU validation
+
+The ignored client sweep captures dense forest, conifer forest, wet lowland,
+mountain slope, grassland, and coast at ground level and at 62 m above ground.
+A 4.8 km view covers the handoff to the original material. Both runs use the
+same camera poses, paused sun, and clear skies. The log reports the median
+GPU opaque pass time and synchronized frame p50 and p95 for each view.
+
+```sh
+WORLD_TERRAIN_LEGACY_DETAIL=1 TERRAIN_CAPTURE_DIR="$PWD/target/terrain-materials/baseline" \
+  cargo test --locked -p world-client terrain_material_sweep -- --ignored --nocapture
+TERRAIN_CAPTURE_DIR="$PWD/target/terrain-materials/biome" \
+  cargo test --locked -p world-client terrain_material_sweep -- --ignored --nocapture
+```
+
+Set `TERRAIN_CAPTURE_CASE` to a comma-separated list of scene names to
+repeat selected views. The [capture index](../../target/terrain-materials/captures.md)
+links to the 1280 × 720 PNGs and the original timings for both runs.
+
+Measured on a Radeon RX 6750 XT with RADV/Vulkan. Times are median opaque-pass
+GPU milliseconds for 48 measured frames per view after a 160-frame warmup.
+The opaque pass includes vegetation. The mountain and coast used a focused
+repeat with the mountain camera below the snow line and the coastal camera
+on the tidal flat. The distant PNGs matched byte for byte.
+
+| Scene | Legacy ground | Biome ground | Legacy elevated | Biome elevated |
+| --- | ---: | ---: | ---: | ---: |
+| Dense forest | 12.36 | 15.64 | 21.28 | 22.73 |
+| Conifer forest | 10.62 | 11.66 | 16.32 | 17.07 |
+| Wet lowland | 9.83 | 12.16 | 12.93 | 14.54 |
+| Mountain slope | 12.71 | 14.17 | 7.78 | 7.83 |
+| Open grassland | 9.01 | 10.98 | 7.98 | 9.38 |
+| Coastline | 4.64 | 6.56 | 4.62 | 8.71 |
+| Distant aerial, 4.8 km above ground | | | 3.10 | 3.67 |
+
+Across the 12 ground and elevated views, the mean opaque-pass median rose
+from 10.84 to 12.62 ms. The mean synchronized frame median rose from 32.66 to
+34.53 ms. The elevated tidal flat had the largest opaque-pass increase at
+4.10 ms.
 
 ## Local relief
 
