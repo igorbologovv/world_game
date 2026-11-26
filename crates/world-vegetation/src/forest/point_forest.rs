@@ -44,7 +44,7 @@ impl Default for PointForest{
 }
 fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:Res<ForestModels>,
     settings:Res<VegetationSettings>,hero:Res<HeroOakAssets>,assets:Res<TreeAssets>,time:Res<Time>,
-    cameras:Query<(Entity,GridTransform,&Camera,&Projection),With<WorldCamera>>,frames:ReferenceFrames,lights:Query<(&DirectionalLight,&Transform)>){
+    cameras:Query<(Entity,GridTransform,&Camera,&Projection),With<WorldCamera>>,frames:ReferenceFrames,lights:Query<(&DirectionalLight,&Transform),Without<WorldCamera>>){
     points.trees.clear();points.jobs.clear();points.selected=0;points.textured=0;points.candidates=0;points.eligible=0;points.clusters=0;
     if let Some(result)=points.pending.as_mut().and_then(|task|block_on(poll_once(task))){
         points.pending=None;

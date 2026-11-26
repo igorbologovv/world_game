@@ -1379,7 +1379,7 @@ dependencies = [
  "approx",
  "bevy_reflect",
  "derive_more",
- "glam",
+ "glam 0.33.12",
  "libm",
  "rand 0.10.4",
  "serde",
@@ -1408,7 +1408,7 @@ dependencies = [
  "bytemuck",
  "derive_more",
  "encase",
- "glam",
+ "glam 0.33.12",
  "half",
  "hexasphere",
  "serde",
@@ -1565,7 +1565,7 @@ dependencies = [
  "downcast-rs 2.0.2",
  "erased-serde",
  "foldhash 0.2.0",
- "glam",
+ "glam 0.33.12",
  "indexmap",
  "inventory",
  "petgraph 0.8.3",
@@ -1630,7 +1630,7 @@ dependencies = [
  "derive_more",
  "downcast-rs 2.0.2",
  "encase",
- "glam",
+ "glam 0.33.12",
  "image",
  "indexmap",
  "itertools 0.14.0",
@@ -3166,6 +3166,12 @@ dependencies = [
 
 [[package]]
 name = "glam"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e05e7e6723e3455f4818c7b26e855439f7546cf617ef669d1adedb8669e5cb9"
+
+[[package]]
+name = "glam"
 version = "0.33.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
@@ -3379,7 +3385,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163385eff5a0cf606ebe2c10b3a44ab02f4306e83fbd068a64f5e1d72a3049ac"
 dependencies = [
  "constgebra",
- "glam",
+ "glam 0.33.12",
  "tinyvec",
 ]
 
@@ -3602,6 +3608,17 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "igor_renderer"
+version = "0.1.0"
+source = "git+https://github.com/igorbologovv/Igor_renderer.git?rev=d552eb12791240c14b939fa53afe76632304266b#d552eb12791240c14b939fa53afe76632304266b"
+dependencies = [
+ "bytemuck",
+ "glam 0.27.0",
+ "gltf",
+ "image",
 ]
 
 [[package]]
@@ -7677,6 +7694,7 @@ dependencies = [
  "bevy",
  "blake3",
  "flate2",
+ "igor_renderer",
  "noise",
  "world-core",
  "world-regions",
