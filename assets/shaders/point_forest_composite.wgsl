@@ -4,6 +4,7 @@ struct Camera {
 }
 @group(0) @binding(0) var<uniform> cam:Camera;
 @group(0) @binding(1) var<storage,read> screen_words:array<u32>;
+@group(0) @binding(2) var resolved: texture_2d<f32>;
 struct Output{@location(0) color:vec4<f32>,@builtin(frag_depth) depth:f32}
 @fragment fn fragment(@builtin(position) pos:vec4<f32>)->Output{
     let pixel=vec2<u32>(pos.xy)-cam.viewport.xy;
@@ -12,7 +13,6 @@ struct Output{@location(0) color:vec4<f32>,@builtin(frag_depth) depth:f32}
     if screen_words[n+i]==0xffffffffu{discard;}
     let z=-bitcast<f32>(screen_words[i]);
     let depth=(cam.depth_coeff.x*z+cam.depth_coeff.y)/(cam.depth_coeff.z*z+cam.depth_coeff.w);
-    let rg = unpack2x16float(screen_words[2u*n+i]);
-    let ba = unpack2x16float(screen_words[3u*n+i]);
-    return Output(vec4<f32>(rg, ba), clamp(depth, 0.0, 1.0));
+    let color = textureLoad(resolved, vec2<i32>(pixel), 0).rgb;
+    return Output(vec4<f32>(color, 1.0), clamp(depth, 0.0, 1.0));
 }
