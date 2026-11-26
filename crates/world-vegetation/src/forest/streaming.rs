@@ -113,6 +113,7 @@ struct ProxyAtlas {
 #[derive(Resource, Default)]
 pub(super) struct ForestStream {
     construction_revision: u64,
+    point_revision: u64,
     nodes: HashMap<NodeKey, Node>,
     order: Vec<NodeKey>,
     mask: HashMap<PatchKey, (f32, f32)>,
@@ -140,6 +141,10 @@ pub(super) struct StreamStats {
 }
 
 impl ForestStream {
+    pub(super) fn point_revision(&self) -> u64 {
+        self.point_revision
+    }
+
     // The compute renderer consumes the canonical placement arrays directly.
     // No ECS render entity or billboard has to exist for a tree to be drawn.
     pub(super) fn point_sites(&self) -> impl Iterator<Item=Site> + '_ {
@@ -215,17 +220,22 @@ impl ForestStream {
         candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         candidates.truncate(MAX_NODES);
         let wanted: HashSet<_> = candidates.iter().map(|&(_, key, _)| key).collect();
+        let mut removed_sites = false;
         self.nodes.retain(|key, node| {
             if wanted.contains(key) {
                 return true;
             }
             node.parent.retire(commands, &mut self.retiring_batches);
             for leaf in &mut node.leaves {
+                removed_sites |= leaf.sites.as_ref().is_some_and(|sites| !sites.is_empty());
                 leaf.impostor.retire(commands, &mut self.retiring_batches);
                 self.retiring.append(&mut leaf.trees);
             }
             false
         });
+        if removed_sites {
+            self.point_revision += 1;
+        }
         self.order.clear();
         for (_, key, location) in candidates {
             self.order.push(key);
@@ -261,16 +271,21 @@ impl ForestStream {
         clearing: Option<&ForestClearing>,
     ) {
         let mut pending = 0;
+        let mut added_sites = false;
         for leaf in self.nodes.values_mut().flat_map(|node| &mut node.leaves) {
             let ready = leaf
                 .placement
                 .as_mut()
                 .and_then(|task| block_on(poll_once(task)));
             if let Some(sites) = ready {
+                added_sites |= !sites.is_empty();
                 leaf.placement = None;
                 leaf.sites = Some(sites);
             }
             pending += usize::from(leaf.placement.is_some());
+        }
+        if added_sites {
+            self.point_revision += 1;
         }
         let mut budget = PLACEMENT_JOBS.saturating_sub(pending);
         let pool = AsyncComputeTaskPool::get();
@@ -579,6 +594,7 @@ pub(super) fn stream(
     };
     if forest.construction_revision != heights.construction_revision() {
         forest.construction_revision = heights.construction_revision();
+        forest.point_revision += 1;
         let mut old_nodes = std::mem::take(&mut forest.nodes);
         let mut retiring = std::mem::take(&mut forest.retiring);
         let mut retiring_batches = std::mem::take(&mut forest.retiring_batches);
