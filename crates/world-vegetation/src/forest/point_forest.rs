@@ -165,7 +165,7 @@ pub(super) fn install(app:&mut App) {
 #[derive(Component)]
 struct PointOverlay;
 fn spawn_overlay(mut commands:Commands){
-    commands.spawn((PointOverlay,Text::new("IGOR | initializing"),TextFont{font_size:15.0,..default()},
+    commands.spawn((PointOverlay,Text::new("IGOR | initializing"),TextFont{font_size:FontSize::Px(15.0),..default()},
         TextColor(Color::srgb(0.9,1.0,0.8)),BackgroundColor(Color::srgba(0.02,0.03,0.02,0.85)),
         Node{position_type:PositionType::Absolute,right:Val::Px(14.0),bottom:Val::Px(14.0),
             padding:UiRect::all(Val::Px(6.0)),..default()}));
