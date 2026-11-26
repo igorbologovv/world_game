@@ -1,5 +1,6 @@
 //! Experimental bridge for the standalone Igor direct-compute renderer.
 //! No second device/window: use Bevy's RenderDevice and real scene depth.
+mod occlusion;
 mod shader;
 mod temporal;
 
@@ -209,8 +210,14 @@ pub(super) fn install(app:&mut App) {
             if multisampled {"igor_renderer/ground_shadow_msaa.wgsl"} else {"igor_renderer/ground_shadow.wgsl"},
         ))
     );
+    let depth_shaders = [false, true].map(|multisampled|
+        app.world_mut().resource_mut::<Assets<Shader>>().add(Shader::from_wgsl(
+            occlusion::shader(multisampled),
+            if multisampled {"igor_renderer/opaque_depth_msaa.wgsl"} else {"igor_renderer/opaque_depth.wgsl"},
+        ))
+    );
     if let Some(render)=app.get_sub_app_mut(RenderApp) {
-        render.insert_resource(PointShader(shader,ground_shaders,temporal_shader));
+        render.insert_resource(PointShader(shader,ground_shaders,temporal_shader,depth_shaders));
         render.add_systems(ExtractSchedule,extract_frame)
             .add_systems(RenderStartup,init_pipelines)
             .add_systems(Core3d,render_points.in_set(Core3dSystems::MainPass)
@@ -300,10 +307,11 @@ struct ViewPipelines {
     draw: CachedRenderPipelineId,
     ground_layout: BindGroupLayoutDescriptor,
     ground_draw: CachedRenderPipelineId,
+    opaque_depth: occlusion::Pipeline,
 }
 
 #[derive(Resource)]
-struct PointShader(Handle<Shader>, [Handle<Shader>; 2], Handle<Shader>);
+struct PointShader(Handle<Shader>, [Handle<Shader>; 2], Handle<Shader>, [Handle<Shader>; 2]);
 fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<PointShader>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>,adapter:Res<RenderAdapter>){
     let compute=BindGroupLayoutDescriptor::new("original Igor compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
@@ -341,7 +349,8 @@ fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<Point
                 targets:vec![Some(ColorTargetState{format:TextureFormat::Rgba16Float,blend:None,write_mask:ColorWrites::ALL})]}),
             depth_stencil:Some(DepthStencilState{format:CORE_3D_DEPTH_FORMAT,depth_write_enabled:Some(true),depth_compare:Some(CompareFunction::GreaterEqual),stencil:default(),bias:default()}),
             multisample: MultisampleState {count,..default()},..default()});
-        (count, ViewPipelines {draw, ground_layout, ground_draw})
+        let opaque_depth = occlusion::Pipeline::new(&cache, shader.3[usize::from(count > 1)].clone(), count > 1);
+        (count, ViewPipelines {draw, ground_layout, ground_draw, opaque_depth})
     }).collect();
     let pipeline=|entry:&'static str|cache.queue_compute_pipeline(ComputePipelineDescriptor{label:Some(entry.into()),
         layout:vec![compute.clone()],shader:shader.0.clone(),entry_point:Some(entry.into()),zero_initialize_workgroup_memory:true,..default()});
@@ -411,13 +420,15 @@ struct GpuFrame {
     screen:Option<(u64,Buffer)>,
     projection:Option<(u64,Buffer)>,
     history:Option<temporal::History>,
+    opaque_occlusion:bool,
 }
 
 impl Default for GpuFrame {
     fn default() -> Self {
         Self {shadows:[None,None],pack:None,trees:RawBufferVec::new(BufferUsages::STORAGE),
             jobs:RawBufferVec::new(BufferUsages::STORAGE),selection:None,uniform:UniformBuffer::default(),
-            screen:None,projection:None,history:None}
+            screen:None,projection:None,history:None,
+            opaque_occlusion:std::env::var("IGOR_POINT_OCCLUSION").as_deref()!=Ok("0")}
     }
 }
 
@@ -531,25 +542,33 @@ fn render_points(view:ViewQuery<(Entity,&PointCamera,&ExtractedView,&ViewTarget,
         &BindGroupEntries::sequential((uniform.clone(),gpu.raw.binding().unwrap(),gpu.lod.binding().unwrap(),state.trees.binding().unwrap(),
         gpu.patches.binding().unwrap(),gpu.materials.binding().unwrap(),&gpu.color,&gpu.normal,&gpu.sampler,
         state.jobs.binding().unwrap(),screen.as_entire_binding(),projection.as_entire_binding(),shadow,previous_shadow)));
+    let seed = state.opaque_occlusion.then(||cache.get_compute_pipeline(view_pipelines.opaque_depth.id)).flatten();
+    let has_shadow = strength > 0.0 || previous_strength > 0.0;
+    let scene_depth = (seed.is_some() || has_shadow).then(||
+        depth_texture.texture().create_view(&TextureViewDescriptor::default()));
     // Modulate the already-rendered opaque ground before point composition.
     // Sample depth only in a pass without a depth attachment.
-    if strength>0.0 || previous_strength>0.0 {
+    if has_shadow {
         if let Some(pipeline)=cache.get_render_pipeline(view_pipelines.ground_draw){
-            let depth_view=depth_texture.texture().create_view(&TextureViewDescriptor::default());
             let bind=device.create_bind_group("Igor ground shadow",&cache.get_bind_group_layout(&view_pipelines.ground_layout),
-                &BindGroupEntries::sequential((state.uniform.binding().unwrap(),&depth_view,shadow,&gpu.sampler,previous_shadow)));
+                &BindGroupEntries::sequential((state.uniform.binding().unwrap(),scene_depth.as_ref().unwrap(),shadow,&gpu.sampler,previous_shadow)));
             let attachments=[Some(target.get_color_attachment())];
             let mut pass=ctx.command_encoder().begin_render_pass(&RenderPassDescriptor{label:Some("Igor ground shadow"),color_attachments:&attachments,..default()});
             pass.set_viewport(v.x as f32,v.y as f32,v.z as f32,v.w as f32,0.0,1.0);
             pass.set_pipeline(pipeline);pass.set_bind_group(0,&bind,&[]);pass.draw(0..3,0..1);
         }
     }
+    let seed_bind = seed.map(|_|view_pipelines.opaque_depth.bind(
+        &device, &cache, uniform.clone(), scene_depth.as_ref().unwrap(), screen));
     let encoder=ctx.command_encoder();
-    for (label,pipeline,x,y) in [("clear",clear,v.z.div_ceil(8),v.w.div_ceil(8)),
-        ("depth",depth,count.min(JOB_WIDTH),count.div_ceil(JOB_WIDTH)),("owner",owner,count.min(JOB_WIDTH),count.div_ceil(JOB_WIDTH)),
-        ("resolve",resolve,v.z.div_ceil(8),v.w.div_ceil(8))]{
+    for (label,pipeline,bind,x,y) in [
+        ("clear",seed.unwrap_or(clear),seed_bind.as_ref().unwrap_or(&group),v.z.div_ceil(8),v.w.div_ceil(8)),
+        ("depth",depth,&group,count.min(JOB_WIDTH),count.div_ceil(JOB_WIDTH)),
+        ("owner",owner,&group,count.min(JOB_WIDTH),count.div_ceil(JOB_WIDTH)),
+        ("resolve",resolve,&group,v.z.div_ceil(8),v.w.div_ceil(8))
+    ]{
         let mut pass=encoder.begin_compute_pass(&ComputePassDescriptor{label:Some(label),..default()});
-        pass.set_pipeline(pipeline);pass.set_bind_group(0,&group,&[]);pass.dispatch_workgroups(x,y,1);
+        pass.set_pipeline(pipeline);pass.set_bind_group(0,bind,&[]);pass.dispatch_workgroups(x,y,1);
     }
     let history = temporal::History::for_size(&mut state.history, &device, UVec2::new(v.z, v.w));
     let color = history.encode(encoder, &device, &queue, &cache, &pipelines.temporal, uniform.clone(), screen,

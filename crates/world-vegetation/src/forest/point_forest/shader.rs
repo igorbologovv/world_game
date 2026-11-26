@@ -38,6 +38,25 @@ pub(super) fn compute() -> String {
         "sin(t*6.2+dot(world,vec3<f32>(2.1,1.7,1.3)))",
         "sin(t*6.2+cam.effects.w+dot(world,vec3<f32>(2.1,1.7,1.3)))",
     );
+    // Only retain the bounds needed by the owner pass. Depth only decreases
+    // during the first pass, so a splat with no accepted sample stays hidden.
+    let source = replace_once(
+        &source,
+        "    if !owner_pass && cache_enabled(){projection_cache[id]=vec2<u32>(pack_xy(p.lo),pack_xy(p.hi));}",
+        "    var emitted = false;",
+    );
+    let source = replace_once(
+        &source,
+        "                atomicMin(&screen_words[i],key);\n            }\n        }\n    }",
+        r#"                atomicMin(&screen_words[i],key);
+                emitted = true;
+            }
+        }
+    }
+    if !owner_pass && cache_enabled() && emitted {
+        projection_cache[id] = vec2<u32>(pack_xy(p.lo), pack_xy(p.hi));
+    }"#,
+    );
     shadow_blend(&source, 13)
 }
 

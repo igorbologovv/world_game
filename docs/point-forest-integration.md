@@ -25,3 +25,5 @@ Shadows and legacy undergrowth are enabled by default in point mode. Set IGOR_PO
 The Bevy adapter keeps the camera's MSAA sample count and samples opaque shadow receivers per sample. Splat lighting uses exposed HDR direct light, a hemispherical sky approximation, and distance haze. Color stays in half-float until it reaches the game's HDR target.
 
 The leaf flutter phase is anchored in planet coordinates. A replacement tree pack preserves LOD history for existing placements, and canopy fields fade over 0.4 seconds. Point colors use unjittered reprojection with depth rejection and neighborhood clipping. Newly uncovered pixels use the current frame immediately.
+
+Opaque depth seeds the existing point depth pass. With MSAA, the farthest opaque sample provides the bound, so a splat can still cover openings at terrain and object edges. The owner pass reuses only projection entries that accepted at least one sample. Set `IGOR_POINT_OCCLUSION=0` to compare opaque-depth seeding with the original depth clear.
