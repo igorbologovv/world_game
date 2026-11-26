@@ -392,7 +392,7 @@ impl PointScene {
         (raw,lod,templates)
     }
     pub fn build(scene:&Scene)->Self{
-        let (raw,lod,templates,local_levels,brick_lod)=Self::template_data(&scene.geometry);
+        let (raw,mut lod,templates,local_levels,brick_lod)=Self::template_data(&scene.geometry);
         let side=scene.levels[0].dims.x;
         let mut sites=vec![None;(side*side) as usize];
         let mut world=Vec::new();
