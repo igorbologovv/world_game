@@ -343,13 +343,11 @@ pub(super) fn update_lods(
     mut leaf_materials: ResMut<Assets<FoliageMaterial>>,
     mut bark_materials: ResMut<Assets<BarkMaterial>>,
     mut stats: ResMut<super::debug::LodDiagnostics>,
-    mut point_forest: Option<ResMut<super::point_forest::PointForest>>,
     mut trees: Query<&mut DetailTree>,
     mut trunks: Query<RenderParts<BarkMaterial>, With<Trunk>>,
     mut leaves: Query<RenderParts<FoliageMaterial>, (With<Leaves>, Without<Trunk>)>,
 ) {
     if super::point_forest::enabled() { return; }
-    if let Some(points) = point_forest.as_mut() { points.begin_frame(); }
     let Ok((entity, grid, camera, projection)) = cameras.single() else {
         return;
     };
@@ -363,16 +361,7 @@ pub(super) fn update_lods(
     stats.levels = [0; 3];
     stats.blends = 0;
     let models_changed = models.is_changed();
-    // Deterministic near-first admission when the point budget is tight.
-    let mut ordered:Vec<_> = trees.iter_mut().collect();
-    if point_forest.is_some() {
-        ordered.sort_by(|a,b| eye.distance_squared(a.site.position).total_cmp(&eye.distance_squared(b.site.position))
-            .then_with(|| a.site.position.x.total_cmp(&b.site.position.x))
-            .then_with(|| a.site.position.y.total_cmp(&b.site.position.y))
-            .then_with(|| a.site.position.z.total_cmp(&b.site.position.z)));
-    }
-    for mut tree in ordered {
-        if let Some(points)=point_forest.as_mut(){points.candidates+=1;}
+    for mut tree in &mut trees {
         let distance = eye.distance(tree.site.position) as f32;
         let (impostor, readiness) = forest.coverage(tree.patch);
         let range = settings.impostor_range.clamp(200.0, 600.0);
@@ -399,23 +388,6 @@ pub(super) fn update_lods(
         let hero = tree.site.species == Species::Oak
             && tree.site.variant == 0
             && models.hero_oak.is_some();
-        // Match the exact complementary screen-space dither mask of the
-        // existing impostor pass, including the partially faded trees.
-        if !view.orthographic
-            && point_forest.as_mut().is_some_and(|points| {
-                points.eligible+=1;
-                points.add_tree(&models.portraits, tree.site, eye, distance, view.focal, upper)
-            })
-        {
-            tree.lod = LodState::default();
-            for (index, slot) in tree.slots.into_iter().enumerate() {
-                if tree.presented[index].take().is_some() {
-                    hide(slot, &mut trunks, &mut leaves);
-                }
-            }
-            stats.levels[level] += 1;
-            continue;
-        }
         tree.lod.update(ModelChoice { level, hero }, step);
         let active = tree.lod.current.unwrap();
         stats.levels[active.level] += 1;

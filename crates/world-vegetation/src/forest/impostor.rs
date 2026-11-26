@@ -68,15 +68,11 @@ impl Portraits {
     pub(super) fn point_variant(&self, species: Species, variant: usize) -> usize {
         if self.0[tile(species,variant)].is_some() {variant} else {variant % species.stock_variants()}
     }
-    pub(super) fn point_samples(&self, species: Species, variant: usize) -> Option<super::point_forest::PointBake> {
-        if let Some(source) = &self.0[tile(species, variant)] {
-            return Some(source.point_samples());
-        }
-        if variant >= species.stock_variants() { return None; }
-        let source = Source::procedural(species, variant,
-            Arc::new(textures::bark_texture()),
-            Arc::new(textures::canopy_texture(species)));
-        Some(source.point_samples())
+    pub(super) fn planet_input(&self,species:Species,variant:usize)->igor_renderer_core::planetary::InputTemplate{
+        let variant=self.point_variant(species,variant);
+        let tile=tile(species,variant);
+        if let Some(source)=&self.0[tile]{return source.planet_input(tile);}
+        Source::procedural(species,variant,Arc::new(textures::bark_texture()),Arc::new(textures::canopy_texture(species))).planet_input(tile)
     }
 
     pub fn insert(&mut self, species: Species, variant: usize, source: Source) {
@@ -228,92 +224,16 @@ struct MappedNormals {
 }
 
 impl Source {
-    fn point_samples(&self) -> super::point_forest::PointBake {
-        use super::point_forest::{Sample,PointBake,raw_patch,ATLAS_SIDE};
-        const MAX_POINTS: usize = 78_000;
-        let mut patches=Vec::new();let mut layers=Vec::new();
-        // Give every nondegenerate source triangle a covering disk before
-        // allocating extra samples. Thin fronds must not be rounded to zero.
-        let mut triangles=Vec::new();
-        let mut total_area=0.0f64;
-        for (part_index,part) in self.parts.iter().enumerate(){
-            for tri in part.mesh.indices.chunks_exact(3){
-                let ids=[tri[0],tri[1],tri[2]].map(|i|i as usize);
-                let [a,b,c]=ids.map(|i|Vec3::from_array(part.mesh.positions[i]));
-                let cross=(b-a).cross(c-a);
-                if cross.length_squared()<1e-16 {continue;}
-                let area=0.5*cross.length();
-                let longest=(b-a).length_squared().max((c-b).length_squared()).max((a-c).length_squared());
-                let weight=f64::from(area+0.035*longest);
-                total_area+=f64::from(area);
-                triangles.push((part_index,ids,weight));
-            }
-        }
-        // Exception for exceptionally dense assets: preserve the largest
-        // surface patches under the fixed template cap, and report truncation.
-        if triangles.len()>MAX_POINTS{
-            warn!("Point template has {} source triangles; covering the largest {}",triangles.len(),MAX_POINTS);
-            triangles.sort_unstable_by(|a,b|b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
-            triangles.truncate(MAX_POINTS);
-        }
-        triangles.sort_unstable_by_key(|t|(t.0,t.1));
-        let target=((total_area/(0.035f64*0.035)).ceil() as usize).max(triangles.len()).min(MAX_POINTS);
-        let extra=target.saturating_sub(triangles.len());
-        let sum: f64=triangles.iter().map(|t|t.2).sum();
-        let mut cumulative=0.0f64;let mut assigned=0usize;
-        let mut counts=Vec::with_capacity(triangles.len());
-        for (i,&(_,_,weight)) in triangles.iter().enumerate(){
-            cumulative+=weight;
-            let next=if i+1==triangles.len(){extra}else{((cumulative/sum.max(1e-20))*extra as f64).floor() as usize}.min(extra).max(assigned);
-            counts.push(1+next-assigned);assigned=next;
-        }
-        let mut out=Vec::with_capacity(target);
-        for (part_index, part) in self.parts.iter().enumerate() {
-            let layer=layers.len() as u32;
-            let resize=|image:&Image|{
-                let mut bytes=Vec::with_capacity((ATLAS_SIDE*ATLAS_SIDE*4) as usize);
-                for y in 0..ATLAS_SIDE{for x in 0..ATLAS_SIDE{
-                    let uv=Vec2::new((x as f32+0.5)/ATLAS_SIDE as f32,(y as f32+0.5)/ATLAS_SIDE as f32);
-                    bytes.extend(sample(image,uv,false));
-                }}
-                Arc::new(bytes)
-            };
-            layers.push(resize(&part.diffuse));
-            let normal_layer=part.mapped_normals.as_ref().map(|m|{
-                let n=layers.len() as u32;layers.push(resize(&m.texture));n
-            });
-            for (ti,&(source_part,indices,_)) in triangles.iter().enumerate(){
-                if source_part!=part_index{continue;}
-                let positions = indices.map(|i| Vec3::from_array(part.mesh.positions[i]));
-                let normals = indices.map(|i| Vec3::from_array(part.mesh.normals[i]));
-                let uvs = indices.map(|i| Vec2::from_array(part.mesh.uvs[i]));
-                let colors = indices.map(|i| Vec4::from_array(part.mesh.colors[i]));
-                let n=counts[ti];
-                let tangent=part.mapped_normals.as_ref().map_or(Vec4::ZERO,|m|blend(indices.map(|i|Vec4::from_array(m.tangents[i])),[1.0/3.0;3]));
-                let Some(patch)=raw_patch(positions,normals,uvs,(colors[0]+colors[1]+colors[2])*(1.0/3.0)*part.tint,
-                    layer,normal_layer,part.repeat,part.cutoff,tangent) else{continue;};
-                let patch_id=patches.len() as u32;
-                patches.push(patch);
-                cover_triangle(positions,n,|weights,radius,area|{
-                    let weights=weights.to_array();
-                    let uv = blend(uvs,weights);
-                    let texel = sample(&part.diffuse,uv,part.repeat);
-                    let tint = blend(colors,weights)*part.tint;
-                    let covered=f32::from(texel[3])/255.0*tint.w >= part.cutoff;
-                    let color = LinearRgba::from(Srgba::rgb_u8(texel[0],texel[1],texel[2])).to_vec3()*tint.xyz();
-                    let mut normal = blend(normals,weights);
-                    if let Some(mapped) = &part.mapped_normals {
-                        let tangent = blend(indices.map(|i|Vec4::from_array(mapped.tangents[i])),weights);
-                        let texel = sample(&mapped.texture,uv,part.repeat);
-                        let n = Vec3::new(texel[0] as f32,texel[1] as f32,texel[2] as f32)*(2.0/255.0)-Vec3::ONE;
-                        normal = tangent.xyz()*n.x + normal.cross(tangent.xyz())*tangent.w*n.y + normal*n.z;
-                    }
-                    out.push(Sample { position: blend(positions,weights), radius, color,
-                        normal: normal.normalize_or_zero(), leaf: part_index != 0,patch:patch_id,covered,area });
-                });
-            }
-        }
-        PointBake{samples:out,patches,layers}
+    fn planet_input(&self,tile:usize)->igor_renderer_core::planetary::InputTemplate{
+        use igor_renderer_core::planetary::{InputTemplate,InputPart,InputImage};
+        let image=|i:&Image|{let s=i.texture_descriptor.size;InputImage{width:s.width,height:s.height,
+            rgba:i.data.as_ref().expect("CPU source texture")[..(s.width*s.height*4) as usize].to_vec()}};
+        let parts=self.parts.iter().enumerate().map(|(i,p)|InputPart{
+            positions:p.mesh.positions.clone(),normals:p.mesh.normals.clone(),uvs:p.mesh.uvs.clone(),indices:p.mesh.indices.clone(),
+            tint:p.tint.to_array(),diffuse:image(&p.diffuse),normal_map:p.mapped_normals.as_ref().map(|m|image(&m.texture)),
+            repeat:p.repeat,cutoff:if i==0{-1.0}else{p.cutoff},foliage:i!=0,
+        }).collect();
+        InputTemplate{tile,parts}
     }
 
     pub fn new(parts: [Part; 2]) -> Self {
@@ -776,34 +696,6 @@ fn blend<T: std::ops::Mul<f32, Output = T> + std::ops::Add<Output = T>>(
     a * weights[0] + b * weights[1] + c * weights[2]
 }
 
-// Bisect the longest edge in physical space. Every resulting triangle
-// lies entirely inside its centroid disk (the farthest point is a vertex).
-// Barycentric coordinates preserve the original patch's UV interpolation.
-fn cover_triangle(positions:[Vec3;3],count:usize,mut emit:impl FnMut(Vec3,f32,f32)){
-    if count==0{return;}
-    let to_pos=|b:Vec3|positions[0]*b.x+positions[1]*b.y+positions[2]*b.z;
-    let mut stack=vec![([Vec3::X,Vec3::Y,Vec3::Z],count)];
-    while let Some((b,n))=stack.pop(){
-        let p=b.map(to_pos);
-        if n==1{
-            let center=(p[0]+p[1]+p[2])/3.0;
-            let radius=p.iter().map(|v|v.distance(center)).fold(0.0f32,f32::max);
-            // 1/256 m signed coordinate quantization + plane correction.
-            let radius=(radius+0.008).max(0.012);
-            let area=(p[1]-p[0]).cross(p[2]-p[0]).length()*0.5;
-            emit((b[0]+b[1]+b[2])/3.0,radius,area);
-            continue;
-        }
-        let edges=[p[0].distance_squared(p[1]),p[1].distance_squared(p[2]),p[2].distance_squared(p[0])];
-        let i=if edges[0]>=edges[1]&&edges[0]>=edges[2]{0}else if edges[1]>=edges[2]{1}else{2};
-        let j=(i+1)%3;let k=(i+2)%3;
-        let left=n/2;
-        let mid=b[i].lerp(b[j],left as f32/n as f32);
-        stack.push(([mid,b[j],b[k]],n-left));
-        stack.push(([b[i],mid,b[k]],left));
-    }
-}
-
 fn sample(image: &Image, uv: Vec2, repeat: bool) -> [u8; 4] {
     let uv = if repeat { uv - uv.floor() } else { uv };
     let size = image.texture_descriptor.size;
@@ -841,23 +733,6 @@ fn silhouette_score(reference: &Source, model: &Source) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn disk_partition_preserves_triangle_area_and_count(){
-        let positions=[Vec3::ZERO,Vec3::new(4.0,0.0,0.0),Vec3::new(0.0,0.07,0.0)];
-        let mut count=0;let mut area=0.0;
-        cover_triangle(positions,37,|b,r,a|{
-            count+=1;area+=a;
-            assert!(b.min_element()>=0.0&&(b.element_sum()-1.0).abs()<1e-5);
-            assert!(r.is_finite()&&r>0.0);
-        });
-        assert_eq!(count,37);
-        assert!((area-0.14).abs()<1e-5);
-        cover_triangle(positions,1,|b,r,_|{
-            let c=positions[0]*b.x+positions[1]*b.y+positions[2]*b.z;
-            assert!(positions.iter().all(|p|p.distance(c)<=r));
-        });
-    }
 
     #[test]
     fn viewpoints_share_framing_but_capture_different_silhouettes() {

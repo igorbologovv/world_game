@@ -11,3 +11,4 @@ world-core = { workspace = true, features = ["runtime"] }
 noise.workspace = true
 world-regions.workspace = true
 
+igor-renderer-core = { path = "../igor-renderer-core" }
