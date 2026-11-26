@@ -19,7 +19,10 @@ use super::{impostor::{self, Portraits}, placement::Site, streaming::ForestStrea
     ForestModels, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
 
 const BUDGET: u32 = 3_500_000;
-const MAX_RECORDS: usize = 5_000_000;
+const MAX_RECORDS: usize = 7_500_000;
+const MAX_PATCHES:usize=900_000;
+pub(super) const ATLAS_SIDE:u32=512;
+const MAX_LAYERS:usize=256;
 const JOB_WIDTH: u32 = 1024;
 const WIDTHS: [f32;22] = [0.0,0.0625,0.09375,0.125,0.1875,0.25,0.375,0.5,0.625,0.75,0.875,1.0,1.25,1.5,1.75,2.0,2.5,3.0,3.5,4.0,8.0,16.0];
 pub(super) fn enabled()->bool {std::env::var("IGOR_POINT_FOREST").as_deref()==Ok("1")}
@@ -32,6 +35,24 @@ pub(super) struct Sample {
     pub color: Vec3,
     pub normal: Vec3,
     pub leaf: bool,
+    pub patch:u32,
+    pub covered:bool,
+}
+// Each source patch is 8 vec4s (128 bytes), identical to the WGSL layout.
+pub(super) struct PointBake {pub samples:Vec<Sample>,pub patches:Vec<[u32;32]>,pub layers:Vec<Arc<Vec<u8>>>}
+pub(super) fn raw_patch(positions:[Vec3;3],normals:[Vec3;3],uvs:[Vec2;3],tint:Vec4,layer:u32,normal_layer:Option<u32>,repeat:bool,cutoff:f32,tangent:Vec4)->Option<[u32;32]>{
+    let e=positions[1]-positions[0];let f=positions[2]-positions[0];
+    let cross=e.cross(f);let det=cross.length_squared();if det<1e-16{return None;}
+    let n=cross.normalize();let gu=f.cross(cross)/det;let gv=cross.cross(e)/det;
+    let du=uvs[1]-uvs[0];let dv=uvs[2]-uvs[0];
+    let enc=|v:Vec3|{let [x,y]=impostor::encode_normal(v.normalize_or_zero());u32::from(x)|(u32::from(y)<<8)};
+    let flags=u32::from(repeat)|(((cutoff.clamp(0.0,1.0)*255.0).round() as u32)<<8)|(normal_layer.map_or(0,|x|x+1)<<16);
+    let a=n.extend(n.dot(positions[0])).to_array().map(f32::to_bits);
+    let b=positions[0].to_array().map(f32::to_bits);let c=gu.to_array().map(f32::to_bits);let d=gv.to_array().map(f32::to_bits);
+    let t=tint.to_array().map(f32::to_bits);let k=tangent.to_array().map(f32::to_bits);
+    Some([a[0],a[1],a[2],a[3],b[0],b[1],b[2],layer,c[0],c[1],c[2],enc(normals[0]),d[0],d[1],d[2],enc(normals[1]),
+        uvs[0].x.to_bits(),uvs[0].y.to_bits(),du.x.to_bits(),du.y.to_bits(),dv.x.to_bits(),dv.y.to_bits(),enc(normals[2]),flags,
+        t[0],t[1],t[2],t[3],k[0],k[1],k[2],k[3]])
 }
 fn packed(s: Sample) -> UVec4 {
     let q = |v: f32| ((v*256.0).round().clamp(-32768.0,32767.0) as i16 as u16) as u32;
@@ -47,6 +68,7 @@ struct Aggregate { position:Vec3, color:Vec3, normal:Vec3, area:f32 }
 fn aggregate(samples: &[Sample], width: f32) -> Vec<UVec4> {
     let mut cells: BTreeMap<(i32,i32,i32,bool),Aggregate> = BTreeMap::new();
     for s in samples {
+        if !s.covered {continue;}
         let c = (s.position/width).floor().as_ivec3();
         let cell = cells.entry((c.x,c.y,c.z,s.leaf)).or_default();
         let a = s.radius*s.radius;
@@ -57,7 +79,7 @@ fn aggregate(samples: &[Sample], width: f32) -> Vec<UVec4> {
         (a.area>0.0).then(||packed(Sample {
             position:a.position/a.area,color:a.color/a.area,
             normal:a.normal.normalize_or_zero(),
-            radius:a.area.sqrt().min(width*0.86),leaf,
+            radius:a.area.sqrt().min(width*0.86),leaf,patch:0,covered:true,
         }))
     }).collect()
 }
@@ -78,6 +100,9 @@ impl GpuTree {
 #[derive(Resource)]
 pub(super) struct PointForest {
     geometry:Arc<Vec<UVec4>>,
+    patches:Arc<Vec<[u32;32]>>,
+    layers:Arc<Vec<Arc<Vec<u8>>>>,
+    textured:u32,
     templates:HashMap<usize,[Range;WIDTHS.len()]>,
     ready:Arc<AtomicBool>,
     status:Arc<AtomicU32>,
@@ -94,7 +119,7 @@ pub(super) struct PointForest {
 }
 impl Default for PointForest {
     fn default() -> Self {
-        Self{geometry:Arc::new(Vec::new()),templates:HashMap::new(),ready:Arc::new(AtomicBool::new(false)),
+        Self{geometry:Arc::new(Vec::new()),patches:Arc::new(Vec::new()),layers:Arc::new(Vec::new()),textured:0,templates:HashMap::new(),ready:Arc::new(AtomicBool::new(false)),
             status:Arc::new(AtomicU32::new(0)),submitted:Arc::new(AtomicU32::new(0)),rejected:HashMap::new(),candidates:0,eligible:0,
             trees:Vec::new(),jobs:Vec::new(),selected:0,baked_this_frame:false,
             budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000),threshold:2.2}
@@ -102,23 +127,40 @@ impl Default for PointForest {
 }
 impl PointForest {
     pub(super) fn begin_frame(&mut self) {
-        self.trees.clear();self.jobs.clear();self.selected=0;self.baked_this_frame=false;self.candidates=0;self.eligible=0;
+        self.trees.clear();self.jobs.clear();self.selected=0;self.textured=0;self.baked_this_frame=false;self.candidates=0;self.eligible=0;
     }
     fn ensure_template(&mut self, portraits:&Portraits, site:Site) -> Option<usize> {
         let variant=portraits.point_variant(site.species,site.variant);
         let tile=impostor::tile(site.species,variant);
         if !self.templates.contains_key(&tile) {
             if self.baked_this_frame || self.rejected.contains_key(&tile) { return None; }
-            let Some(samples)=portraits.point_samples(site.species,variant) else {return None;};
+            let Some(bake)=portraits.point_samples(site.species,variant) else {return None;};
+            let PointBake{samples,mut patches,layers}=bake;
             self.baked_this_frame=true;
             if samples.is_empty() || samples.iter().any(|s|s.position.abs().max_element()>=127.0) {
                 self.rejected.insert(tile,()); warn!("Point forest: invalid sample template {tile}");return None;
             }
             // Preserve full-detail samples, then allocate coarse ranges first.
             // Fine ranges may alias a resident coarser range to bound VRAM.
-            let raw:Vec<_>=samples.iter().copied().map(packed).collect();
+            let detailed=self.patches.len()+patches.len()<=MAX_PATCHES && self.layers.len()+layers.len()<=MAX_LAYERS;
+            let patch_base=self.patches.len() as u32;
+            let layer_base=self.layers.len() as u32;
+            let raw:Vec<_>=samples.iter().copied().filter(|s|detailed||s.covered).map(|s|{
+                let mut p=packed(s);
+                if detailed {p.z=patch_base+s.patch;p.w|=1<<17;}
+                p
+            }).collect();
             let cap=MAX_TEMPLATE_RECORDS.min(MAX_RECORDS.saturating_sub(self.geometry.len()));
             if raw.len()>=cap {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return None;}
+            if detailed {
+                for patch in &mut patches {
+                    patch[7]+=layer_base;
+                    let normal=patch[23]>>16;
+                    if normal!=0{patch[23]=(patch[23]&65535)|((normal+layer_base)<<16);}
+                }
+                Arc::make_mut(&mut self.patches).extend(patches);
+                Arc::make_mut(&mut self.layers).extend(layers);
+            }
             let storage=Arc::make_mut(&mut self.geometry);
             let start=storage.len();
             let mut ranges=[Range::default();WIDTHS.len()];
@@ -144,7 +186,11 @@ impl PointForest {
     }
     fn pick_range(&self,tile:usize,site:Site,distance:f32,focal:f32,threshold:f32)->Range {
         let levels=&self.templates[&tile];
-        let target=threshold*(distance-site.height()*0.35).max(0.1)/(focal.max(1.0)*site.scale.max(0.1));
+        // Keep close texture-bearing geometry; use increasingly coarse
+        // samples farther away to reserve the global budget for the foreground.
+        let far=1.0+2.0*super::lod::smoothstep(70.0,450.0,distance);
+        let near=0.52+0.48*super::lod::smoothstep(18.0,65.0,distance);
+        let target=threshold*far*near*(distance-site.height()*0.35).max(0.1)/(focal.max(1.0)*site.scale.max(0.1));
         let level=WIDTHS.iter().rposition(|&w|w<=target).unwrap_or(0);
         levels[level]
     }
@@ -163,6 +209,7 @@ impl PointForest {
             self.jobs.push(UVec4::new(index,first,(range.count-first).min(64),u32::from(upper)));
         }
         self.selected+=range.count;
+        if self.geometry[range.start as usize].w&(1<<17)!=0{self.textured+=range.count;}
         true
     }
     // Kept for the disabled legacy LOD code to compile; pure mode instead
@@ -276,8 +323,8 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         0=>"waiting for perspective render view",1=>"compiling pipelines",2=>"pipeline error (see terminal)",
         3=>"unsupported view/limits",4=>"ready",_=>"unknown",
     };
-    let msg=format!("IGOR ONLY | {status} | {} trees / {} points | {} visible / {} sites | {} templates | LOD {:.2}px | {} GPU trees",
-        forest.trees.len(),forest.selected,forest.eligible,forest.candidates,forest.templates.len(),forest.threshold,forest.submitted.load(Ordering::Acquire));
+    let msg=format!("IGOR ONLY | {status} | {} trees / {} points ({} UV) | {} visible / {} sites | {} templates | LOD {:.2}px | {} GPU trees",
+        forest.trees.len(),forest.selected,forest.textured,forest.eligible,forest.candidates,forest.templates.len(),forest.threshold,forest.submitted.load(Ordering::Acquire));
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
 }
 fn single_sample_camera(mut cameras:Query<&mut Msaa,With<WorldCamera>>) {
@@ -286,7 +333,7 @@ fn single_sample_camera(mut cameras:Query<&mut Msaa,With<WorldCamera>>) {
 
 #[derive(Resource)]
 struct ExtractedForest {
-    geometry:Arc<Vec<UVec4>>, ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
+    geometry:Arc<Vec<UVec4>>,patches:Arc<Vec<[u32;32]>>,layers:Arc<Vec<Arc<Vec<u8>>>>, ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
     trees:Vec<GpuTree>,jobs:Vec<UVec4>,
 }
 #[derive(Component)]
@@ -298,7 +345,7 @@ fn extract_frame(
     lights:Extract<Query<(&DirectionalLight,&Transform)>>,
     time:Extract<Res<Time>>,
 ) {
-    commands.insert_resource(ExtractedForest{geometry:forest.geometry.clone(),ready:forest.ready.clone(),status:forest.status.clone(),submitted:forest.submitted.clone(),
+    commands.insert_resource(ExtractedForest{geometry:forest.geometry.clone(),patches:forest.patches.clone(),layers:forest.layers.clone(),ready:forest.ready.clone(),status:forest.status.clone(),submitted:forest.submitted.clone(),
         trees:forest.trees.clone(),jobs:forest.jobs.clone()});
     let sun=lights.iter().max_by(|a,b|a.0.illuminance.total_cmp(&b.0.illuminance));
     let mut perspective=false;
@@ -326,7 +373,8 @@ fn init_pipelines(mut commands:Commands, assets:Res<AssetServer>,cache:Res<Pipel
     let compute=BindGroupLayoutDescriptor::new("point forest compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
             storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),
-            storage_buffer_read_only_sized(false,None),storage_buffer_sized(false,None),storage_buffer_sized(false,None))));
+            storage_buffer_read_only_sized(false,None),storage_buffer_sized(false,None),storage_buffer_sized(false,None),
+            storage_buffer_read_only_sized(false,None),texture_2d_array(TextureSampleType::Float{filterable:true}),sampler(SamplerBindingType::Filtering))));
     let composite=BindGroupLayoutDescriptor::new("point forest composite",&BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),storage_buffer_read_only_sized(false,None))));
     let shader=assets.load("shaders/point_forest.wgsl");
@@ -347,13 +395,13 @@ fn init_pipelines(mut commands:Commands, assets:Res<AssetServer>,cache:Res<Pipel
 }
 struct GpuFrame {
     uploaded:Option<Arc<Vec<UVec4>>>,
-    points:RawBufferVec<[u32;4]>,trees:RawBufferVec<[u32;12]>,jobs:RawBufferVec<[u32;4]>,
+    points:RawBufferVec<[u32;4]>,patches:RawBufferVec<[u32;32]>,atlas:Option<(u32,usize,Texture,TextureView,Sampler)>,trees:RawBufferVec<[u32;12]>,jobs:RawBufferVec<[u32;4]>,
     uniform:UniformBuffer<FrameUniform>,screen:Option<(u64,Buffer)>,projection:Option<(u64,Buffer)>,
 }
 impl Default for GpuFrame {
     fn default() -> Self {
         Self{uploaded:None,
-            points:RawBufferVec::new(BufferUsages::STORAGE),
+            points:RawBufferVec::new(BufferUsages::STORAGE),patches:RawBufferVec::new(BufferUsages::STORAGE),atlas:None,
             trees:RawBufferVec::new(BufferUsages::STORAGE),
             jobs:RawBufferVec::new(BufferUsages::STORAGE),
             uniform:UniformBuffer::default(),screen:None,projection:None}
@@ -397,8 +445,31 @@ fn render_points(
         state.points.clear();
         state.points.extend(forest.geometry.iter().map(|p|p.to_array()));
         state.points.write_buffer(&device,&queue);
+        state.patches.clear();
+        state.patches.extend(forest.patches.iter().copied());
+        if state.patches.is_empty(){state.patches.push([0;32]);}
+        state.patches.write_buffer(&device,&queue);
         state.uploaded=Some(forest.geometry.clone());
     }
+    // Grow the texture array geometrically, upload only newly baked layers.
+    let layer_count=forest.layers.len();
+    let capacity=(layer_count.max(1) as u32).next_power_of_two();
+    if state.atlas.as_ref().is_none_or(|(cap,_,_,_,_)|*cap<capacity){
+        let texture=device.create_texture(&TextureDescriptor{label:Some("point source texture array"),
+            size:Extent3d{width:ATLAS_SIDE,height:ATLAS_SIDE,depth_or_array_layers:capacity},
+            mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:TextureFormat::Rgba8Unorm,
+            usage:TextureUsages::TEXTURE_BINDING|TextureUsages::COPY_DST,view_formats:&[]});
+        let view=texture.create_view(&TextureViewDescriptor{dimension:Some(TextureViewDimension::D2Array),..default()});
+        let sampler=device.create_sampler(&SamplerDescriptor{min_filter:FilterMode::Linear,mag_filter:FilterMode::Linear,..default()});
+        state.atlas=Some((capacity,0,texture,view,sampler));
+    }
+    let (_,uploaded,texture,_,_)=state.atlas.as_mut().unwrap();
+    for (i,bytes) in forest.layers.iter().enumerate().skip(*uploaded){
+        queue.write_texture(TexelCopyTextureInfo{texture, mip_level:0,origin:Origin3d{x:0,y:0,z:i as u32},aspect:TextureAspect::All},
+            bytes,TexelCopyBufferLayout{offset:0,bytes_per_row:Some(ATLAS_SIDE*4),rows_per_image:Some(ATLAS_SIDE)},
+            Extent3d{width:ATLAS_SIDE,height:ATLAS_SIDE,depth_or_array_layers:1});
+    }
+    *uploaded=layer_count;
     state.trees.clear();
     state.trees.extend(forest.trees.iter().map(|tree|tree.words()));
     state.trees.write_buffer(&device,&queue);
@@ -426,9 +497,10 @@ fn render_points(
     let projection=&state.projection.as_ref().unwrap().1;
     let screen=&state.screen.as_ref().unwrap().1;
     let uniform=state.uniform.binding().unwrap();
+    let (_,_,_,atlas,sampler)=state.atlas.as_ref().unwrap();
     let group=device.create_bind_group("point forest compute",&cache.get_bind_group_layout(&pipelines.compute),
         &BindGroupEntries::sequential((uniform.clone(),state.points.binding().unwrap(),state.trees.binding().unwrap(),
-            state.jobs.binding().unwrap(),screen.as_entire_binding(),projection.as_entire_binding())));
+            state.jobs.binding().unwrap(),screen.as_entire_binding(),projection.as_entire_binding(),state.patches.binding().unwrap(),atlas,sampler)));
     let composite=device.create_bind_group("point forest composite",&cache.get_bind_group_layout(&pipelines.composite),
         &BindGroupEntries::sequential((uniform,screen.as_entire_binding())));
     let encoder=ctx.command_encoder();
@@ -460,8 +532,16 @@ mod tests {
         assert_eq!(&words[4..8], &[0,0,0,1.0f32.to_bits()]);
         assert_eq!(&words[8..], &[5,6,7,8]);
     }
+    #[test] fn patch_barycentric_layout(){
+        let p=raw_patch([Vec3::ZERO,Vec3::X,Vec3::Y],[Vec3::Z;3],[Vec2::ZERO,Vec2::X,Vec2::Y],Vec4::ONE,3,Some(4),true,0.5,Vec4::X).unwrap();
+        assert_eq!(std::mem::size_of_val(&p),128);
+        assert_eq!(p[7],3);
+        assert_eq!(f32::from_bits(p[8]),1.0);
+        assert_eq!(f32::from_bits(p[13]),1.0);
+        assert_eq!(p[23]>>16,5);
+    }
     #[test] fn packed_records_are_16_bytes_and_signed() {
-        let s=Sample{position:Vec3::new(-1.0,2.0,3.0),radius:0.1,color:Vec3::ONE,normal:Vec3::Y,leaf:true};
+        let s=Sample{position:Vec3::new(-1.0,2.0,3.0),radius:0.1,color:Vec3::ONE,normal:Vec3::Y,leaf:true,patch:0,covered:true};
         let p=packed(s);
         assert_eq!(std::mem::size_of::<UVec4>(),16);
         assert_eq!(p.x as u16 as i16,-256);

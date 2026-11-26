@@ -86,3 +86,18 @@ label requires a legacy entity and is absent in pure mode. While models or GPU
 pipelines load the point forest may be temporarily empty. The standalone
 per-pixel UV/alpha material system and directional shadow field are still not
 fully ported; terrain canopy shading remains enabled. GPU testing required.
+
+## Textured near splats
+
+Raw 16-byte samples now carry source patch IDs instead of baked color.
+The patch stores the surface plane, barycentric gradients, UV basis,
+vertex normals, material tint and optional tangent-space normal map.
+A shared 512x512 texture array contains resampled source images;
+alpha cutout and source triangle clipping happen before depth publication,
+with an early depth check before texture fetches. Resolve reads the real
+per-pixel albedo and normal. Coarse LODs remain baked color/normal points.
+The raw baker targets 78k samples before alpha rejection (previously 45k),
+with per-template memory limits and coarser far selection. Atlas and patch
+buffers grow on demand, with caps of 256 layers and 900k patches. If a
+material cap is exceeded that template retains colored points, never a mesh.
+This preserves the pure point path and Bevy reverse-Z depth.
