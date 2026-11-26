@@ -1,0 +1,67 @@
+
+name: Trello PR Integration
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions: {}
+
+jobs:
+  trello-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Link PR to Trello card
+        env:
+          TRELLO_API_KEY: ${{ secrets.TRELLO_API_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
+          TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PR_TITLE" =~ \[DEV-([0-9]+)\] ]]; then
+            TASK_ID="${BASH_REMATCH[1]}"
+          else
+            echo "No Trello task ID found."
+            exit 0
+          fi
+
+          CARDS=$(curl -fsS -G \
+            "https://api.trello.com/1/boards/$TRELLO_BOARD_ID/cards" \
+            --data-urlencode "key=$TRELLO_API_KEY" \
+            --data-urlencode "token=$TRELLO_TOKEN" \
+            --data-urlencode "fields=id,idShort,name")
+
+          CARD_ID=$(echo "$CARDS" | jq -r \
+            --argjson id "$TASK_ID" \
+            '.[] | select(.idShort == $id) | .id')
+
+          if [ -z "$CARD_ID" ]; then
+            echo "Trello card not found."
+            exit 1
+          fi
+
+          ATTACHMENTS=$(curl -fsS -G \
+            "https://api.trello.com/1/cards/$CARD_ID/attachments" \
+            --data-urlencode "key=$TRELLO_API_KEY" \
+            --data-urlencode "token=$TRELLO_TOKEN")
+
+          if echo "$ATTACHMENTS" | jq -e \
+            --arg url "$PR_URL" \
+            'any(.[]; .url == $url)' > /dev/null; then
+            echo "PR already attached."
+            exit 0
+          fi
+
+          curl -fsS -X POST \
+            "https://api.trello.com/1/cards/$CARD_ID/attachments" \
+            --data-urlencode "key=$TRELLO_API_KEY" \
+            --data-urlencode "token=$TRELLO_TOKEN" \
+            --data-urlencode "url=$PR_URL" \
+            --data-urlencode "name=$PR_TITLE" \
+            -o /dev/null
+
+          echo "Pull request linked successfully."
