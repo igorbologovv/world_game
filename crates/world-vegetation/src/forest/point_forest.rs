@@ -60,14 +60,18 @@ fn aggregate(samples: &[Sample], width: f32) -> Vec<UVec4> {
 }
 #[derive(Clone, Copy, Default)]
 struct Range { start:u32, count:u32 }
-#[derive(Clone, Copy, ShaderType)]
+#[derive(Clone, Copy)]
 struct GpuTree { origin_scale:Vec4, rotation:Vec4, range:UVec4 }
-#[derive(Clone, Default, ShaderType)]
-struct PointArray { #[size(runtime)] data:Vec<UVec4> }
-#[derive(Clone, Default, ShaderType)]
-struct TreeArray { #[size(runtime)] data:Vec<GpuTree> }
-#[derive(Clone, Default, ShaderType)]
-struct JobArray { #[size(runtime)] data:Vec<UVec4> }
+impl GpuTree {
+    // Exact WGSL std430 layout: two vec4<f32> followed by vec4<u32>.
+    // Use raw words rather than runtime-array ShaderType derive.
+    fn words(self) -> [u32;12] {
+        let a=self.origin_scale.to_array().map(f32::to_bits);
+        let b=self.rotation.to_array().map(f32::to_bits);
+        let c=self.range.to_array();
+        [a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3],c[0],c[1],c[2],c[3]]
+    }
+}
 #[derive(Resource)]
 pub(super) struct PointForest {
     geometry:Arc<Vec<UVec4>>,
@@ -209,11 +213,19 @@ fn init_pipelines(mut commands:Commands, assets:Res<AssetServer>,cache:Res<Pipel
     });
     commands.insert_resource(Pipelines{compute,composite,depth,owner,resolve,draw});
 }
-#[derive(Default)]
 struct GpuFrame {
     uploaded:Option<Arc<Vec<UVec4>>>,
-    points:StorageBuffer<PointArray>,trees:StorageBuffer<TreeArray>,jobs:StorageBuffer<JobArray>,
+    points:RawBufferVec<[u32;4]>,trees:RawBufferVec<[u32;12]>,jobs:RawBufferVec<[u32;4]>,
     uniform:UniformBuffer<FrameUniform>,screen:Option<(u64,Buffer)>,
+}
+impl Default for GpuFrame {
+    fn default() -> Self {
+        Self{uploaded:None,
+            points:RawBufferVec::new(BufferUsages::STORAGE),
+            trees:RawBufferVec::new(BufferUsages::STORAGE),
+            jobs:RawBufferVec::new(BufferUsages::STORAGE),
+            uniform:UniformBuffer::default(),screen:None}
+    }
 }
 fn render_points(
     view:ViewQuery<(&PointCamera,&ExtractedView,&ViewTarget,&ViewDepthStencilTexture,&Msaa)>,
@@ -234,12 +246,17 @@ fn render_points(
     forest.ready.store(true,Ordering::Release);
     if forest.jobs.is_empty(){return;}
     if state.uploaded.as_ref().is_none_or(|old|!Arc::ptr_eq(old,&forest.geometry)){
-        state.points.set(PointArray{data:(*forest.geometry).clone()});
+        state.points.clear();
+        state.points.extend(forest.geometry.iter().map(|p|p.to_array()));
         state.points.write_buffer(&device,&queue);
         state.uploaded=Some(forest.geometry.clone());
     }
-    state.trees.set(TreeArray{data:forest.trees.clone()});state.trees.write_buffer(&device,&queue);
-    state.jobs.set(JobArray{data:forest.jobs.clone()});state.jobs.write_buffer(&device,&queue);
+    state.trees.clear();
+    state.trees.extend(forest.trees.iter().map(|tree|tree.words()));
+    state.trees.write_buffer(&device,&queue);
+    state.jobs.clear();
+    state.jobs.extend(forest.jobs.iter().map(|job|job.to_array()));
+    state.jobs.write_buffer(&device,&queue);
     let count=forest.jobs.len() as u32;
     state.uniform.set(FrameUniform{clip:camera.clip,viewport:v,params:UVec4::new(count,JOB_WIDTH,0,0),
         sun_time:camera.sun.extend(camera.elapsed),sunlight:camera.sunlight.extend(0.0)});
@@ -275,6 +292,14 @@ fn render_points(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn tree_words_match_wgsl_layout() {
+        let t=GpuTree{origin_scale:Vec4::new(1.0,2.0,3.0,4.0),rotation:Vec4::W,range:UVec4::new(5,6,7,8)};
+        let words=t.words();
+        assert_eq!(std::mem::size_of_val(&words),48);
+        assert_eq!(&words[..4], &[1.0f32.to_bits(),2.0f32.to_bits(),3.0f32.to_bits(),4.0f32.to_bits()]);
+        assert_eq!(&words[4..8], &[0,0,0,1.0f32.to_bits()]);
+        assert_eq!(&words[8..], &[5,6,7,8]);
+    }
     #[test] fn packed_records_are_16_bytes_and_signed() {
         let s=Sample{position:Vec3::new(-1.0,2.0,3.0),radius:0.1,color:Vec3::ONE,normal:Vec3::Y,leaf:true};
         let p=packed(s);
