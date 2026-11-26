@@ -402,7 +402,7 @@ impl PointScene {
             if id==0{continue;}
             let ids=[(id&65535)-1,(id>>16)-1];
             let models=ids.map(|id|(id/4) as usize);
-            let trees=std::array::from_fn(|i|tree_instance(geo.batches[models[i]],x,z,ids[i],i==1));
+            let trees=std::array::from_fn(|i|tree_instance(scene.geometry.batches[models[i]],x,z,ids[i],i==1));
             let i=(x+side*z) as usize;
             sites[i]=Some(Site{trees,models});
             for t in 0..2 {

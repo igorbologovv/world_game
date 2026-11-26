@@ -88,7 +88,7 @@ impl TextureAtlas {
         if let Some(&rect) = self.sources.get(&key) {
             return Ok(rect);
         }
-        let mut pixels = match source.source() {
+        let pixels = match source.source() {
             Source::Uri { .. } => image::open(&key.0)?,
             Source::View { view, .. } => {
                 image::load_from_memory(&blob[view.offset()..view.offset() + view.length()])?
