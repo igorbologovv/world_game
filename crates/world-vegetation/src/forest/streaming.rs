@@ -112,6 +112,8 @@ struct ProxyAtlas {
 
 #[derive(Resource, Default)]
 pub(super) struct ForestStream {
+    construction_revision: u64,
+    point_revision: u64,
     nodes: HashMap<NodeKey, Node>,
     order: Vec<NodeKey>,
     mask: HashMap<PatchKey, (f32, f32)>,
@@ -139,6 +141,18 @@ pub(super) struct StreamStats {
 }
 
 impl ForestStream {
+    pub(super) fn point_revision(&self) -> u64 {
+        self.point_revision
+    }
+
+    // The compute renderer consumes the canonical placement arrays directly.
+    // No ECS render entity or billboard has to exist for a tree to be drawn.
+    pub(super) fn point_sites(&self) -> impl Iterator<Item=Site> + '_ {
+        self.nodes.values().flat_map(|node| &node.leaves)
+            .filter_map(|leaf| leaf.sites.as_deref())
+            .flat_map(|sites| sites.iter().copied())
+    }
+
     pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
         self.nodes
             .values()
@@ -206,17 +220,22 @@ impl ForestStream {
         candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         candidates.truncate(MAX_NODES);
         let wanted: HashSet<_> = candidates.iter().map(|&(_, key, _)| key).collect();
+        let mut removed_sites = false;
         self.nodes.retain(|key, node| {
             if wanted.contains(key) {
                 return true;
             }
             node.parent.retire(commands, &mut self.retiring_batches);
             for leaf in &mut node.leaves {
+                removed_sites |= leaf.sites.as_ref().is_some_and(|sites| !sites.is_empty());
                 leaf.impostor.retire(commands, &mut self.retiring_batches);
                 self.retiring.append(&mut leaf.trees);
             }
             false
         });
+        if removed_sites {
+            self.point_revision += 1;
+        }
         self.order.clear();
         for (_, key, location) in candidates {
             self.order.push(key);
@@ -252,16 +271,21 @@ impl ForestStream {
         clearing: Option<&ForestClearing>,
     ) {
         let mut pending = 0;
+        let mut added_sites = false;
         for leaf in self.nodes.values_mut().flat_map(|node| &mut node.leaves) {
             let ready = leaf
                 .placement
                 .as_mut()
                 .and_then(|task| block_on(poll_once(task)));
             if let Some(sites) = ready {
+                added_sites |= !sites.is_empty();
                 leaf.placement = None;
                 leaf.sites = Some(sites);
             }
             pending += usize::from(leaf.placement.is_some());
+        }
+        if added_sites {
+            self.point_revision += 1;
         }
         let mut budget = PLACEMENT_JOBS.saturating_sub(pending);
         let pool = AsyncComputeTaskPool::get();
@@ -392,6 +416,7 @@ impl ForestStream {
             })
             .collect();
         requests.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.key.cmp(&b.2.key)));
+        let max_details = if super::point_forest::enabled() { 900 } else { MAX_DETAILS };
         let mut admitted = 0;
         let mut resident = requests
             .iter()
@@ -403,7 +428,7 @@ impl ForestStream {
             let sites = leaf.sites.as_ref().unwrap();
             let margin = PATCH_METERS * if leaf.trees.is_empty() { 0.79 } else { 0.95 };
             let wanted =
-                distance <= f64::from(band.y) + margin && admitted + sites.len() <= MAX_DETAILS;
+                distance <= f64::from(band.y) + margin && admitted + sites.len() <= max_details;
             if wanted {
                 admitted += sites.len();
                 let begin = leaf.trees.len();
@@ -411,7 +436,7 @@ impl ForestStream {
                     .len()
                     .saturating_sub(begin)
                     .min(spawn_budget)
-                    .min(MAX_DETAILS.saturating_sub(resident));
+                    .min(max_details.saturating_sub(resident));
                 for &site in &sites[begin..begin + count] {
                     leaf.trees
                         .push(spawn_tree(commands, root, frame, leaf.key, site));
@@ -567,6 +592,25 @@ pub(super) fn stream(
     let Some(up) = eye.try_normalize() else {
         return;
     };
+    if forest.construction_revision != heights.construction_revision() {
+        forest.construction_revision = heights.construction_revision();
+        forest.point_revision += 1;
+        let mut old_nodes = std::mem::take(&mut forest.nodes);
+        let mut retiring = std::mem::take(&mut forest.retiring);
+        let mut retiring_batches = std::mem::take(&mut forest.retiring_batches);
+        for node in old_nodes.values_mut() {
+            node.parent.retire(&mut commands, &mut retiring_batches);
+            for leaf in &mut node.leaves {
+                leaf.impostor.retire(&mut commands, &mut retiring_batches);
+                retiring.append(&mut leaf.trees);
+            }
+        }
+        forest.order.clear();
+        forest.mask.clear();
+        for entity in retiring.into_iter().chain(retiring_batches) {
+            commands.entity(entity).despawn();
+        }
+    }
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
     let band = View::new(view, projection).impostor_band(&settings);
     let range = settings.impostor_range.clamp(200.0, 600.0);
@@ -574,6 +618,17 @@ pub(super) fn stream(
     let forest_range = forest_band.y;
     let preload = settings.preload_margin.clamp(90.0, 420.0);
     let step = fade_step(&time, &settings);
+    if super::point_forest::enabled() {
+        // Only placement/discovery runs in the pure point path. The atlas,
+        // proxy mesh jobs, individual mesh entities and fade masks are bypassed.
+        forest.plan(&mut commands,eye,up,forward,time.elapsed_secs_f64(),forest_range+preload,&heights);
+        forest.allocate_sites(&heights,eye,clearing.as_deref());
+        let (trees,unsampled,jobs)=forest.nodes.values().flat_map(|node|&node.leaves)
+            .fold((0usize,0usize,0usize),|(n,u,j),leaf|
+                (n+leaf.sites.as_ref().map_or(0,|s|s.len()),u+usize::from(leaf.sites.is_none()),j+usize::from(leaf.placement.is_some())));
+        forest.stats=StreamStats{nodes:forest.nodes.len(),trees,unsampled,jobs,..default()};
+        return;
+    }
     // Build a single atlas after the authored LOD0 sources resolve. A baked
     // fallback must never replace an authored crown after its handoff.
     if forest.atlas.is_none()
@@ -581,7 +636,13 @@ pub(super) fn stream(
         && !hero_loading.is_pending()
         && !tree_loading.is_pending()
     {
-        let portraits = std::mem::take(&mut models.portraits);
+        // The point renderer shares these Arc<Source> records. Moving the
+        // collection out permanently left it with only procedural fallbacks.
+        let portraits = if super::point_forest::enabled() {
+            models.portraits.clone()
+        } else {
+            std::mem::take(&mut models.portraits)
+        };
         let directory = world_assets.directory().to_owned();
         forest.atlas_task = Some(
             AsyncComputeTaskPool::get()

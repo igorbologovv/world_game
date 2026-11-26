@@ -1,9 +1,5 @@
 //! Game-specific free camera controller: no dependency on the old terrain renderer.
-use bevy::{
-    input::mouse::MouseMotion,
-    math::DVec3,
-    prelude::*,
-};
+use bevy::{input::mouse::MouseMotion, math::DVec3, prelude::*};
 use world_core::runtime::{GridTransform, ReferenceFrames};
 
 #[derive(Component)]
@@ -46,21 +42,22 @@ pub(super) fn camera_controller(
     let Some(grid) = frames.parent_frame(entity) else {
         return;
     };
-    let x = (keys.pressed(KeyCode::ArrowRight) as i32
-        - keys.pressed(KeyCode::ArrowLeft) as i32) as f64;
-    let y = (keys.pressed(KeyCode::PageUp) as i32
-        - keys.pressed(KeyCode::PageDown) as i32) as f64;
-    let z = (keys.pressed(KeyCode::ArrowDown) as i32
-        - keys.pressed(KeyCode::ArrowUp) as i32) as f64;
+    let x =
+        (keys.pressed(KeyCode::ArrowRight) as i32 - keys.pressed(KeyCode::ArrowLeft) as i32) as f64;
+    let y = (keys.pressed(KeyCode::PageUp) as i32 - keys.pressed(KeyCode::PageDown) as i32) as f64;
+    let z =
+        (keys.pressed(KeyCode::ArrowDown) as i32 - keys.pressed(KeyCode::ArrowUp) as i32) as f64;
     let delta = mouse.read().map(|m| -m.delta).sum::<Vec2>();
     let dt = time.delta_secs_f64().min(0.1);
     let speed = controller.translation_speed;
     let target = position.transform.rotation.as_dquat()
-        * DVec3::new(x, y, z).normalize_or_zero() * speed * dt;
-    controller.translation_velocity =
-        controller.translation_velocity.lerp(target, 0.20);
-    controller.rotation_velocity =
-        controller.rotation_velocity.lerp(delta * (0.1 * dt as f32), 0.20);
+        * DVec3::new(x, y, z).normalize_or_zero()
+        * speed
+        * dt;
+    controller.translation_velocity = controller.translation_velocity.lerp(target, 0.20);
+    controller.rotation_velocity = controller
+        .rotation_velocity
+        .lerp(delta * (0.1 * dt as f32), 0.20);
 
     let (cell, local) = grid.translation_to_grid(controller.translation_velocity);
     *position.cell += cell;

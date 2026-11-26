@@ -26,7 +26,10 @@ fn spawn_stats(mut commands: Commands) {
     commands.spawn((
         FrameStatsText,
         Text::new("FPS: ... | Frame: ..."),
-        TextFont { font_size: FontSize::Px(15.0), ..default() },
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
         TextColor(Color::srgb(0.95, 0.95, 0.9)),
         Node {
             position_type: PositionType::Absolute,

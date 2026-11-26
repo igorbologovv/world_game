@@ -132,6 +132,7 @@ enum Edit {
     Roots,
     Split(Tile),
     Merge(Tile),
+    Refresh(Tile),
 }
 
 impl Edit {
@@ -140,6 +141,7 @@ impl Edit {
             Self::Roots => 6,
             Self::Split(_) => 4,
             Self::Merge(_) => 1,
+            Self::Refresh(_) => 1,
         }
     }
 
@@ -151,6 +153,9 @@ impl Edit {
             }
             Self::Merge(tile) => {
                 reserved.extend(tile.children());
+            }
+            Self::Refresh(tile) => {
+                reserved.insert(tile);
             }
         }
     }
@@ -191,6 +196,8 @@ pub(super) struct TerrainSurface {
     // their mesh or resampling procedural elevation on every merge scan.
     parents: HashMap<Tile, DVec3>,
     pending: Vec<TerrainJob>,
+    construction_revision: u64,
+    refresh: Vec<Tile>,
 }
 
 impl TerrainSurface {
@@ -201,6 +208,8 @@ impl TerrainSurface {
             leaves: HashMap::new(),
             parents: HashMap::new(),
             pending: Vec::new(),
+            construction_revision: 0,
+            refresh: Vec::new(),
         }
     }
 
@@ -212,6 +221,7 @@ impl TerrainSurface {
                 Edit::Roots => (0..6).map(Tile::root).collect(),
                 Edit::Split(tile) => tile.children().into(),
                 Edit::Merge(tile) => vec![tile],
+                Edit::Refresh(tile) => vec![tile],
             };
             tiles
                 .into_iter()
@@ -244,10 +254,40 @@ impl TerrainSurface {
                         .iter()
                         .all(|child| self.leaves.contains_key(child))
             }),
+            Edit::Refresh(tile) => self.leaves.contains_key(&tile),
         }
     }
 
     fn plan(&mut self, view: LodView, heights: &SurfaceHeights) {
+        if self.construction_revision != heights.construction_revision() {
+            self.construction_revision = heights.construction_revision();
+            self.pending.clear();
+            let edits = heights.construction_edits();
+            self.refresh = self
+                .leaves
+                .iter()
+                .filter_map(|(&tile, chunk)| {
+                    let width = RADIUS * 1.65 * tile.unit();
+                    edits
+                        .iter()
+                        .any(|edit| {
+                            let center = edit.center.normalize() * RADIUS;
+                            let leaf = chunk.anchor.normalize() * RADIUS;
+                            center.distance(leaf)
+                                < width + edit.half_width.max(edit.half_height) + edit.blend
+                        })
+                        .then_some(tile)
+                })
+                .collect();
+        }
+        while self.pending.len() < MAX_JOBS {
+            let Some(tile) = self.refresh.pop() else {
+                break;
+            };
+            if self.leaves.contains_key(&tile) {
+                self.request(Edit::Refresh(tile), heights);
+            }
+        }
         if self.leaves.is_empty() {
             if self.pending.is_empty() {
                 self.request(Edit::Roots, heights);
@@ -358,6 +398,9 @@ pub(super) fn stream(
                 bounds,
                 mesh,
             } = prepared;
+            if matches!(edit, Edit::Refresh(_)) {
+                terrain.retire(tile, &mut commands, &mut meshes);
+            }
             let (cell, translation) = frame.translation_to_grid(anchor);
             let mesh = meshes.add(mesh);
             let entity = root
@@ -394,6 +437,7 @@ pub(super) fn stream(
                 }
                 terrain.parents.remove(&parent);
             }
+            Edit::Refresh(_) => {}
         }
     }
     terrain.plan(view, &heights);

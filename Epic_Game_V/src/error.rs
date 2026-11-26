@@ -105,8 +105,8 @@ pub fn map_population_increase_error(error: sqlx::Error) -> ApiError {
             }
             Some("P1002") => {
                 return ApiError::conflict(
-                    "insufficient_mt",
-                    "not enough MT to increase population",
+                    "insufficient_ke_tse",
+                    "not enough KE-TSE to increase population",
                 );
             }
             Some("P1003") => {

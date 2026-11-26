@@ -5,17 +5,15 @@ mod placement;
 use std::collections::{HashMap, HashSet};
 
 use bevy::{
-    math::DVec3,
-    pbr::{
-        ExtendedMaterial, MaterialExtension, MaterialPlugin,
-    },
-    prelude::*,
     asset::RenderAssetUsages,
-    shader::ShaderRef,
     camera::primitives::{Aabb, MeshAabb},
     light::{NotShadowCaster, NotShadowReceiver},
+    math::DVec3,
+    pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin},
+    prelude::*,
     reflect::TypePath,
     render::render_resource::AsBindGroup,
+    shader::ShaderRef,
 };
 use world_core::{
     planet::RADIUS,
@@ -110,9 +108,7 @@ impl Plugin for FernPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FernSettings>()
             .init_resource::<FernWorld>()
-            .add_plugins(MaterialPlugin::<BatchMaterial> {
-                ..default()
-            })
+            .add_plugins(MaterialPlugin::<BatchMaterial> { ..default() })
             .add_systems(Startup, assets::request)
             .add_systems(
                 Update,
@@ -198,6 +194,7 @@ pub(super) struct Metrics {
 
 #[derive(Resource, Default)]
 pub(super) struct FernWorld {
+    construction_revision: u64,
     chunks: HashMap<Patch, Option<Chunk>>,
     order: Vec<Patch>,
     retiring: Vec<Entity>,
@@ -430,16 +427,23 @@ fn stream(
         return;
     };
     let eye = frame.grid_position_double(&grid.cell, &grid.transform);
+    if world.construction_revision != heights.construction_revision() {
+        world.construction_revision = heights.construction_revision();
+        for chunk in world.chunks.drain().filter_map(|(_, chunk)| chunk) {
+            commands.entity(chunk.entity).despawn();
+            for fern in chunk.plants {
+                for slot in fern.details.into_iter().flatten() {
+                    commands.entity(slot.entity).despawn();
+                }
+            }
+        }
+        world.order.clear();
+        world.last_eye = None;
+    }
     let bands = settings.distances();
     let outer = bands[FAR];
     let reach = f64::from(outer + settings.preload_margin.clamp(10.0, 65.0)) + PATCH_ALLOWANCE;
-    world.plan(
-        &mut commands,
-        eye,
-        reach,
-        &heights,
-        time.elapsed_secs_f64(),
-    );
+    world.plan(&mut commands, eye, reach, &heights, time.elapsed_secs_f64());
     world.metrics.waiting = world.prepare(
         &mut commands,
         &root,
@@ -537,7 +541,9 @@ fn stream(
                             slot.mask = mask;
                             let material =
                                 shared_material(&mut world.materials, &mut materials, models, mask);
-                            commands.entity(slot.entity).insert(MeshMaterial3d(material));
+                            commands
+                                .entity(slot.entity)
+                                .insert(MeshMaterial3d(material));
                         }
                     }
                     (None, Some(mask)) if spawns > 0 => {

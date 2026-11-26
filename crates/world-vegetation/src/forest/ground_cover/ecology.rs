@@ -204,6 +204,9 @@ fn weighted(weights: &[f32], rng: &mut Random) -> Option<usize> {
 }
 
 fn land(heights: &SurfaceHeights, up: DVec3) -> Option<(f64, f32, Vec3)> {
+    if heights.construction_clears(up) {
+        return None;
+    }
     let elevation = heights.sample(up)?;
     if !(WATER_SURFACE_ELEVATION + 0.28..=3300.0).contains(&elevation)
         || heights.open_water_at(up, elevation).is_some()

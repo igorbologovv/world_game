@@ -62,6 +62,19 @@ impl Default for Portraits {
 }
 
 impl Portraits {
+    /// Bake shared point templates from the same material/mesh source
+    /// used by the existing impostor baker. Missing authored assets
+    /// deliberately keep their original mesh fallback until loaded.
+    pub(super) fn point_variant(&self, species: Species, variant: usize) -> usize {
+        if self.0[tile(species,variant)].is_some() {variant} else {variant % species.stock_variants()}
+    }
+    pub(super) fn planet_input(&self,species:Species,variant:usize)->igor_renderer::planetary::InputTemplate{
+        let variant=self.point_variant(species,variant);
+        let tile=tile(species,variant);
+        if let Some(source)=&self.0[tile]{return source.planet_input(tile);}
+        Source::procedural(species,variant,Arc::new(textures::bark_texture()),Arc::new(textures::canopy_texture(species))).planet_input(tile)
+    }
+
     pub fn insert(&mut self, species: Species, variant: usize, source: Source) {
         self.0[tile(species, variant)] = Some(Arc::new(source));
     }
@@ -211,6 +224,18 @@ struct MappedNormals {
 }
 
 impl Source {
+    fn planet_input(&self,tile:usize)->igor_renderer::planetary::InputTemplate{
+        use igor_renderer::planetary::{InputTemplate,InputPart,InputImage};
+        let image=|i:&Image|{let s=i.texture_descriptor.size;InputImage{width:s.width,height:s.height,
+            rgba:i.data.as_ref().expect("CPU source texture")[..(s.width*s.height*4) as usize].to_vec()}};
+        let parts=self.parts.iter().enumerate().map(|(i,p)|InputPart{
+            positions:p.mesh.positions.clone(),normals:p.mesh.normals.clone(),uvs:p.mesh.uvs.clone(),indices:p.mesh.indices.clone(),
+            colors:p.mesh.colors.clone(),tint:p.tint.to_array(),diffuse:image(&p.diffuse),normal_map:p.mapped_normals.as_ref().map(|m|image(&m.texture)),
+            repeat:p.repeat,cutoff:if i==0{-1.0}else{p.cutoff},foliage:i!=0,
+        }).collect();
+        InputTemplate{tile,parts}
+    }
+
     pub fn new(parts: [Part; 2]) -> Self {
         let frame = Framing::from_parts([&parts[0].mesh, &parts[1].mesh]);
         Self { parts, frame }

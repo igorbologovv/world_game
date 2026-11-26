@@ -15,6 +15,10 @@ pub fn router(state: AppState) -> Router {
             post(routes::population::increase_population),
         )
         .route(
+            "/economy/v1/buildings/quote",
+            post(routes::buildings::quote_building),
+        )
+        .route(
             "/economy/v1/buildings/place",
             post(routes::buildings::place_building),
         )

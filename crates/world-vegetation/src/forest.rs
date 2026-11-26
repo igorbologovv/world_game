@@ -9,6 +9,7 @@ mod library;
 mod lod;
 mod palm;
 mod placement;
+mod point_forest;
 mod proxy;
 mod streaming;
 mod textures;
@@ -265,7 +266,6 @@ impl Plugin for ProceduralForestPlugin {
             MaterialPlugin::<lod::BarkMaterial> { ..default() },
             MaterialPlugin::<proxy::ProxyMaterial> { ..default() },
         ))
-        .add_plugins(fern::FernPlugin)
         .init_resource::<VegetationSettings>()
         .init_resource::<streaming::ForestStream>()
         .init_resource::<lod::FadeMaterials>()
@@ -296,8 +296,18 @@ impl Plugin for ProceduralForestPlugin {
                 .after(VisibilitySystems::UpdateFrusta)
                 .before(VisibilitySystems::VisibilityPropagate),
         );
-        ground_cover::install(app);
+        // Keep terrain canopy shading; legacy undergrowth contains card
+        // geometry and is excluded from a clean point-renderer experiment.
+        if !point_forest::enabled() || std::env::var("IGOR_POINT_UNDERGROWTH").as_deref()!=Ok("0") {
+            app.add_plugins(fern::FernPlugin);
+            ground_cover::install(app);
+        } else {
+            // The vegetation diagnostics expect this resource even with no ferns.
+            app.init_resource::<fern::FernWorld>();
+            app.init_resource::<FernSettings>();
+        }
         canopy::install(app);
+        point_forest::install(app);
     }
 }
 

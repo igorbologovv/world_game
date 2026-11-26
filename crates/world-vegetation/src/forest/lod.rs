@@ -102,8 +102,11 @@ impl View {
         } else {
             (self.focal / REFERENCE_FOCAL).clamp(0.48, 1.55)
         };
-        let start = settings.impostor_blend[0].clamp(15.0, 230.0);
-        let end = settings.impostor_blend[1].clamp(start + 4.0, 260.0);
+        let distances = if super::point_forest::enabled() && !self.orthographic {
+            [settings.impostor_blend[0].max(145.0), settings.impostor_blend[1].max(190.0)]
+        } else { settings.impostor_blend };
+        let start = distances[0].clamp(15.0, 230.0);
+        let end = distances[1].clamp(start + 4.0, 260.0);
         Vec2::new(start, end) * scale
     }
 }
@@ -344,6 +347,7 @@ pub(super) fn update_lods(
     mut trunks: Query<RenderParts<BarkMaterial>, With<Trunk>>,
     mut leaves: Query<RenderParts<FoliageMaterial>, (With<Leaves>, Without<Trunk>)>,
 ) {
+    if super::point_forest::enabled() { return; }
     let Ok((entity, grid, camera, projection)) = cameras.single() else {
         return;
     };

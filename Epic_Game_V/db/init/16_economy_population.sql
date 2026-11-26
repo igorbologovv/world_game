@@ -96,7 +96,7 @@ BEGIN
     v_total_food_cost := v_food_units_per_person::NUMERIC * p_amount;
 
     IF v_mt_balance < v_total_mt_cost THEN
-        RAISE EXCEPTION 'not enough MT to increase population'
+        RAISE EXCEPTION 'not enough KE-TSE to increase population'
             USING ERRCODE = 'P1002';
     END IF;
 

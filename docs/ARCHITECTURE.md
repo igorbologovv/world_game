@@ -16,7 +16,7 @@ The workspace moves those connections into the contracts below.
 
 | Owner | Owns | Public entry point |
 | --- | --- | --- |
-| `world-core` | Legacy cube-sphere coordinates, planet constants, region IDs and spawn contract, height and river coverage queries, asset directory, floating-origin frame, shared components and sets | `coordinates`, `planet`, `SurfaceHeights`, optional `runtime` |
+| `world-core` | Legacy cube-sphere coordinates, planet constants, region IDs and spawn contract, height and river coverage queries, construction grid and terrain edits, asset directory, floating-origin frame, shared components and sets | `coordinates`, `construction`, `planet`, `SurfaceHeights`, optional `runtime` |
 | `world-generation` | Procedural planet baking, heightmaps, drainage, rivers, water classification and legacy output files | `generate_world(&Path)` |
 | `world-terrain` | Adaptive terrain chunks, terrain material and textures, lighting, atmosphere, and clouds | `TerrainPlugin` |
 | `world-water` | Ocean patches and bathymetry, river meshes and map lines, ocean and river shaders and shared water shader code | `WaterPlugin` |
@@ -24,7 +24,13 @@ The workspace moves those connections into the contracts below.
 | `world-player` | Explorer movement and animation, input and camera modes, travel UI and destination marker | `PlayerPlugin::new(ExplorerSpawn)` |
 | `world-regions` | Authored region definitions and their spawn placements. The starter river region is the first definition. | `Region`, `STARTER_REGION` |
 | `world-diagnostics` | FPS and CPU frame-time overlay | `FrameStatsPlugin` |
-| `apps/world-client` | Bevy configuration, asset root, region selection, registration of subsystem plugins | `world-client` binary |
+| `apps/world-client` | Bevy configuration, asset root, region selection, settlement camera and economy connection, registration of subsystem plugins | `world-client` binary |
+
+`Epic_Game_V` owns construction quotes, payment, building records, worker assignment,
+production and upgrades. Its additive migration stores planet centered coordinates
+and the graded pad with each building. The client rebuilds terrain and vegetation
+from those records on login. The same one meter tangent grid is shared through
+`world-core::construction`; Bevy grid cells are only a render representation.
 | `apps/world-generator` | Command-line entry point and the default output directory | `generate_world` binary |
 
 The terrain owner maintains `assets/shaders/spherical.wesl`, the planetary

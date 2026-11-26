@@ -1,10 +1,10 @@
+use crate::camera::DebugCameraController;
 use bevy::{
     picking::hover::Hovered,
     prelude::*,
     ui::{FocusPolicy, Pressed},
     ui_widgets::{Activate, Button},
 };
-use crate::camera::DebugCameraController;
 
 use crate::player::Player;
 
@@ -65,25 +65,29 @@ pub(super) fn spawn(mut commands: Commands) {
         ))
         .with_children(|panel| {
             panel.spawn((label("No destination", 16.0), TripReadout));
-            panel.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::SpaceBetween,
-                column_gap: Val::Px(6.0),
-                ..default()
-            })
-            .with_children(|controls| {
-                speed_button(controls, "−", -1);
-                controls.spawn((label("1× · 7 m/s", 15.0), SpeedReadout));
-                speed_button(controls, "+", 1);
-            });
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                })
+                .with_children(|controls| {
+                    speed_button(controls, "−", -1);
+                    controls.spawn((label("1× · 7 m/s", 15.0), SpeedReadout));
+                    speed_button(controls, "+", 1);
+                });
         });
 }
 
 fn label(value: &str, font_size: f32) -> impl Bundle {
     (
         Text::new(value),
-        TextFont { font_size: FontSize::Px(font_size), ..default() },
+        TextFont {
+            font_size: FontSize::Px(font_size),
+            ..default()
+        },
         TextColor(Color::srgb(0.92, 0.95, 0.98)),
     )
 }
@@ -93,33 +97,31 @@ fn speed_button(
     symbol: &str,
     adjustment: isize,
 ) {
-    builder.spawn((
-        Button,
-        Hovered::default(),
-        Node {
-            width: Val::Px(36.0),
-            height: Val::Px(32.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        button_color(false, false),
-        SpeedButton(adjustment),
-        TripPanelInput,
-    ))
-    .observe(move |_: On<Activate>, mut speed: ResMut<TravelSpeed>| {
-        speed.adjust(adjustment);
-    })
-    .with_children(|button| {
-        button.spawn(label(symbol, 19.0));
-    });
+    builder
+        .spawn((
+            Button,
+            Hovered::default(),
+            Node {
+                width: Val::Px(36.0),
+                height: Val::Px(32.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            button_color(false, false),
+            SpeedButton(adjustment),
+            TripPanelInput,
+        ))
+        .observe(move |_: On<Activate>, mut speed: ResMut<TravelSpeed>| {
+            speed.adjust(adjustment);
+        })
+        .with_children(|button| {
+            button.spawn(label(symbol, 19.0));
+        });
 }
 
 // Keyboard shortcuts use the same travel speed resource as button activation.
-pub(super) fn change_speed(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut speed: ResMut<TravelSpeed>,
-) {
+pub(super) fn change_speed(keys: Res<ButtonInput<KeyCode>>, mut speed: ResMut<TravelSpeed>) {
     if keys.any_just_pressed([KeyCode::Minus, KeyCode::NumpadSubtract]) {
         speed.adjust(-1);
     }
@@ -159,7 +161,9 @@ pub(super) fn update(
     mut speed_text: Query<&mut Text, (With<SpeedReadout>, Without<TripReadout>)>,
 ) {
     let meters_per_second = speed.meters_per_second();
-    let Ok(player) = player.single() else { return; };
+    let Ok(player) = player.single() else {
+        return;
+    };
     let trip = match player.trip() {
         Some((distance, blocked, pace)) => {
             let remaining = if distance >= 1000.0 {
@@ -178,7 +182,9 @@ pub(super) fn update(
         }
         None => "No destination".to_string(),
     };
-    let Ok(mut trip_text) = trip_text.single_mut() else { return; };
+    let Ok(mut trip_text) = trip_text.single_mut() else {
+        return;
+    };
     if trip_text.0 != trip {
         trip_text.0 = trip;
     }
