@@ -393,6 +393,7 @@ impl ForestStream {
             })
             .collect();
         requests.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.key.cmp(&b.2.key)));
+        let max_details = if super::point_forest::enabled() { 900 } else { MAX_DETAILS };
         let mut admitted = 0;
         let mut resident = requests
             .iter()
@@ -404,7 +405,7 @@ impl ForestStream {
             let sites = leaf.sites.as_ref().unwrap();
             let margin = PATCH_METERS * if leaf.trees.is_empty() { 0.79 } else { 0.95 };
             let wanted =
-                distance <= f64::from(band.y) + margin && admitted + sites.len() <= MAX_DETAILS;
+                distance <= f64::from(band.y) + margin && admitted + sites.len() <= max_details;
             if wanted {
                 admitted += sites.len();
                 let begin = leaf.trees.len();
@@ -412,7 +413,7 @@ impl ForestStream {
                     .len()
                     .saturating_sub(begin)
                     .min(spawn_budget)
-                    .min(MAX_DETAILS.saturating_sub(resident));
+                    .min(max_details.saturating_sub(resident));
                 for &site in &sites[begin..begin + count] {
                     leaf.trees
                         .push(spawn_tree(commands, root, frame, leaf.key, site));
@@ -600,7 +601,13 @@ pub(super) fn stream(
         && !hero_loading.is_pending()
         && !tree_loading.is_pending()
     {
-        let portraits = std::mem::take(&mut models.portraits);
+        // The point renderer shares these Arc<Source> records. Moving the
+        // collection out permanently left it with only procedural fallbacks.
+        let portraits = if super::point_forest::enabled() {
+            models.portraits.clone()
+        } else {
+            std::mem::take(&mut models.portraits)
+        };
         let directory = world_assets.directory().to_owned();
         forest.atlas_task = Some(
             AsyncComputeTaskPool::get()

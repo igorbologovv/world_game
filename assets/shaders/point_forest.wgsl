@@ -7,6 +7,17 @@ struct Tree { origin_scale:vec4<f32>, rotation:vec4<f32>, range:vec4<u32> }
 @group(0) @binding(2) var<storage,read> trees:array<Tree>;
 @group(0) @binding(3) var<storage,read> jobs:array<vec4<u32>>;
 @group(0) @binding(4) var<storage,read_write> screen:array<atomic<u32>>;
+@group(0) @binding(5) var<storage,read_write> projection_cache:array<vec2<u32>>;
+const TINY_FLAG:u32=0x80000000u;
+const INVALID:u32=0xffffffffu;
+fn pack_xy(v:vec2<i32>)->u32{return u32(v.x)|(u32(v.y)<<16u);}
+fn unpack_xy(v:u32)->vec2<i32>{return vec2<i32>(i32(v&65535u),i32((v>>16u)&32767u));}
+fn in_dither(pixel:vec2<u32>,upper:u32)->bool{
+    if upper>=12u{return true;}
+    let absolute=vec2<f32>(pixel+cam.viewport.xy);
+    let threshold=fract(52.9829189*fract(dot(absolute,vec2<f32>(0.06711056,0.00583715))));
+    return threshold<f32(upper)/12.0;
+}
 const LANES:u32=64u;
 fn dims()->vec2<u32>{return cam.viewport.zw;}
 fn pixels()->u32{return dims().x*dims().y;}
@@ -30,7 +41,7 @@ fn wind(p:vec3<f32>,tree:Tree,leaf:bool)->vec3<f32>{
 }
 fn project(q:vec4<f32>)->vec2<f32>{return (q.xy/q.w*vec2<f32>(0.5,-0.5)+0.5)*vec2<f32>(dims());}
 struct Projected { c:vec4<f32>,a:vec4<f32>,b:vec4<f32>,lo:vec2<i32>,hi:vec2<i32>,tiny:bool,valid:bool }
-fn geometry(p:vec4<u32>,tree:Tree)->Projected{
+fn geometry(p:vec4<u32>,tree:Tree,cached:vec2<u32>)->Projected{
     let local=point_pos(p);
     let n=normal(p);
     let radius=f32(p.y>>16u)/4096.0*tree.origin_scale.w;
@@ -40,7 +51,7 @@ fn geometry(p:vec4<u32>,tree:Tree)->Projected{
     var result=Projected(c,vec4<f32>(0.0),vec4<f32>(0.0),vec2<i32>(0),vec2<i32>(0),false,false);
     if c.w<=0.05||c.z<=0.0||c.z>c.w{return result;}
     // Conservative sphere bound for tiny footprints.
-    if c.w>radius+0.05 {
+    if cached.x==INVALID && c.w>radius+0.05 {
         let f=length(cam.clip[0].xyz)+length(cam.clip[1].xyz)+length(cam.clip[2].xyz);
         let span=radius*f*max(f32(dims().x),f32(dims().y))/(c.w-radius);
         if span<0.7 {
@@ -53,6 +64,9 @@ fn geometry(p:vec4<u32>,tree:Tree)->Projected{
     let a=cam.clip*vec4<f32>(tangent*radius,0.0);
     let b=cam.clip*vec4<f32>(cross(world_n,tangent)*radius,0.0);
     result.a=a;result.b=b;
+    if cached.x!=INVALID {
+        result.lo=unpack_xy(cached.x);result.hi=unpack_xy(cached.y);result.valid=true;return result;
+    }
     var mn=vec2<f32>(1e20);var mx=vec2<f32>(-1e20);
     var corners=array<vec4<f32>,4>(c-a-b,c+a-b,c+a+b,c-a+b);
     for(var k=0u;k<4u;k++){
@@ -92,12 +106,40 @@ fn paint(g:vec3<u32>,lane:u32,owner:bool){
     let j=g.x+g.y*cam.params.y;
     if j>=cam.params.x{return;}
     let job=jobs[j];if lane>=job.z{return;}
+    let slot=j*LANES+lane;
+    let id=slot+1u;
+    var cached=vec2<u32>(INVALID);
+    if owner {
+        cached=projection_cache[slot];
+        if cached.x==INVALID{return;}
+        if (cached.x&TINY_FLAG)!=0u{
+            let i=index(vec2<u32>(unpack_xy(cached.x)));
+            if atomicLoad(&screen[i])==cached.y{atomicMax(&screen[pixels()+i],id);}
+            return;
+        }
+    }else{projection_cache[slot]=vec2<u32>(INVALID);}
     let tree=trees[job.x];let p=points[tree.range.x+job.y+lane];
-    let projected=geometry(p,tree);if !projected.valid{return;}
-    let id=j*LANES+lane+1u;
+    let projected=geometry(p,tree,cached);if !projected.valid{return;}
+    if projected.tiny{
+        let pixel=vec2<u32>(projected.lo);
+        if !in_dither(pixel,job.w){return;}
+        let key=coverage(projected,pixel);
+        if key==0u{return;}
+        let i=index(pixel);
+        if owner {
+            if atomicLoad(&screen[i])==key{atomicMax(&screen[pixels()+i],id);}
+        }else{
+            projection_cache[slot]=vec2<u32>(pack_xy(projected.lo)|TINY_FLAG,key);
+            atomicMax(&screen[i],key);
+        }
+        return;
+    }
+    if !owner{projection_cache[slot]=vec2<u32>(pack_xy(projected.lo),pack_xy(projected.hi));}
     for(var y=projected.lo.y;y<projected.hi.y;y++){
         for(var x=projected.lo.x;x<projected.hi.x;x++){
-            let pixel=vec2<u32>(u32(x),u32(y));let i=index(pixel);let key=coverage(projected,pixel);
+            let pixel=vec2<u32>(u32(x),u32(y));
+            if !in_dither(pixel,job.w){continue;}
+            let i=index(pixel);let key=coverage(projected,pixel);
             if key==0u{continue;}
             if owner{
                 if atomicLoad(&screen[i])==key{atomicMax(&screen[pixels()+i],id);}

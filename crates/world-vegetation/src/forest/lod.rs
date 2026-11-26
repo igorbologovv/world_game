@@ -102,8 +102,11 @@ impl View {
         } else {
             (self.focal / REFERENCE_FOCAL).clamp(0.48, 1.55)
         };
-        let start = settings.impostor_blend[0].clamp(15.0, 230.0);
-        let end = settings.impostor_blend[1].clamp(start + 4.0, 260.0);
+        let distances = if super::point_forest::enabled() && !self.orthographic {
+            [settings.impostor_blend[0].max(145.0), settings.impostor_blend[1].max(190.0)]
+        } else { settings.impostor_blend };
+        let start = distances[0].clamp(15.0, 230.0);
+        let end = distances[1].clamp(start + 4.0, 260.0);
         Vec2::new(start, end) * scale
     }
 }
@@ -359,7 +362,15 @@ pub(super) fn update_lods(
     stats.levels = [0; 3];
     stats.blends = 0;
     let models_changed = models.is_changed();
-    for mut tree in &mut trees {
+    // Deterministic near-first admission when the point budget is tight.
+    let mut ordered:Vec<_> = trees.iter_mut().collect();
+    if point_forest.is_some() {
+        ordered.sort_by(|a,b| eye.distance_squared(a.site.position).total_cmp(&eye.distance_squared(b.site.position))
+            .then_with(|| a.site.position.x.total_cmp(&b.site.position.x))
+            .then_with(|| a.site.position.y.total_cmp(&b.site.position.y))
+            .then_with(|| a.site.position.z.total_cmp(&b.site.position.z)));
+    }
+    for mut tree in ordered {
         if let Some(points)=point_forest.as_mut(){points.candidates+=1;}
         let distance = eye.distance(tree.site.position) as f32;
         let (impostor, readiness) = forest.coverage(tree.patch);
@@ -387,12 +398,12 @@ pub(super) fn update_lods(
         let hero = tree.site.species == Species::Oak
             && tree.site.variant == 0
             && models.hero_oak.is_some();
-        // Replace only fully resident near trees. Keep the existing
-        // complementary impostor/terrain handoff and all fallback meshes.
-        if !hero && upper == STEPS as u8 && !view.orthographic
+        // Match the exact complementary screen-space dither mask of the
+        // existing impostor pass, including the partially faded trees.
+        if !view.orthographic
             && point_forest.as_mut().is_some_and(|points| {
                 points.eligible+=1;
-                points.add_tree(&models.portraits, tree.site, eye, distance, level)
+                points.add_tree(&models.portraits, tree.site, eye, distance, view.focal, upper)
             })
         {
             tree.lod = LodState::default();

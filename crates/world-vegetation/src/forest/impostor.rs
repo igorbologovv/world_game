@@ -65,6 +65,9 @@ impl Portraits {
     /// Bake shared point templates from the same material/mesh source
     /// used by the existing impostor baker. Missing authored assets
     /// deliberately keep their original mesh fallback until loaded.
+    pub(super) fn point_variant(&self, species: Species, variant: usize) -> usize {
+        if self.0[tile(species,variant)].is_some() {variant} else {variant % species.stock_variants()}
+    }
     pub(super) fn point_samples(&self, species: Species, variant: usize) -> Option<Vec<super::point_forest::Sample>> {
         if let Some(source) = &self.0[tile(species, variant)] {
             return Some(source.point_samples());

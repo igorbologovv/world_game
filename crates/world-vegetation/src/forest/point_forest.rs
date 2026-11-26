@@ -20,7 +20,9 @@ use super::{impostor::{self, Portraits}, placement::Site};
 const BUDGET: u32 = 3_500_000;
 const MAX_RECORDS: usize = 5_000_000;
 const JOB_WIDTH: u32 = 1024;
-const WIDTHS: [f32; 5] = [0.0, 0.10, 0.16, 0.25, 0.40];
+const WIDTHS: [f32;22] = [0.0,0.0625,0.09375,0.125,0.1875,0.25,0.375,0.5,0.625,0.75,0.875,1.0,1.25,1.5,1.75,2.0,2.5,3.0,3.5,4.0,8.0,16.0];
+pub(super) fn enabled()->bool {std::env::var("IGOR_POINT_FOREST").as_deref()==Ok("1")}
+const MAX_TEMPLATE_RECORDS:usize=MAX_RECORDS/(super::library::ASSETS.len()+13);
 
 #[derive(Clone, Copy)]
 pub(super) struct Sample {
@@ -100,35 +102,49 @@ impl PointForest {
     pub(super) fn begin_frame(&mut self) {
         self.trees.clear();self.jobs.clear();self.selected=0;self.baked_this_frame=false;self.candidates=0;self.eligible=0;
     }
-    pub(super) fn add_tree(&mut self, portraits:&Portraits, site:Site, eye:DVec3, distance:f32, mesh_level:usize) -> bool {
+    pub(super) fn add_tree(&mut self, portraits:&Portraits, site:Site, eye:DVec3, distance:f32, focal:f32, upper:u8) -> bool {
         if !self.ready.load(Ordering::Acquire) { return false; }
-        let tile=impostor::tile(site.species,site.variant);
+        let variant=portraits.point_variant(site.species,site.variant);
+        let tile=impostor::tile(site.species,variant);
         if !self.templates.contains_key(&tile) {
             if self.baked_this_frame || self.rejected.contains_key(&tile) { return false; }
-            let Some(samples)=portraits.point_samples(site.species,site.variant) else {return false;};
+            let Some(samples)=portraits.point_samples(site.species,variant) else {return false;};
             self.baked_this_frame=true;
             if samples.is_empty() || samples.iter().any(|s|s.position.abs().max_element()>=127.0) {
                 self.rejected.insert(tile,()); warn!("Point forest: invalid sample template {tile}");return false;
             }
-            let mut levels:[Vec<UVec4>;WIDTHS.len()]=std::array::from_fn(|i|
-                if i==0 {samples.iter().copied().map(packed).collect()} else {aggregate(&samples,WIDTHS[i])});
-            // Avoid count inversions between independently sampled grids.
-            for i in (0..WIDTHS.len()-1).rev() {
-                if levels[i].len()<levels[i+1].len(){levels[i+1]=levels[i].clone();}
-            }
-            let count:usize=levels.iter().map(Vec::len).sum();
-            if self.geometry.len()+count>MAX_RECORDS {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return false;}
+            // Preserve full-detail samples, then allocate coarse ranges first.
+            // Fine ranges may alias a resident coarser range to bound VRAM.
+            let raw:Vec<_>=samples.iter().copied().map(packed).collect();
+            let cap=MAX_TEMPLATE_RECORDS.min(MAX_RECORDS.saturating_sub(self.geometry.len()));
+            if raw.len()>=cap {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return false;}
             let storage=Arc::make_mut(&mut self.geometry);
-            let ranges=std::array::from_fn(|i| {
-                let start=storage.len() as u32;
-                storage.append(&mut levels[i]);
-                Range{start,count:storage.len() as u32-start}
-            });
+            let start=storage.len();
+            let mut ranges=[Range::default();WIDTHS.len()];
+            let raw_range=Range{start:start as u32,count:raw.len() as u32};
+            storage.extend(raw);
+            let mut next=Range::default();
+            for i in (1..WIDTHS.len()).rev(){
+                let level=aggregate(&samples,WIDTHS[i]);
+                let fits=storage.len()-start+level.len()<=cap;
+                let useful=next.count==0 || level.len() as u32>next.count.saturating_mul(11)/10;
+                if !level.is_empty() && level.len()<raw_range.count as usize && fits && useful{
+                    next=Range{start:storage.len() as u32,count:level.len() as u32};
+                    storage.extend(level);
+                }
+                ranges[i]=if next.count==0{raw_range}else{next};
+            }
+            ranges[0]=raw_range;
+            let count=storage.len()-start;
             self.templates.insert(tile,ranges);
             info!("Point forest: baked template {tile}, {count} shared records, total {}",storage.len());
         }
         let levels=&self.templates[&tile];
-        let preferred=match mesh_level {0=>usize::from(distance>20.0),1=>2, _=>if distance>65.0{4}else{3}};
+        let target_width=2.2*(distance-site.height()*0.35).max(0.1)/(focal.max(1.0)*site.scale.max(0.1));
+        let preferred=WIDTHS.iter().rposition(|&w|w<=target_width).unwrap_or(0);
+        // Keep the true sample level when its immediate neighbour was
+        // aliased far down the hierarchy.
+        let preferred=if distance<25.0{0}else{preferred};
         let Some(range)=levels[preferred..].iter().copied().find(|r|r.count>0 && self.selected.saturating_add(r.count)<=self.budget) else {return false;};
         let rotation=site.rotation();
         let index=self.trees.len() as u32;
@@ -140,14 +156,14 @@ impl PointForest {
             range:UVec4::new(range.start,range.count,site.yaw.to_bits(),site.height().to_bits()),
         });
         for first in (0..range.count).step_by(64) {
-            self.jobs.push(UVec4::new(index,first,(range.count-first).min(64),0));
+            self.jobs.push(UVec4::new(index,first,(range.count-first).min(64),u32::from(upper)));
         }
         self.selected+=range.count;
         true
     }
 }
 pub(super) fn install(app:&mut App) {
-    if std::env::var("IGOR_POINT_FOREST").as_deref()!=Ok("1"){return;}
+    if !enabled(){return;}
     info!("Igor point forest enabled; counters at lower right (IGOR_POINT_DEBUG=1 highlights compute pixels)");
     app.init_resource::<PointForest>()
         .add_systems(Startup,spawn_overlay)
@@ -226,7 +242,7 @@ fn init_pipelines(mut commands:Commands, assets:Res<AssetServer>,cache:Res<Pipel
     let compute=BindGroupLayoutDescriptor::new("point forest compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
             storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),
-            storage_buffer_read_only_sized(false,None),storage_buffer_sized(false,None))));
+            storage_buffer_read_only_sized(false,None),storage_buffer_sized(false,None),storage_buffer_sized(false,None))));
     let composite=BindGroupLayoutDescriptor::new("point forest composite",&BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),storage_buffer_read_only_sized(false,None))));
     let shader=assets.load("shaders/point_forest.wgsl");
@@ -248,7 +264,7 @@ fn init_pipelines(mut commands:Commands, assets:Res<AssetServer>,cache:Res<Pipel
 struct GpuFrame {
     uploaded:Option<Arc<Vec<UVec4>>>,
     points:RawBufferVec<[u32;4]>,trees:RawBufferVec<[u32;12]>,jobs:RawBufferVec<[u32;4]>,
-    uniform:UniformBuffer<FrameUniform>,screen:Option<(u64,Buffer)>,
+    uniform:UniformBuffer<FrameUniform>,screen:Option<(u64,Buffer)>,projection:Option<(u64,Buffer)>,
 }
 impl Default for GpuFrame {
     fn default() -> Self {
@@ -256,7 +272,7 @@ impl Default for GpuFrame {
             points:RawBufferVec::new(BufferUsages::STORAGE),
             trees:RawBufferVec::new(BufferUsages::STORAGE),
             jobs:RawBufferVec::new(BufferUsages::STORAGE),
-            uniform:UniformBuffer::default(),screen:None}
+            uniform:UniformBuffer::default(),screen:None,projection:None}
     }
 }
 fn render_points(
@@ -313,11 +329,22 @@ fn render_points(
         state.screen=Some((bytes,device.create_buffer(&BufferDescriptor{label:Some("point depth owner color"),
             size:bytes,usage:BufferUsages::STORAGE|BufferUsages::COPY_DST,mapped_at_creation:false})));
     }
+    // Two u32 per dispatched point slot, including workgroup padding.
+    let projection_bytes=u64::from(count)*64*8;
+    if projection_bytes>u64::from(device.limits().max_storage_buffer_binding_size) {
+        forest.ready.store(false,Ordering::Release);forest.submitted.store(0,Ordering::Release);return;
+    }
+    if state.projection.as_ref().is_none_or(|(size,_)|*size<projection_bytes){
+        let size=projection_bytes.next_power_of_two().min(u64::from(device.limits().max_storage_buffer_binding_size));
+        state.projection=Some((size,device.create_buffer(&BufferDescriptor{label:Some("point projection cache"),size,
+            usage:BufferUsages::STORAGE,mapped_at_creation:false})));
+    }
+    let projection=&state.projection.as_ref().unwrap().1;
     let screen=&state.screen.as_ref().unwrap().1;
     let uniform=state.uniform.binding().unwrap();
     let group=device.create_bind_group("point forest compute",&cache.get_bind_group_layout(&pipelines.compute),
         &BindGroupEntries::sequential((uniform.clone(),state.points.binding().unwrap(),state.trees.binding().unwrap(),
-            state.jobs.binding().unwrap(),screen.as_entire_binding())));
+            state.jobs.binding().unwrap(),screen.as_entire_binding(),projection.as_entire_binding())));
     let composite=device.create_bind_group("point forest composite",&cache.get_bind_group_layout(&pipelines.composite),
         &BindGroupEntries::sequential((uniform,screen.as_entire_binding())));
     let encoder=ctx.command_encoder();

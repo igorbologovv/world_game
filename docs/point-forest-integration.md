@@ -49,3 +49,19 @@ eligible vs resident detailed trees, baked models, and GPU-submitted trees.
 Set `IGOR_POINT_DEBUG=1` along with `IGOR_POINT_FOREST=1` to tint only
 compute-rendered pixels magenta. Mesh/impostor fallbacks retain normal colors.
 The terminal logs pipeline failures and unsupported view configurations.
+
+## Expanded point coverage
+
+The authored model sources are retained for point baking instead of consumed
+by the impostor atlas task. All eligible detailed trees, including hero oak
+and partial dither transitions, can use compute. Missing library assets
+share the same procedural variant fallback as the mesh renderer. The near
+impostor transition is extended to 145–190 m at reference resolution, and
+up to 900 detailed trees may be streamed (rather than 300). The CPU admits
+nearer trees first and chooses from 22 nominal spatial widths based on focal
+length, distance, scale and point budget. Per-template memory caps alias
+some widths to shared coarser ranges. The projection cache reuses tiny
+pixel/depth and larger bounding rectangles between compute passes.
+Terrain, water, buildings and distant canopy retain their existing render
+paths. Full per-pixel source texture mapping, standalone light-space
+shadow map and exact standalone LOD remain future work.
