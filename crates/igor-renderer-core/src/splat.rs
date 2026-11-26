@@ -387,7 +387,8 @@ impl PointScene {
     pub(crate) fn planet_templates(geo:&crate::TreeGeometry)->(Vec<Point>,Vec<Point>,Vec<crate::planetary::TemplateInfo>){
         let (raw,lod,templates,_,_)=Self::template_data(geo);
         let templates=templates.into_iter().map(|t|crate::planetary::TemplateInfo{
-            ranges:t.ranges,radii:t.radii,center:((t.lo+t.hi)*0.5).to_array()
+            ranges:t.ranges,radii:t.radii,center:((t.lo+t.hi)*0.5).to_array(),bound:(t.hi-t.lo).length()*0.5,
+            summary:crate::planetary::Summary{position:t.summary.pos.to_array(),color:t.summary.color.to_array(),normal:t.summary.normal.to_array(),radius:t.summary.radius,coverage:t.summary.coverage}
         }).collect();
         (raw,lod,templates)
     }
@@ -708,3 +709,17 @@ mod tests {
 
 /// Original demo hysteresis selection, shared by the planetary adapter.
 pub fn planetary_level(px_per_m:f32,threshold:f32,previous:u8)->usize{choose_local(px_per_m,threshold,previous,&(0..LEVELS).collect::<Vec<_>>())}
+
+/// Use the demo's weighted area and bounds for planetary world clusters.
+#[derive(Default)]
+pub struct PlanetAggregate(Aggregate);
+impl PlanetAggregate{
+    pub fn add(&mut self,s:crate::planetary::Summary){
+        self.0.add(Sample{pos:Vec3::from_array(s.position),color:Vec3::from_array(s.color),normal:Vec3::from_array(s.normal),radius:s.radius,coverage:s.coverage});
+    }
+    pub fn finish(self)->Option<([f32;3],f32,u32,u32)>{
+        let s=self.0.sample()?;
+        let p=Point::encode(Vec3::ZERO,1.0,s.color,s.normal,s.coverage);
+        Some((s.pos.to_array(),s.radius,p.rgba,p.normal))
+    }
+}

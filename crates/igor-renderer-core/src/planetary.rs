@@ -7,12 +7,14 @@ pub const LEVELS:usize=22;
 pub struct InputImage{pub width:u32,pub height:u32,pub rgba:Vec<u8>}
 pub struct InputPart{
     pub positions:Vec<[f32;3]>,pub normals:Vec<[f32;3]>,pub uvs:Vec<[f32;2]>,pub indices:Vec<u32>,
-    pub tint:[f32;4],pub diffuse:InputImage,pub normal_map:Option<InputImage>,
+    pub colors:Vec<[f32;4]>,pub tint:[f32;4],pub diffuse:InputImage,pub normal_map:Option<InputImage>,
     pub repeat:bool,pub cutoff:f32,pub foliage:bool,
 }
 pub struct InputTemplate{pub tile:usize,pub parts:Vec<InputPart>}
 pub struct Transform{pub tile:usize,pub root:[f32;3],pub scale:f32}
-pub struct TemplateInfo{pub ranges:[Range;LEVELS],pub radii:[f32;LEVELS],pub center:[f32;3]}
+#[derive(Clone,Copy)]
+pub struct Summary{pub position:[f32;3],pub color:[f32;3],pub normal:[f32;3],pub radius:f32,pub coverage:f32}
+pub struct TemplateInfo{pub ranges:[Range;LEVELS],pub radii:[f32;LEVELS],pub center:[f32;3],pub bound:f32,pub summary:Summary}
 pub struct Template{pub transform:Transform,pub info:TemplateInfo}
 pub struct AtlasTile{pub x:u32,pub y:u32,pub layer:u32,pub width:u32,pub height:u32,pub rgba:Vec<u8>}
 pub struct AtlasData{pub side:u32,pub layers:u32,pub tiles:Vec<AtlasTile>}

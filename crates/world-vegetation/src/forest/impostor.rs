@@ -230,7 +230,7 @@ impl Source {
             rgba:i.data.as_ref().expect("CPU source texture")[..(s.width*s.height*4) as usize].to_vec()}};
         let parts=self.parts.iter().enumerate().map(|(i,p)|InputPart{
             positions:p.mesh.positions.clone(),normals:p.mesh.normals.clone(),uvs:p.mesh.uvs.clone(),indices:p.mesh.indices.clone(),
-            tint:p.tint.to_array(),diffuse:image(&p.diffuse),normal_map:p.mapped_normals.as_ref().map(|m|image(&m.texture)),
+            colors:p.mesh.colors.clone(),tint:p.tint.to_array(),diffuse:image(&p.diffuse),normal_map:p.mapped_normals.as_ref().map(|m|image(&m.texture)),
             repeat:p.repeat,cutoff:if i==0{-1.0}else{p.cutoff},foliage:i!=0,
         }).collect();
         InputTemplate{tile,parts}

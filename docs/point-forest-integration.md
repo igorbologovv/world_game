@@ -24,3 +24,13 @@ planet; the existing terrain/sky/water and undergrowth policy are unchanged.
 Original optional Hi-Z/TAA/GPU LOD are not ported. GPU and build validation
 are required. The core retains the original CPU demo APIs, but is headless:
 no second wgpu device, window or texture upload dependency.
+
+## Planet adaptation fixes
+
+Use actual template bounds/centre for LOD, with a near-depth floor for
+whole-template selection. Preserve game vertex tint by deduplicating
+triangle-mean colors in the original material layout. Use original
+weighted point aggregation for distant stable world cells at 16/64/256/1024 m.
+The current sparse adapter groups at a selected cell width rather than
+building the demo's persistent planar hierarchy. Clusters are reported
+separately. Original near samples and frame budget remain unchanged.

@@ -568,15 +568,24 @@ impl TreeGeometry {
         for p in input.parts{
             let base=self.textures.add_image(p.diffuse,p.repeat)?;
             let normal=if let Some(image)=p.normal_map{self.textures.add_image(image,p.repeat)?}else{[0;4]};
-            let material=self.materials.len() as u32;
-            self.materials.push(Material{factor:p.tint,base,normal,params:[p.cutoff,1.0,0.0,0.0]});
+            // Game-authored vertex tint is not necessarily white. Preserve
+            // the triangle mean in the original material ABI, deduplicated.
+            let mut tints=std::collections::HashMap::<[u8;4],u32>::new();
             let vertices:Vec<_>=p.positions.iter().enumerate().map(|(i,&pos)|Vertex{
                 pos:Vec3::from_array(pos),normal:Vec3::from_array(p.normals[i]).normalize_or(Vec3::Y),
                 uv:Vec2::from_array(p.uvs[i]),normal_uv:Vec2::from_array(p.uvs[i]),
             }).collect();
             let edge_limit=if p.foliage{0.28}else{0.22};
             for triangle in p.indices.chunks_exact(3){
-                let v=[triangle[0],triangle[1],triangle[2]].map(|i|vertices[i as usize]);
+                let ids=[triangle[0],triangle[1],triangle[2]].map(|i|i as usize);
+                let tint=(ids.iter().map(|&i|Vec4::from_array(p.colors.get(i).copied().unwrap_or([1.0;4]))).sum::<Vec4>()/3.0)*Vec4::from_array(p.tint);
+                let key=tint.clamp(Vec4::ZERO,Vec4::ONE).to_array().map(|v|(v*255.0+0.5) as u8);
+                let material=*tints.entry(key).or_insert_with(||{
+                    let id=self.materials.len() as u32;
+                    self.materials.push(Material{factor:key.map(|v|v as f32/255.0),base,normal,params:[p.cutoff,1.0,0.0,0.0]});
+                    id
+                });
+                let v=ids.map(|i|vertices[i]);
                 let points=v.map(|v|(v.pos-root)*scale+Vec3::new(8.0,0.0,8.0));
                 self.add_triangle(v,points,material,edge_limit,&mut scratch);
             }

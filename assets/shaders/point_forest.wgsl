@@ -67,7 +67,7 @@ fn surface_normal(mat:Material, surface:SurfacePatch, b:vec2<f32>)->vec3<f32> {
 fn light(c:vec3<f32>,n:vec3<f32>,world:vec3<f32>)->vec3<f32>{
     // Original demo diffuse/ambient balance, scaled to Bevy's exposure.
     let sun=normalize(cam.sun.xyz);
-    return c*(0.14+0.26*max(dot(n,sun),0.0));
+    return c*(0.10+0.24*max(dot(n,sun),0.0));
 }
 struct Job { instance_id:u32, first:u32, count:u32, padding:u32 }
 @group(0) @binding(9) var<storage,read> jobs:array<Job>;
@@ -130,9 +130,11 @@ fn tangent_for(n:vec3<f32>)->vec3<f32>{
 fn project_point(j:Job,lane:u32,cached:vec2<u32>)->Projected {
     let inst=instances[j.instance_id];
     let index=(inst.range.x&0x7fffffffu)+j.first+lane;
-    let detailed=(inst.range.x&0x80000000u)!=0u;
+    let world_cluster=inst.range.z==1u;
+    let detailed=!world_cluster&&(inst.range.x&0x80000000u)!=0u;
     var pt:Point;
-    if detailed{pt=raw_points[index];}else{pt=lod_points[index];}
+    if world_cluster{pt=Point(0u,4096u<<16u,inst.range.x,inst.range.y);}
+    else if detailed{pt=raw_points[index];}else{pt=lod_points[index];}
     var local=vec3<f32>(f32(pt.xy&65535u),f32(pt.xy>>16u),f32(pt.zr&65535u))/4096.0;
     var n=vec3<f32>(0.0,1.0,0.0);
     var radius=f32(pt.zr>>16u)/4096.0;
