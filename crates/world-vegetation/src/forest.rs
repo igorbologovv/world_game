@@ -9,6 +9,7 @@ mod library;
 mod lod;
 mod palm;
 mod placement;
+mod point_forest;
 mod proxy;
 mod streaming;
 mod textures;
@@ -298,6 +299,7 @@ impl Plugin for ProceduralForestPlugin {
         );
         ground_cover::install(app);
         canopy::install(app);
+        point_forest::install(app);
     }
 }
 

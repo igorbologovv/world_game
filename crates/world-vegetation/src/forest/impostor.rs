@@ -62,6 +62,20 @@ impl Default for Portraits {
 }
 
 impl Portraits {
+    /// Bake shared point templates from the same material/mesh source
+    /// used by the existing impostor baker. Missing authored assets
+    /// deliberately keep their original mesh fallback until loaded.
+    pub(super) fn point_samples(&self, species: Species, variant: usize) -> Option<Vec<super::point_forest::Sample>> {
+        if let Some(source) = &self.0[tile(species, variant)] {
+            return Some(source.point_samples());
+        }
+        if variant >= species.stock_variants() { return None; }
+        let source = Source::procedural(species, variant,
+            Arc::new(textures::bark_texture()),
+            Arc::new(textures::canopy_texture(species)));
+        Some(source.point_samples())
+    }
+
     pub fn insert(&mut self, species: Species, variant: usize, source: Source) {
         self.0[tile(species, variant)] = Some(Arc::new(source));
     }
@@ -211,6 +225,52 @@ struct MappedNormals {
 }
 
 impl Source {
+    fn point_samples(&self) -> Vec<super::point_forest::Sample> {
+        use super::point_forest::Sample;
+        const MAX_POINTS: usize = 45_000;
+        let area = |part: &Part, tri: &[u32]| {
+            let [a,b,c] = [tri[0],tri[1],tri[2]].map(|i| Vec3::from_array(part.mesh.positions[i as usize]));
+            (b-a).cross(c-a).length()*0.5
+        };
+        let total: f32 = self.parts.iter().map(|p| p.mesh.indices.chunks_exact(3).map(|t| area(p,t)).sum::<f32>()).sum();
+        let spacing = (total / MAX_POINTS as f32).sqrt().max(0.055);
+        let mut out = Vec::new();
+        let mut rng = super::Random::new(0x243f6a8885a308d3);
+        for (part_index, part) in self.parts.iter().enumerate() {
+            for tri in part.mesh.indices.chunks_exact(3) {
+                let indices = [tri[0],tri[1],tri[2]].map(|i| i as usize);
+                let positions = indices.map(|i| Vec3::from_array(part.mesh.positions[i]));
+                let normals = indices.map(|i| Vec3::from_array(part.mesh.normals[i]));
+                let uvs = indices.map(|i| Vec2::from_array(part.mesh.uvs[i]));
+                let colors = indices.map(|i| Vec4::from_array(part.mesh.colors[i]));
+                let a = area(part,tri);
+                let n = (a/(spacing*spacing)+rng.unit()).floor().min(4096.0) as usize;
+                if n == 0 { continue; }
+                let radius = (a/(n as f32*std::f32::consts::PI)).sqrt().mul_add(1.40,0.0).clamp(0.012,0.25);
+                for _ in 0..n {
+                    let u = rng.unit().sqrt();
+                    let v = rng.unit();
+                    let weights = [1.0-u,u*(1.0-v),u*v];
+                    let uv = blend(uvs,weights);
+                    let texel = sample(&part.diffuse,uv,part.repeat);
+                    let tint = blend(colors,weights)*part.tint;
+                    if f32::from(texel[3])/255.0*tint.w < part.cutoff { continue; }
+                    let color = LinearRgba::from(Srgba::rgb_u8(texel[0],texel[1],texel[2])).to_vec3()*tint.xyz();
+                    let mut normal = blend(normals,weights);
+                    if let Some(mapped) = &part.mapped_normals {
+                        let tangent = blend(indices.map(|i|Vec4::from_array(mapped.tangents[i])),weights);
+                        let texel = sample(&mapped.texture,uv,part.repeat);
+                        let n = Vec3::new(texel[0] as f32,texel[1] as f32,texel[2] as f32)*(2.0/255.0)-Vec3::ONE;
+                        normal = tangent.xyz()*n.x + normal.cross(tangent.xyz())*tangent.w*n.y + normal*n.z;
+                    }
+                    out.push(Sample { position: blend(positions,weights), radius, color,
+                        normal: normal.normalize_or_zero(), leaf: part_index != 0 });
+                }
+            }
+        }
+        out
+    }
+
     pub fn new(parts: [Part; 2]) -> Self {
         let frame = Framing::from_parts([&parts[0].mesh, &parts[1].mesh]);
         Self { parts, frame }

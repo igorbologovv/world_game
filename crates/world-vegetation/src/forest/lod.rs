@@ -340,10 +340,12 @@ pub(super) fn update_lods(
     mut leaf_materials: ResMut<Assets<FoliageMaterial>>,
     mut bark_materials: ResMut<Assets<BarkMaterial>>,
     mut stats: ResMut<super::debug::LodDiagnostics>,
+    mut point_forest: Option<ResMut<super::point_forest::PointForest>>,
     mut trees: Query<&mut DetailTree>,
     mut trunks: Query<RenderParts<BarkMaterial>, With<Trunk>>,
     mut leaves: Query<RenderParts<FoliageMaterial>, (With<Leaves>, Without<Trunk>)>,
 ) {
+    if let Some(points) = point_forest.as_mut() { points.begin_frame(); }
     let Ok((entity, grid, camera, projection)) = cameras.single() else {
         return;
     };
@@ -384,6 +386,22 @@ pub(super) fn update_lods(
         let hero = tree.site.species == Species::Oak
             && tree.site.variant == 0
             && models.hero_oak.is_some();
+        // Replace only fully resident near trees. Keep the existing
+        // complementary impostor/terrain handoff and all fallback meshes.
+        if !hero && upper == STEPS as u8 && !view.orthographic
+            && point_forest.as_mut().is_some_and(|points| {
+                points.add_tree(&models.portraits, tree.site, eye, distance, level)
+            })
+        {
+            tree.lod = LodState::default();
+            for (index, slot) in tree.slots.into_iter().enumerate() {
+                if tree.presented[index].take().is_some() {
+                    hide(slot, &mut trunks, &mut leaves);
+                }
+            }
+            stats.levels[level] += 1;
+            continue;
+        }
         tree.lod.update(ModelChoice { level, hero }, step);
         let active = tree.lod.current.unwrap();
         stats.levels[active.level] += 1;
