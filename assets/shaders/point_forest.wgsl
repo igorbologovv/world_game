@@ -119,8 +119,9 @@ fn geometry(p:vec4<u32>,tree:Tree,cached:vec2<u32>)->Projected{
     let lo=clamp(floor(mn),vec2<f32>(0.0),vec2<f32>(dims()));
     let hi=clamp(ceil(mx),vec2<f32>(0.0),vec2<f32>(dims()));
     let mid=(lo+hi)*0.5;
-    result.lo=vec2<i32>(max(lo,floor(mid-48.0)));
-    result.hi=vec2<i32>(min(hi,ceil(mid+48.0)));
+    let half_limit=select(48.0,96.0,detailed(p));
+    result.lo=vec2<i32>(max(lo,floor(mid-half_limit)));
+    result.hi=vec2<i32>(min(hi,ceil(mid+half_limit)));
     result.valid=all(result.hi>result.lo);return result;
 }
 struct Hit {key:u32,bary:vec2<f32>}
@@ -148,7 +149,13 @@ fn coverage(p:Projected,pixel:vec2<u32>,pt:vec4<u32>,phase:u32)->Hit{
         let s=patches[pt.z];
         let rel=p.local+p.local_a*uv.x+p.local_b*uv.y-s.anchor;
         bary=vec2<f32>(dot(rel,s.grad_u),dot(rel,s.grad_v));
-        if min(bary.x,bary.y)<-0.0001||bary.x+bary.y>1.0001{return miss;}
+        if p.tiny{
+            // The quantized centroid can leave an extremely small patch.
+            // Single-pixel deposition is approximate; use its nearest
+            // barycentric location instead of dropping the entire patch.
+            bary=max(bary,vec2<f32>(0.0));
+            bary/=max(1.0,bary.x+bary.y);
+        }else if min(bary.x,bary.y)<-0.0001||bary.x+bary.y>1.0001{return miss;}
         let cutoff=f32((s.flags>>8u)&255u)/255.0;
         if cutoff>0.0 && textureSampleLevel(atlas,atlas_sampler,patch_uv(s,bary),i32(s.layer),0.0).a*s.tint.a<cutoff{return miss;}
     }

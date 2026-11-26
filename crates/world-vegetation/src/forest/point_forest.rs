@@ -37,6 +37,7 @@ pub(super) struct Sample {
     pub leaf: bool,
     pub patch:u32,
     pub covered:bool,
+    pub area:f32,
 }
 // Each source patch is 8 vec4s (128 bytes), identical to the WGSL layout.
 pub(super) struct PointBake {pub samples:Vec<Sample>,pub patches:Vec<[u32;32]>,pub layers:Vec<Arc<Vec<u8>>>}
@@ -71,7 +72,7 @@ fn aggregate(samples: &[Sample], width: f32) -> Vec<UVec4> {
         if !s.covered {continue;}
         let c = (s.position/width).floor().as_ivec3();
         let cell = cells.entry((c.x,c.y,c.z,s.leaf)).or_default();
-        let a = s.radius*s.radius;
+        let a = s.area*(1.96/std::f32::consts::PI);
         cell.position += s.position*a; cell.color += s.color*a;
         cell.normal += s.normal*a; cell.area += a;
     }
@@ -79,7 +80,7 @@ fn aggregate(samples: &[Sample], width: f32) -> Vec<UVec4> {
         (a.area>0.0).then(||packed(Sample {
             position:a.position/a.area,color:a.color/a.area,
             normal:a.normal.normalize_or_zero(),
-            radius:a.area.sqrt().min(width*0.86),leaf,patch:0,covered:true,
+            radius:a.area.sqrt().min(width*0.86),leaf,patch:0,covered:true,area:a.area,
         }))
     }).collect()
 }
@@ -152,6 +153,10 @@ impl PointForest {
             }).collect();
             let cap=MAX_TEMPLATE_RECORDS.min(MAX_RECORDS.saturating_sub(self.geometry.len()));
             if raw.len()>=cap {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return None;}
+            if !detailed{
+                warn!("Point forest: template {tile} is color-only (patches {}/{MAX_PATCHES}, layers {}/{MAX_LAYERS})",
+                    self.patches.len()+patches.len(),self.layers.len()+layers.len());
+            }
             if detailed {
                 for patch in &mut patches {
                     patch[7]+=layer_base;
@@ -192,7 +197,10 @@ impl PointForest {
         let near=0.52+0.48*super::lod::smoothstep(18.0,65.0,distance);
         let target=threshold*far*near*(distance-site.height()*0.35).max(0.1)/(focal.max(1.0)*site.scale.max(0.1));
         let level=WIDTHS.iter().rposition(|&w|w<=target).unwrap_or(0);
-        levels[level]
+        // Prefer textured samples for foreground trees when the global
+        // threshold still permits them. Distant color-only trees pay first.
+        let near_limit=(42.0*2.2/threshold).clamp(8.0,42.0);
+        levels[if distance<near_limit{0}else{level}]
     }
     fn push_tree(&mut self,site:Site,eye:DVec3,range:Range,upper:u8)->bool {
         if range.count==0 || self.selected.saturating_add(range.count)>self.budget{return false;}
@@ -541,7 +549,7 @@ mod tests {
         assert_eq!(p[23]>>16,5);
     }
     #[test] fn packed_records_are_16_bytes_and_signed() {
-        let s=Sample{position:Vec3::new(-1.0,2.0,3.0),radius:0.1,color:Vec3::ONE,normal:Vec3::Y,leaf:true,patch:0,covered:true};
+        let s=Sample{position:Vec3::new(-1.0,2.0,3.0),radius:0.1,color:Vec3::ONE,normal:Vec3::Y,leaf:true,patch:0,covered:true,area:0.01};
         let p=packed(s);
         assert_eq!(std::mem::size_of::<UVec4>(),16);
         assert_eq!(p.x as u16 as i16,-256);

@@ -101,3 +101,17 @@ with per-template memory limits and coarser far selection. Atlas and patch
 buffers grow on demand, with caps of 256 layers and 900k patches. If a
 material cap is exceeded that template retains colored points, never a mesh.
 This preserves the pure point path and Bevy reverse-Z depth.
+
+## Deterministic near coverage
+
+Each nondegenerate source triangle receives a disk; remaining samples
+are allocated by area and longest-edge length, then deterministically
+subdivide that triangle. Each disk encloses its subtriangle plus a
+quantization margin, and the original source patch still clips UV/alpha.
+This replaces random center sampling and prevents skipped thin triangles
+for templates within the 78k raw sample limit. Exceptionally dense meshes
+are truncated to the largest weighted patches with a warning. Coarse
+aggregation uses actual covered subtriangle area rather than enclosing
+radius, and near LOD prioritizes textured surfaces. Detailed splat
+footprint limit is 192x192 pixels (coarse remains 96x96). Color-only
+material-cap fallbacks now explicitly log the reason. No new render pass.
