@@ -12,7 +12,7 @@ members = [
     "crates/world-vegetation",
     "crates/world-water",
 ]
-exclude = ["Epic_Game_V"]
+exclude = ["Epic_Game_V", "vendor/igor-renderer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +24,7 @@ bevy_ecs = { version = "0.20.0", default-features = false }
 bevy_math = "0.20.0"
 big_space = { version = "=0.14.0-rc.0", features = ["i32"] }
 image = { version = "0.25", features = ["tiff"] }
+igor_renderer = { path = "vendor/igor-renderer", default-features = false }
 noise = "0.9"
 world-core = { path = "crates/world-core" }
 world-diagnostics = { path = "crates/world-diagnostics" }

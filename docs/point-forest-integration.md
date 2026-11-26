@@ -1,12 +1,15 @@
-# External Igor renderer dependency
+# Vendored Igor renderer
 
-The game uses Igor_renderer pinned to d552eb12791240c14b939fa53afe76632304266b, with default features disabled.
-The shared library owns the CPU point baker, template LODs, material atlas,
+The game builds the local [Igor renderer crate](../vendor/igor-renderer) with
+default features disabled. The crate contains the upstream source from
+`d552eb12791240c14b939fa53afe76632304266b`. Its standalone demo remains
+outside the game workspace and uses its own assets and dependencies.
+
+The library owns the CPU point baker, template LODs, material atlas,
 aggregation and the planetary compute shader source. The game owns Bevy
 resource allocation, spherical placement/selection and depth composition.
-The duplicated local renderer crate and full compute shader have been removed.
-The library assembles the previous planetary shader variant byte-for-byte
-from its unchanged standalone shader and host adaptation splices.
+The library assembles the planetary shader from the standalone shader.
+The Bevy adapter applies the game's lighting, reprojection and depth changes.
 
 Run:
 ```sh
