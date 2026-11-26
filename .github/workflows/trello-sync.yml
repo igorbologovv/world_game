@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "$PR_TITLE" =~ \[DEV-([0-9]+)\] ]]; then
+          if [[ "$PR_TITLE" =~ \[WG-([0-9]+)\] ]]; then
             TASK_ID="${BASH_REMATCH[1]}"
           else
             echo "No Trello task ID found."
