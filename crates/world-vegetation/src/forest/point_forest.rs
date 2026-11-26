@@ -14,8 +14,9 @@ use bevy::{
         Extract, ExtractSchedule, RenderApp, RenderStartup,
     },
 };
-use world_core::runtime::WorldCamera;
-use super::{impostor::{self, Portraits}, placement::Site};
+use world_core::runtime::{WorldCamera, GridTransform, ReferenceFrames};
+use super::{impostor::{self, Portraits}, placement::Site, streaming::ForestStream,
+    ForestModels, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
 
 const BUDGET: u32 = 3_500_000;
 const MAX_RECORDS: usize = 5_000_000;
@@ -89,35 +90,35 @@ pub(super) struct PointForest {
     selected:u32,
     baked_this_frame:bool,
     budget:u32,
+    threshold:f32,
 }
 impl Default for PointForest {
     fn default() -> Self {
         Self{geometry:Arc::new(Vec::new()),templates:HashMap::new(),ready:Arc::new(AtomicBool::new(false)),
             status:Arc::new(AtomicU32::new(0)),submitted:Arc::new(AtomicU32::new(0)),rejected:HashMap::new(),candidates:0,eligible:0,
             trees:Vec::new(),jobs:Vec::new(),selected:0,baked_this_frame:false,
-            budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000)}
+            budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000),threshold:2.2}
     }
 }
 impl PointForest {
     pub(super) fn begin_frame(&mut self) {
         self.trees.clear();self.jobs.clear();self.selected=0;self.baked_this_frame=false;self.candidates=0;self.eligible=0;
     }
-    pub(super) fn add_tree(&mut self, portraits:&Portraits, site:Site, eye:DVec3, distance:f32, focal:f32, upper:u8) -> bool {
-        if !self.ready.load(Ordering::Acquire) { return false; }
+    fn ensure_template(&mut self, portraits:&Portraits, site:Site) -> Option<usize> {
         let variant=portraits.point_variant(site.species,site.variant);
         let tile=impostor::tile(site.species,variant);
         if !self.templates.contains_key(&tile) {
-            if self.baked_this_frame || self.rejected.contains_key(&tile) { return false; }
-            let Some(samples)=portraits.point_samples(site.species,variant) else {return false;};
+            if self.baked_this_frame || self.rejected.contains_key(&tile) { return None; }
+            let Some(samples)=portraits.point_samples(site.species,variant) else {return None;};
             self.baked_this_frame=true;
             if samples.is_empty() || samples.iter().any(|s|s.position.abs().max_element()>=127.0) {
-                self.rejected.insert(tile,()); warn!("Point forest: invalid sample template {tile}");return false;
+                self.rejected.insert(tile,()); warn!("Point forest: invalid sample template {tile}");return None;
             }
             // Preserve full-detail samples, then allocate coarse ranges first.
             // Fine ranges may alias a resident coarser range to bound VRAM.
             let raw:Vec<_>=samples.iter().copied().map(packed).collect();
             let cap=MAX_TEMPLATE_RECORDS.min(MAX_RECORDS.saturating_sub(self.geometry.len()));
-            if raw.len()>=cap {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return false;}
+            if raw.len()>=cap {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return None;}
             let storage=Arc::make_mut(&mut self.geometry);
             let start=storage.len();
             let mut ranges=[Range::default();WIDTHS.len()];
@@ -139,13 +140,16 @@ impl PointForest {
             self.templates.insert(tile,ranges);
             info!("Point forest: baked template {tile}, {count} shared records, total {}",storage.len());
         }
+        Some(tile)
+    }
+    fn pick_range(&self,tile:usize,site:Site,distance:f32,focal:f32,threshold:f32)->Range {
         let levels=&self.templates[&tile];
-        let target_width=2.2*(distance-site.height()*0.35).max(0.1)/(focal.max(1.0)*site.scale.max(0.1));
-        let preferred=WIDTHS.iter().rposition(|&w|w<=target_width).unwrap_or(0);
-        // Keep the true sample level when its immediate neighbour was
-        // aliased far down the hierarchy.
-        let preferred=if distance<25.0{0}else{preferred};
-        let Some(range)=levels[preferred..].iter().copied().find(|r|r.count>0 && self.selected.saturating_add(r.count)<=self.budget) else {return false;};
+        let target=threshold*(distance-site.height()*0.35).max(0.1)/(focal.max(1.0)*site.scale.max(0.1));
+        let level=WIDTHS.iter().rposition(|&w|w<=target).unwrap_or(0);
+        levels[level]
+    }
+    fn push_tree(&mut self,site:Site,eye:DVec3,range:Range,upper:u8)->bool {
+        if range.count==0 || self.selected.saturating_add(range.count)>self.budget{return false;}
         let rotation=site.rotation();
         let index=self.trees.len() as u32;
         // Subtract in f64 before converting to the GPU's local coordinates.
@@ -161,13 +165,93 @@ impl PointForest {
         self.selected+=range.count;
         true
     }
+    // Kept for the disabled legacy LOD code to compile; pure mode instead
+    // selects globally across the complete visible site set.
+    pub(super) fn add_tree(&mut self,portraits:&Portraits,site:Site,eye:DVec3,distance:f32,focal:f32,upper:u8)->bool{
+        if !self.ready.load(Ordering::Acquire){return false;}
+        let Some(tile)=self.ensure_template(portraits,site) else{return false;};
+        let range=self.pick_range(tile,site,distance,focal,self.threshold);
+        self.push_tree(site,eye,range,upper)
+    }
+}
+fn select_points(
+    mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:Res<ForestModels>,
+    settings:Res<VegetationSettings>,hero:Res<HeroOakAssets>,assets:Res<TreeAssets>,
+    cameras:Query<(Entity,GridTransform,&Camera,&Projection),With<WorldCamera>>,
+    frames:ReferenceFrames,
+) {
+    points.begin_frame();
+    if !points.ready.load(Ordering::Acquire)||hero.is_pending()||assets.is_pending(){return;}
+    let Ok((entity,grid,camera,projection))=cameras.single() else{return;};
+    let Some(frame)=frames.parent_frame(entity) else{return;};
+    let eye=frame.grid_position_double(&grid.cell,&grid.transform);
+    let view=View::new(camera,projection);
+    if view.orthographic{return;}
+    let Projection::Perspective(perspective)=projection else{return;};
+    let aspect=camera.physical_viewport_size().map_or(1.78,|s|s.x as f32/s.y.max(1) as f32);
+    let ty=(perspective.fov*0.5).tan();
+    let tx=ty*aspect;
+    let inverse=grid.transform.rotation.conjugate();
+    let reach=settings.proxy_range().y;
+    let mut visible=Vec::new();
+    for site in forest.point_sites(){
+        points.candidates+=1;
+        let delta=(site.position-eye).as_vec3();
+        let distance=delta.length();
+        let radius=site.height().max(5.0)*1.25;
+        if distance>reach+radius {continue;}
+        // Conservative tree bounds in camera space. Never cull a visible
+        // crown just because its base lies outside the viewport.
+        let v=inverse*delta;
+        let z=-v.z;
+        if z+radius<0.05 || v.x.abs()>z.max(0.0)*tx+radius*(1.0+tx)
+            || v.y.abs()>z.max(0.0)*ty+radius*(1.0+ty) {continue;}
+        if !super::within_horizon(eye,site.position,f64::from(radius)){continue;}
+        visible.push((distance,site));
+    }
+    visible.sort_unstable_by(|a,b|a.0.total_cmp(&b.0)
+        .then_with(||a.1.position.x.total_cmp(&b.1.position.x))
+        .then_with(||a.1.position.y.total_cmp(&b.1.position.y))
+        .then_with(||a.1.position.z.total_cmp(&b.1.position.z)));
+    points.eligible=visible.len() as u32;
+    let mut choices=Vec::with_capacity(visible.len());
+    for (distance,site) in visible{
+        if let Some(tile)=points.ensure_template(&models.portraits,site){choices.push((distance,site,tile));}
+    }
+    // Choose a global screen-space threshold before admitting any tree.
+    // This avoids exhausting the budget on nearby models and dropping the
+    // whole distant forest. Also account for padded workgroup slots.
+    let cost=|threshold:f32,points:&PointForest|->(u64,u64){
+        choices.iter().fold((0,0),|(n,j),&(d,s,t)|{
+            let r=points.pick_range(t,s,d,view.focal,threshold);
+            (n+u64::from(r.count),j+u64::from(r.count.div_ceil(64)))
+        })
+    };
+    let mut threshold=points.threshold.max(2.2);
+    let budget=u64::from(points.budget);
+    const MAX_JOBS:u64=180_000;
+    let fits=|(n,j):(u64,u64)|n<=budget&&j<=MAX_JOBS;
+    for _ in 0..28{
+        if fits(cost(threshold,&points)){break;}
+        threshold*=1.25;
+    }
+    let refined=(threshold/1.10).max(2.2);
+    if fits(cost(refined,&points)){threshold=refined;}
+    points.threshold=threshold;
+    for (distance,site,tile) in choices{
+        let r=points.pick_range(tile,site,distance,view.focal,threshold);
+        if points.jobs.len() as u64+u64::from(r.count.div_ceil(64))>MAX_JOBS{continue;}
+        // At the outer edge let the planet's continuous canopy take over.
+        let upper=((1.0-super::lod::smoothstep(reach*0.79,reach,distance))*12.0).round().clamp(0.0,12.0) as u8;
+        if upper>0{points.push_tree(site,eye,r,upper);}
+    }
 }
 pub(super) fn install(app:&mut App) {
     if !enabled(){return;}
     info!("Igor point forest enabled; counters at lower right (IGOR_POINT_DEBUG=1 highlights compute pixels)");
     app.init_resource::<PointForest>()
         .add_systems(Startup,spawn_overlay)
-        .add_systems(PostUpdate,update_overlay.after(super::lod::update_lods));
+        .add_systems(PostUpdate,(select_points,update_overlay).chain().after(super::lod::update_lods));
     // First integration uses a single-sample depth buffer. Existing
     // renderer (and its MSAA setting) is untouched without the flag.
     app.add_systems(PostUpdate, single_sample_camera);
@@ -192,8 +276,8 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         0=>"waiting for perspective render view",1=>"compiling pipelines",2=>"pipeline error (see terminal)",
         3=>"unsupported view/limits",4=>"ready",_=>"unknown",
     };
-    let msg=format!("IGOR | {status} | {} trees / {} points | {} eligible / {} detailed | {} templates | {} GPU trees submitted",
-        forest.trees.len(),forest.selected,forest.eligible,forest.candidates,forest.templates.len(),forest.submitted.load(Ordering::Acquire));
+    let msg=format!("IGOR ONLY | {status} | {} trees / {} points | {} visible / {} sites | {} templates | LOD {:.2}px | {} GPU trees",
+        forest.trees.len(),forest.selected,forest.eligible,forest.candidates,forest.templates.len(),forest.threshold,forest.submitted.load(Ordering::Acquire));
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
 }
 fn single_sample_camera(mut cameras:Query<&mut Msaa,With<WorldCamera>>) {

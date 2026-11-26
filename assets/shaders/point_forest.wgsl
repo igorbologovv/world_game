@@ -141,9 +141,10 @@ fn paint(g:vec3<u32>,lane:u32,owner:bool){
             if !in_dither(pixel,job.w){continue;}
             let i=index(pixel);let key=coverage(projected,pixel);
             if key==0u{continue;}
+            let current=atomicLoad(&screen[i]);
             if owner{
-                if atomicLoad(&screen[i])==key{atomicMax(&screen[pixels()+i],id);}
-            }else{atomicMax(&screen[i],key);}
+                if current==key{atomicMax(&screen[pixels()+i],id);}
+            }else if key>=current{atomicMax(&screen[i],key);}
         }
     }
 }

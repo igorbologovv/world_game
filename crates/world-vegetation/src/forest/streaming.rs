@@ -140,6 +140,14 @@ pub(super) struct StreamStats {
 }
 
 impl ForestStream {
+    // The compute renderer consumes the canonical placement arrays directly.
+    // No ECS render entity or billboard has to exist for a tree to be drawn.
+    pub(super) fn point_sites(&self) -> impl Iterator<Item=Site> + '_ {
+        self.nodes.values().flat_map(|node| &node.leaves)
+            .filter_map(|leaf| leaf.sites.as_deref())
+            .flat_map(|sites| sites.iter().copied())
+    }
+
     pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
         self.nodes
             .values()
@@ -594,6 +602,17 @@ pub(super) fn stream(
     let forest_range = forest_band.y;
     let preload = settings.preload_margin.clamp(90.0, 420.0);
     let step = fade_step(&time, &settings);
+    if super::point_forest::enabled() {
+        // Only placement/discovery runs in the pure point path. The atlas,
+        // proxy mesh jobs, individual mesh entities and fade masks are bypassed.
+        forest.plan(&mut commands,eye,up,forward,time.elapsed_secs_f64(),forest_range+preload,&heights);
+        forest.allocate_sites(&heights,eye,clearing.as_deref());
+        let (trees,unsampled,jobs)=forest.nodes.values().flat_map(|node|&node.leaves)
+            .fold((0usize,0usize,0usize),|(n,u,j),leaf|
+                (n+leaf.sites.as_ref().map_or(0,|s|s.len()),u+usize::from(leaf.sites.is_none()),j+usize::from(leaf.placement.is_some())));
+        forest.stats=StreamStats{nodes:forest.nodes.len(),trees,unsampled,jobs,..default()};
+        return;
+    }
     // Build a single atlas after the authored LOD0 sources resolve. A baked
     // fallback must never replace an authored crown after its handoff.
     if forest.atlas.is_none()

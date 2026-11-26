@@ -65,3 +65,24 @@ pixel/depth and larger bounding rectangles between compute passes.
 Terrain, water, buildings and distant canopy retain their existing render
 paths. Full per-pixel source texture mapping, standalone light-space
 shadow map and exact standalone LOD remain future work.
+
+## Pure point forest mode
+
+With IGOR_POINT_FOREST=1, canonical placement discovery is the only part of
+legacy forest streaming that runs. Neither atlas construction, impostor/parent
+mesh baking, billboard uploads nor individual mesh-tree spawning runs. There
+is no silent polygon fallback. The point pass selects visible sites directly
+from streamed patch arrays out to the existing forest range (default 2 km),
+with conservative frustum/horizon checks and a global projected-size threshold
+that coarsens the whole visible forest to fit the 3.5M point budget. The finest
+and coarsest template levels are shared across instances; very distant trees
+fade into the existing terrain canopy color field. This is per-tree coarse
+LOD, not yet the standalone world-level merged cluster hierarchy.
+
+Legacy fern/card and ground-cover rendering is disabled in this mode for a
+clean forest comparison. IGOR_POINT_UNDERGROWTH=1 explicitly re-enables it.
+The original mode remains available by omitting IGOR_POINT_FOREST. The palm
+label requires a legacy entity and is absent in pure mode. While models or GPU
+pipelines load the point forest may be temporarily empty. The standalone
+per-pixel UV/alpha material system and directional shadow field are still not
+fully ported; terrain canopy shading remains enabled. GPU testing required.

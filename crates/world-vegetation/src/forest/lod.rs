@@ -348,6 +348,7 @@ pub(super) fn update_lods(
     mut trunks: Query<RenderParts<BarkMaterial>, With<Trunk>>,
     mut leaves: Query<RenderParts<FoliageMaterial>, (With<Leaves>, Without<Trunk>)>,
 ) {
+    if super::point_forest::enabled() { return; }
     if let Some(points) = point_forest.as_mut() { points.begin_frame(); }
     let Ok((entity, grid, camera, projection)) = cameras.single() else {
         return;
