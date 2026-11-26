@@ -4,7 +4,6 @@ members = [
     "apps/world-client",
     "apps/world-generator",
     "crates/world-core",
-    "crates/igor-renderer-core",
     "crates/world-diagnostics",
     "crates/world-generation",
     "crates/world-player",

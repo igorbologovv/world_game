@@ -1,36 +1,19 @@
-# Original Igor renderer integration (native core)
+# External Igor renderer dependency
 
-This branch vendors the CPU source from Igor_renderer commit
-9d50c07f471b5ddaf9ee6c50b4e3657df0d387f1 in crates/igor-renderer-core.
-The original tree subdivision, 16-byte raw and LOD records, patch and
-material layout, texture atlas and 22-level template hierarchy are used
-directly. The game's only source adapter provides decoded LOD0 geometry,
-textures, and placement. No 78k sample cap, per-template quotas, or silent
-color-only material fallback. The original compute shader projection,
-coverage, alpha test, early-Z, cache, owner and color functions are ported
-with quaternion transforms and a reversed-Z composite for Bevy. The pack
-is baked asynchronously for the visible model set; previously baked pack
-remains active during rebuild. Device storage limits are reported explicitly.
+The game uses Igor_renderer pinned to c88d818b1ebf74594d40be20b2f0e996ea71b590, with default features disabled.
+The shared library owns the CPU point baker, template LODs, material atlas,
+aggregation and the planetary compute shader source. The game owns Bevy
+resource allocation, spherical placement/selection and depth composition.
+The duplicated local renderer crate and full compute shader have been removed.
+The library assembles the previous planetary shader variant byte-for-byte
+from its unchanged standalone shader and host adaptation splices.
+No intended visual or selection changes in this dependency migration.
+The original planar shadow field still needs spherical adaptation.
 
 Run:
 ```sh
 IGOR_POINT_FOREST=1 cargo run --release -p world-client
 ```
-The overlay starts with IGOR NATIVE; UV is the actual raw record count.
-The pure point stream still bypasses all tree meshes and billboards.
-Existing terrain canopy shading remains active. The demo's fixed-plane
-shadow field and world-level cluster hierarchy are not yet adapted to the
-planet; the existing terrain/sky/water and undergrowth policy are unchanged.
-Original optional Hi-Z/TAA/GPU LOD are not ported. GPU and build validation
-are required. The core retains the original CPU demo APIs, but is headless:
-no second wgpu device, window or texture upload dependency.
 
-## Planet adaptation fixes
-
-Use actual template bounds/centre for LOD, with a near-depth floor for
-whole-template selection. Preserve game vertex tint by deduplicating
-triangle-mean colors in the original material layout. Use original
-weighted point aggregation for distant stable world cells at 16/64/256/1024 m.
-The current sparse adapter groups at a selected cell width rather than
-building the demo's persistent planar hierarchy. Clusters are reported
-separately. Original near samples and frame budget remain unchanged.
+Look for IGOR LIB in the overlay. Cargo may update Cargo.lock on first run.
+No second wgpu device, window or legacy billboard fallback is used.

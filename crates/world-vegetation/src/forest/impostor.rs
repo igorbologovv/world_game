@@ -68,7 +68,7 @@ impl Portraits {
     pub(super) fn point_variant(&self, species: Species, variant: usize) -> usize {
         if self.0[tile(species,variant)].is_some() {variant} else {variant % species.stock_variants()}
     }
-    pub(super) fn planet_input(&self,species:Species,variant:usize)->igor_renderer_core::planetary::InputTemplate{
+    pub(super) fn planet_input(&self,species:Species,variant:usize)->igor_renderer::planetary::InputTemplate{
         let variant=self.point_variant(species,variant);
         let tile=tile(species,variant);
         if let Some(source)=&self.0[tile]{return source.planet_input(tile);}
@@ -224,8 +224,8 @@ struct MappedNormals {
 }
 
 impl Source {
-    fn planet_input(&self,tile:usize)->igor_renderer_core::planetary::InputTemplate{
-        use igor_renderer_core::planetary::{InputTemplate,InputPart,InputImage};
+    fn planet_input(&self,tile:usize)->igor_renderer::planetary::InputTemplate{
+        use igor_renderer::planetary::{InputTemplate,InputPart,InputImage};
         let image=|i:&Image|{let s=i.texture_descriptor.size;InputImage{width:s.width,height:s.height,
             rgba:i.data.as_ref().expect("CPU source texture")[..(s.width*s.height*4) as usize].to_vec()}};
         let parts=self.parts.iter().enumerate().map(|(i,p)|InputPart{

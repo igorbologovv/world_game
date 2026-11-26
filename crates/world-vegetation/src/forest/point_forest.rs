@@ -19,10 +19,10 @@ use super::{impostor::{self, Portraits}, placement::Site, streaming::ForestStrea
     ForestModels, Species, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
 
 use bevy::tasks::{block_on,poll_once,AsyncComputeTaskPool,Task};
-use igor_renderer_core::{planetary::{Pack,Template,RAW},splat::{planetary_level,PlanetAggregate}};
+use igor_renderer::{planetary::{Pack,Template,RAW},splat::{planetary_level,PlanetAggregate}};
 
-const BUDGET:u32=3_500_000;
-const JOB_WIDTH:u32=1024;
+const BUDGET:u32=igor_renderer::render_api::DEFAULT_POINT_BUDGET as u32;
+const JOB_WIDTH:u32=igor_renderer::render_api::JOB_WIDTH;
 pub(super) fn enabled()->bool{std::env::var("IGOR_POINT_FOREST").as_deref()==Ok("1")}
 #[derive(Clone,Copy)]
 struct GpuTree{origin_scale:Vec4,rotation:Vec4,range:UVec4}
@@ -223,7 +223,7 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         0=>"waiting for perspective render view",1=>"compiling pipelines",2=>"pipeline error (see terminal)",
         3=>"unsupported view/limits",4=>"ready",_=>"unknown",
     };
-    let msg=format!("IGOR NATIVE | {status} | {} instances ({} clusters) / {} points ({} UV) | {} visible / {} sites | {} templates | LOD {:.2}px | {} GPU trees | {}",
+    let msg=format!("IGOR LIB | {status} | {} instances ({} clusters) / {} points ({} UV) | {} visible / {} sites | {} templates | LOD {:.2}px | {} GPU trees | {}",
         forest.trees.len(),forest.clusters,forest.selected,forest.textured,forest.eligible,forest.candidates,forest.pack.as_ref().map_or(0,|p|p.templates.len()),forest.threshold,forest.submitted.load(Ordering::Acquire),
         if forest.pending.is_some(){"baking original geometry"}else{forest.error.as_deref().unwrap_or("")});
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
@@ -266,7 +266,7 @@ struct FrameUniform{
 #[derive(Resource)]
 struct Pipelines{compute:BindGroupLayoutDescriptor,composite:BindGroupLayoutDescriptor,
     clear:CachedComputePipelineId,depth:CachedComputePipelineId,owner:CachedComputePipelineId,resolve:CachedComputePipelineId,draw:CachedRenderPipelineId}
-fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>){
+fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,mut shaders:ResMut<Assets<Shader>>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>){
     let compute=BindGroupLayoutDescriptor::new("original Igor compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
         storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),
@@ -276,7 +276,7 @@ fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,cache:Res<Pipeli
         storage_buffer_sized(false,None),storage_buffer_sized(false,None))));
     let composite=BindGroupLayoutDescriptor::new("original Igor composite",&BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),storage_buffer_read_only_sized(false,None))));
-    let shader=assets.load("shaders/point_forest.wgsl");
+    let shader=shaders.add(Shader::from_wgsl(igor_renderer::planetary::compute_shader(),"igor_renderer/planetary.wgsl"));
     let pipeline=|entry:&'static str|cache.queue_compute_pipeline(ComputePipelineDescriptor{label:Some(entry.into()),
         layout:vec![compute.clone()],shader:shader.clone(),entry_point:Some(entry.into()),zero_initialize_workgroup_memory:true,..default()});
     let clear=pipeline("clear_cs");let depth=pipeline("depth_cs");let owner=pipeline("owner_cs");let resolve=pipeline("resolve_cs");
@@ -300,9 +300,9 @@ impl GpuPack{
             mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:TextureFormat::Rgba8Unorm,
             usage:TextureUsages::TEXTURE_BINDING|TextureUsages::COPY_DST,view_formats:&[TextureFormat::Rgba8UnormSrgb]});
         for t in &atlas.tiles{
-            queue.write_texture(TexelCopyTextureInfo{texture:&texture,mip_level:0,origin:Origin3d{x:t.x,y:t.y,z:t.layer},aspect:TextureAspect::All},
-                &t.rgba,TexelCopyBufferLayout{offset:0,bytes_per_row:Some(t.width*4),rows_per_image:None},
-                Extent3d{width:t.width,height:t.height,depth_or_array_layers:1});
+            queue.write_texture(TexelCopyTextureInfo{texture:&texture,mip_level:0,origin:Origin3d{x:t.origin[0],y:t.origin[1],z:t.origin[2]},aspect:TextureAspect::All},
+                &t.rgba,TexelCopyBufferLayout{offset:0,bytes_per_row:Some(t.size[0]*4),rows_per_image:None},
+                Extent3d{width:t.size[0],height:t.size[1],depth_or_array_layers:1});
         }
         let make=|format|texture.create_view(&TextureViewDescriptor{format:Some(format),dimension:Some(TextureViewDimension::D2Array),..default()});
         let color=make(TextureFormat::Rgba8UnormSrgb);let normal=make(TextureFormat::Rgba8Unorm);
