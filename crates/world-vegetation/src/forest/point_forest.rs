@@ -1,6 +1,6 @@
 //! Experimental bridge for the standalone Igor direct-compute renderer.
 //! No second device/window: use Bevy's RenderDevice and real scene depth.
-use std::{collections::{BTreeMap, HashMap}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{collections::{BTreeMap, HashMap}, sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}};
 use bevy::{
     camera::Exposure,
     core_pipeline::{core_3d::{main_opaque_pass_3d, main_transparent_pass_3d, CORE_3D_DEPTH_FORMAT}, schedule::Core3d, Core3dSystems, FullscreenShader},
@@ -77,6 +77,11 @@ pub(super) struct PointForest {
     geometry:Arc<Vec<UVec4>>,
     templates:HashMap<usize,[Range;WIDTHS.len()]>,
     ready:Arc<AtomicBool>,
+    status:Arc<AtomicU32>,
+    submitted:Arc<AtomicU32>,
+    rejected:HashMap<usize, ()>,
+    pub candidates:u32,
+    pub eligible:u32,
     trees:Vec<GpuTree>,
     jobs:Vec<UVec4>,
     selected:u32,
@@ -86,22 +91,25 @@ pub(super) struct PointForest {
 impl Default for PointForest {
     fn default() -> Self {
         Self{geometry:Arc::new(Vec::new()),templates:HashMap::new(),ready:Arc::new(AtomicBool::new(false)),
+            status:Arc::new(AtomicU32::new(0)),submitted:Arc::new(AtomicU32::new(0)),rejected:HashMap::new(),candidates:0,eligible:0,
             trees:Vec::new(),jobs:Vec::new(),selected:0,baked_this_frame:false,
             budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000)}
     }
 }
 impl PointForest {
     pub(super) fn begin_frame(&mut self) {
-        self.trees.clear();self.jobs.clear();self.selected=0;self.baked_this_frame=false;
+        self.trees.clear();self.jobs.clear();self.selected=0;self.baked_this_frame=false;self.candidates=0;self.eligible=0;
     }
     pub(super) fn add_tree(&mut self, portraits:&Portraits, site:Site, eye:DVec3, distance:f32, mesh_level:usize) -> bool {
         if !self.ready.load(Ordering::Acquire) { return false; }
         let tile=impostor::tile(site.species,site.variant);
         if !self.templates.contains_key(&tile) {
-            if self.baked_this_frame { return false; }
-            self.baked_this_frame=true;
+            if self.baked_this_frame || self.rejected.contains_key(&tile) { return false; }
             let Some(samples)=portraits.point_samples(site.species,site.variant) else {return false;};
-            if samples.is_empty() || samples.iter().any(|s|s.position.abs().max_element()>=127.0) {return false;}
+            self.baked_this_frame=true;
+            if samples.is_empty() || samples.iter().any(|s|s.position.abs().max_element()>=127.0) {
+                self.rejected.insert(tile,()); warn!("Point forest: invalid sample template {tile}");return false;
+            }
             let mut levels:[Vec<UVec4>;WIDTHS.len()]=std::array::from_fn(|i|
                 if i==0 {samples.iter().copied().map(packed).collect()} else {aggregate(&samples,WIDTHS[i])});
             // Avoid count inversions between independently sampled grids.
@@ -109,7 +117,7 @@ impl PointForest {
                 if levels[i].len()<levels[i+1].len(){levels[i+1]=levels[i].clone();}
             }
             let count:usize=levels.iter().map(Vec::len).sum();
-            if self.geometry.len()+count>MAX_RECORDS {return false;}
+            if self.geometry.len()+count>MAX_RECORDS {self.rejected.insert(tile,());warn!("Point forest: template {tile} exceeds resident budget");return false;}
             let storage=Arc::make_mut(&mut self.geometry);
             let ranges=std::array::from_fn(|i| {
                 let start=storage.len() as u32;
@@ -140,7 +148,10 @@ impl PointForest {
 }
 pub(super) fn install(app:&mut App) {
     if std::env::var("IGOR_POINT_FOREST").as_deref()!=Ok("1"){return;}
-    app.init_resource::<PointForest>();
+    info!("Igor point forest enabled; counters at lower right (IGOR_POINT_DEBUG=1 highlights compute pixels)");
+    app.init_resource::<PointForest>()
+        .add_systems(Startup,spawn_overlay)
+        .add_systems(PostUpdate,update_overlay.after(super::lod::update_lods));
     // First integration uses a single-sample depth buffer. Existing
     // renderer (and its MSAA setting) is untouched without the flag.
     app.add_systems(PostUpdate, single_sample_camera);
@@ -151,13 +162,31 @@ pub(super) fn install(app:&mut App) {
                 .after(main_opaque_pass_3d).before(main_transparent_pass_3d));
     }
 }
+#[derive(Component)]
+struct PointOverlay;
+fn spawn_overlay(mut commands:Commands){
+    commands.spawn((PointOverlay,Text::new("IGOR | initializing"),TextFont{font_size:15.0,..default()},
+        TextColor(Color::srgb(0.9,1.0,0.8)),BackgroundColor(Color::srgba(0.02,0.03,0.02,0.85)),
+        Node{position_type:PositionType::Absolute,right:Val::Px(14.0),bottom:Val::Px(14.0),
+            padding:UiRect::all(Val::Px(6.0)),..default()}));
+}
+fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,mut overlay:Query<&mut Text,With<PointOverlay>>){
+    *elapsed+=time.delta_secs();if *elapsed<0.5{return;}*elapsed=0.0;
+    let status=match forest.status.load(Ordering::Acquire){
+        0=>"waiting for perspective render view",1=>"compiling pipelines",2=>"pipeline error (see terminal)",
+        3=>"unsupported view/limits",4=>"ready",_=>"unknown",
+    };
+    let msg=format!("IGOR | {status} | {} trees / {} points | {} eligible / {} detailed | {} templates | {} GPU trees submitted",
+        forest.trees.len(),forest.selected,forest.eligible,forest.candidates,forest.templates.len(),forest.submitted.load(Ordering::Acquire));
+    if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
+}
 fn single_sample_camera(mut cameras:Query<&mut Msaa,With<WorldCamera>>) {
     for mut msaa in &mut cameras {if *msaa!=Msaa::Off{*msaa=Msaa::Off;}}
 }
 
 #[derive(Resource)]
 struct ExtractedForest {
-    geometry:Arc<Vec<UVec4>>, ready:Arc<AtomicBool>,
+    geometry:Arc<Vec<UVec4>>, ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
     trees:Vec<GpuTree>,jobs:Vec<UVec4>,
 }
 #[derive(Component)]
@@ -169,13 +198,15 @@ fn extract_frame(
     lights:Extract<Query<(&DirectionalLight,&Transform)>>,
     time:Extract<Res<Time>>,
 ) {
-    commands.insert_resource(ExtractedForest{geometry:forest.geometry.clone(),ready:forest.ready.clone(),
+    commands.insert_resource(ExtractedForest{geometry:forest.geometry.clone(),ready:forest.ready.clone(),status:forest.status.clone(),submitted:forest.submitted.clone(),
         trees:forest.trees.clone(),jobs:forest.jobs.clone()});
     let sun=lights.iter().max_by(|a,b|a.0.illuminance.total_cmp(&b.0.illuminance));
+    let mut perspective=false;
     for (entity,transform,projection,exposure) in &*cameras {
         if !matches!(projection,Projection::Perspective(_)) {
             commands.entity(entity).remove::<PointCamera>();continue;
         }
+        perspective=true;
         let (direction,light)=sun.map_or((Vec3::Y,Vec3::ONE),|(light,transform)|
             (transform.back().as_vec3(),light.color.to_linear().to_vec3()*light.illuminance*exposure.exposure()));
         commands.entity(entity).insert(PointCamera{
@@ -183,6 +214,7 @@ fn extract_frame(
             sun:direction,sunlight:light,elapsed:time.elapsed_secs(),
         });
     }
+    if !perspective {forest.ready.store(false,Ordering::Release);forest.status.store(0,Ordering::Release);forest.submitted.store(0,Ordering::Release);}
 }
 #[derive(Clone,Default,ShaderType)]
 struct FrameUniform { clip:Mat4, viewport:UVec4, params:UVec4, sun_time:Vec4, sunlight:Vec4 }
@@ -236,15 +268,31 @@ fn render_points(
     let (camera,view,target,depth_texture,msaa)=view.into_inner();
     let (Some(depth),Some(owner),Some(resolve),Some(draw))=(cache.get_compute_pipeline(pipelines.depth),
         cache.get_compute_pipeline(pipelines.owner),cache.get_compute_pipeline(pipelines.resolve),
-        cache.get_render_pipeline(pipelines.draw)) else {forest.ready.store(false,Ordering::Release);return;};
+        cache.get_render_pipeline(pipelines.draw)) else {
+        forest.ready.store(false,Ordering::Release);
+        forest.submitted.store(0,Ordering::Release);
+        let states=[cache.get_compute_pipeline_state(pipelines.depth),cache.get_compute_pipeline_state(pipelines.owner),
+            cache.get_compute_pipeline_state(pipelines.resolve),cache.get_render_pipeline_state(pipelines.draw)];
+        let failed=states.iter().any(|s|matches!(s,CachedPipelineState::Err(_)));
+        let status=if failed{2}else{1};
+        if forest.status.swap(status,Ordering::AcqRel)!=status && failed{
+            for s in states {if let CachedPipelineState::Err(err)=s {error!("Point forest pipeline: {err:?}");}}
+        }
+        return;
+    };
     let v=view.viewport;
     let bytes=u64::from(v.z)*u64::from(v.w)*12;
     if msaa.samples()!=1||target.main_texture_format()!=TextureFormat::Rgba16Float||
         v.z==0||v.w==0||bytes>u64::from(device.limits().max_storage_buffer_binding_size) {
-        forest.ready.store(false,Ordering::Release);return;
+        forest.ready.store(false,Ordering::Release);forest.submitted.store(0,Ordering::Release);
+        if forest.status.swap(3,Ordering::AcqRel)!=3 {
+            warn!("Point forest unsupported view: format={:?}, MSAA={}, viewport={v:?}, screen bytes={bytes}, storage limit={}",target.main_texture_format(),msaa.samples(),device.limits().max_storage_buffer_binding_size);
+        }
+        return;
     }
     forest.ready.store(true,Ordering::Release);
-    if forest.jobs.is_empty(){return;}
+    if forest.status.swap(4,Ordering::AcqRel)!=4 {info!("Point forest GPU pipelines ready");}
+    if forest.jobs.is_empty(){forest.submitted.store(0,Ordering::Release);return;}
     if state.uploaded.as_ref().is_none_or(|old|!Arc::ptr_eq(old,&forest.geometry)){
         state.points.clear();
         state.points.extend(forest.geometry.iter().map(|p|p.to_array()));
@@ -258,7 +306,7 @@ fn render_points(
     state.jobs.extend(forest.jobs.iter().map(|job|job.to_array()));
     state.jobs.write_buffer(&device,&queue);
     let count=forest.jobs.len() as u32;
-    state.uniform.set(FrameUniform{clip:camera.clip,viewport:v,params:UVec4::new(count,JOB_WIDTH,0,0),
+    state.uniform.set(FrameUniform{clip:camera.clip,viewport:v,params:UVec4::new(count,JOB_WIDTH,u32::from(std::env::var("IGOR_POINT_DEBUG").as_deref()==Ok("1")),0),
         sun_time:camera.sun.extend(camera.elapsed),sunlight:camera.sunlight.extend(0.0)});
     state.uniform.write_buffer(&device,&queue);
     if state.screen.as_ref().is_none_or(|(size,_)|*size!=bytes){
@@ -287,6 +335,7 @@ fn render_points(
         color_attachments:&attachments,depth_stencil_attachment:Some(depth_texture.get_attachment(StoreOp::Store)),..default()});
     pass.set_viewport(v.x as f32,v.y as f32,v.z as f32,v.w as f32,0.0,1.0);
     pass.set_pipeline(draw);pass.set_bind_group(0,&composite,&[]);pass.draw(0..3,0..1);
+    forest.submitted.store(forest.trees.len() as u32,Ordering::Release);
 }
 
 #[cfg(test)]

@@ -123,6 +123,6 @@ fn resolve_cs(@builtin(global_invocation_id) id:vec3<u32>){
     let h=point_pos(p).y*tree.origin_scale.w;
     // Cheap crown-interior shading; terrain already has its own canopy shadow field.
     let visibility=mix(0.48,1.0,smoothstep(0.1,0.9,h/max(bitcast<f32>(tree.range.w),0.1)));
-    let color=unpack4x8unorm(p.z).rgb*(0.12+0.32*ndl*visibility);
+    let color=select(unpack4x8unorm(p.z).rgb*(0.12+0.32*ndl*visibility),vec3<f32>(1.0,0.02,0.8),cam.params.z!=0u);
     atomicStore(&screen[2u*pixels()+i],pack4x8unorm(vec4<f32>(color,1.0)));
 }

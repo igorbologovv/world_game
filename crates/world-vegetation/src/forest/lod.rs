@@ -360,6 +360,7 @@ pub(super) fn update_lods(
     stats.blends = 0;
     let models_changed = models.is_changed();
     for mut tree in &mut trees {
+        if let Some(points)=point_forest.as_mut(){points.candidates+=1;}
         let distance = eye.distance(tree.site.position) as f32;
         let (impostor, readiness) = forest.coverage(tree.patch);
         let range = settings.impostor_range.clamp(200.0, 600.0);
@@ -390,6 +391,7 @@ pub(super) fn update_lods(
         // complementary impostor/terrain handoff and all fallback meshes.
         if !hero && upper == STEPS as u8 && !view.orthographic
             && point_forest.as_mut().is_some_and(|points| {
+                points.eligible+=1;
                 points.add_tree(&models.portraits, tree.site, eye, distance, level)
             })
         {

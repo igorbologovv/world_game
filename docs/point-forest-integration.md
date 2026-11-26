@@ -41,3 +41,11 @@ standalone fixed-sun height-band shadow map is not ported in this step.
 No sound, TAA, projection-cache or GPU LOD port yet. Startup shader
 compilation and unsupported view configurations fall back to meshes.
 The first implementation needs compilation and visual/GPU validation.
+
+## Verify activation
+
+The bottom-right IGOR overlay reports pipeline status, selected trees/points,
+eligible vs resident detailed trees, baked models, and GPU-submitted trees.
+Set `IGOR_POINT_DEBUG=1` along with `IGOR_POINT_FOREST=1` to tint only
+compute-rendered pixels magenta. Mesh/impostor fallbacks retain normal colors.
+The terminal logs pipeline failures and unsupported view configurations.
