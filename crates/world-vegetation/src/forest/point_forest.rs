@@ -202,7 +202,13 @@ pub(super) fn install(app:&mut App) {
     // First integration uses a single-sample depth buffer. Existing
     // renderer (and its MSAA setting) is untouched without the flag.
     app.add_systems(PostUpdate, single_sample_camera);
+    // Shader assets live in the main world; Bevy extracts them into
+    // the render pipeline cache. Keep a strong handle in the render world.
+    if app.get_sub_app(RenderApp).is_none(){return;}
+    let shader=app.world_mut().resource_mut::<Assets<Shader>>()
+        .add(Shader::from_wgsl(igor_renderer::planetary::compute_shader(),"igor_renderer/planetary.wgsl"));
     if let Some(render)=app.get_sub_app_mut(RenderApp) {
+        render.insert_resource(PointShader(shader));
         render.add_systems(ExtractSchedule,extract_frame)
             .add_systems(RenderStartup,init_pipelines)
             .add_systems(Core3d,render_points.in_set(Core3dSystems::MainPass)
@@ -266,7 +272,9 @@ struct FrameUniform{
 #[derive(Resource)]
 struct Pipelines{compute:BindGroupLayoutDescriptor,composite:BindGroupLayoutDescriptor,
     clear:CachedComputePipelineId,depth:CachedComputePipelineId,owner:CachedComputePipelineId,resolve:CachedComputePipelineId,draw:CachedRenderPipelineId}
-fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,mut shaders:ResMut<Assets<Shader>>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>){
+#[derive(Resource)]
+struct PointShader(Handle<Shader>);
+fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<PointShader>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>){
     let compute=BindGroupLayoutDescriptor::new("original Igor compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
         storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),
@@ -276,7 +284,7 @@ fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,mut shaders:ResM
         storage_buffer_sized(false,None),storage_buffer_sized(false,None))));
     let composite=BindGroupLayoutDescriptor::new("original Igor composite",&BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),storage_buffer_read_only_sized(false,None))));
-    let shader=shaders.add(Shader::from_wgsl(igor_renderer::planetary::compute_shader(),"igor_renderer/planetary.wgsl"));
+    let shader=shader.0.clone();
     let pipeline=|entry:&'static str|cache.queue_compute_pipeline(ComputePipelineDescriptor{label:Some(entry.into()),
         layout:vec![compute.clone()],shader:shader.clone(),entry_point:Some(entry.into()),zero_initialize_workgroup_memory:true,..default()});
     let clear=pipeline("clear_cs");let depth=pipeline("depth_cs");let owner=pipeline("owner_cs");let resolve=pipeline("resolve_cs");
