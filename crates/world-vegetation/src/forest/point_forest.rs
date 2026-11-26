@@ -1,5 +1,7 @@
 //! Experimental bridge for the standalone Igor direct-compute renderer.
 //! No second device/window: use Bevy's RenderDevice and real scene depth.
+mod shader;
+
 use std::{collections::BTreeMap, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}};
 use bevy::{
     camera::Exposure,
@@ -7,7 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{binding_types::*, *},
-        renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
+        renderer::{RenderAdapter, RenderContext, RenderDevice, RenderQueue, ViewQuery},
         sync_world::RenderEntity,
         view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
         Extract, ExtractSchedule, RenderApp, RenderStartup,
@@ -178,18 +180,20 @@ pub(super) fn install(app:&mut App) {
     app.init_resource::<PointForest>()
         .add_systems(Startup,spawn_overlay)
         .add_systems(PostUpdate,(select_points,update_overlay).chain().after(super::lod::update_lods));
-    // First integration uses a single-sample depth buffer. Existing
-    // renderer (and its MSAA setting) is untouched without the flag.
-    app.add_systems(PostUpdate, single_sample_camera);
+    app.add_systems(PostUpdate, sampleable_camera_depth);
     // Shader assets live in the main world; Bevy extracts them into
     // the render pipeline cache. Keep a strong handle in the render world.
     if app.get_sub_app(RenderApp).is_none(){return;}
     let shader=app.world_mut().resource_mut::<Assets<Shader>>()
-        .add(Shader::from_wgsl(igor_renderer::planetary::compute_shader(),"igor_renderer/planetary.wgsl"));
-    let ground_shader=app.world_mut().resource_mut::<Assets<Shader>>()
-        .add(Shader::from_wgsl(igor_renderer::planetary::ground_shadow_shader(),"igor_renderer/ground_shadow.wgsl"));
+        .add(Shader::from_wgsl(shader::compute(),"igor_renderer/planetary.wgsl"));
+    let ground_shaders = [false, true].map(|multisampled|
+        app.world_mut().resource_mut::<Assets<Shader>>().add(Shader::from_wgsl(
+            shader::ground(multisampled),
+            if multisampled {"igor_renderer/ground_shadow_msaa.wgsl"} else {"igor_renderer/ground_shadow.wgsl"},
+        ))
+    );
     if let Some(render)=app.get_sub_app_mut(RenderApp) {
-        render.insert_resource(PointShader(shader,ground_shader));
+        render.insert_resource(PointShader(shader,ground_shaders));
         render.add_systems(ExtractSchedule,extract_frame)
             .add_systems(RenderStartup,init_pipelines)
             .add_systems(Core3d,render_points.in_set(Core3dSystems::MainPass)
@@ -219,9 +223,8 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         if forest.pending.is_some(){"baking original geometry"}else{forest.error.as_deref().unwrap_or("")});
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
 }
-fn single_sample_camera(mut cameras:Query<(&mut Msaa,&mut Camera3d),With<WorldCamera>>) {
-    for (mut msaa,mut camera) in &mut cameras {
-        if *msaa!=Msaa::Off{*msaa=Msaa::Off;}
+fn sampleable_camera_depth(mut cameras:Query<&mut Camera3d,With<WorldCamera>>) {
+    for mut camera in &mut cameras {
         let usage=TextureUsages::from(camera.depth_texture_usages);
         if !usage.contains(TextureUsages::TEXTURE_BINDING){camera.depth_texture_usages=(usage|TextureUsages::TEXTURE_BINDING).into();}
     }
@@ -261,11 +264,25 @@ struct FrameUniform{
     shadow_x:Vec4,shadow_z:Vec4,shadow_height:Vec4,
 }
 #[derive(Resource)]
-struct Pipelines{compute:BindGroupLayoutDescriptor,composite:BindGroupLayoutDescriptor,ground:BindGroupLayoutDescriptor,ground_draw:CachedRenderPipelineId,
-    clear:CachedComputePipelineId,depth:CachedComputePipelineId,owner:CachedComputePipelineId,resolve:CachedComputePipelineId,draw:CachedRenderPipelineId}
+struct Pipelines {
+    compute: BindGroupLayoutDescriptor,
+    composite: BindGroupLayoutDescriptor,
+    views: BTreeMap<u32, ViewPipelines>,
+    clear: CachedComputePipelineId,
+    depth: CachedComputePipelineId,
+    owner: CachedComputePipelineId,
+    resolve: CachedComputePipelineId,
+}
+
+struct ViewPipelines {
+    draw: CachedRenderPipelineId,
+    ground_layout: BindGroupLayoutDescriptor,
+    ground_draw: CachedRenderPipelineId,
+}
+
 #[derive(Resource)]
-struct PointShader(Handle<Shader>,Handle<Shader>);
-fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<PointShader>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>){
+struct PointShader(Handle<Shader>, [Handle<Shader>; 2]);
+fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<PointShader>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>,adapter:Res<RenderAdapter>){
     let compute=BindGroupLayoutDescriptor::new("original Igor compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
         storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),
@@ -275,25 +292,36 @@ fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<Point
         storage_buffer_sized(false,None),storage_buffer_sized(false,None),texture_2d(TextureSampleType::Float{filterable:true}))));
     let composite=BindGroupLayoutDescriptor::new("original Igor composite",&BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),storage_buffer_read_only_sized(false,None))));
-    let ground=BindGroupLayoutDescriptor::new("Igor ground shadow",&BindGroupLayoutEntries::sequential(
-        ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),texture_depth_2d(),
-        texture_2d(TextureSampleType::Float{filterable:true}),sampler(SamplerBindingType::Filtering))));
-    let ground_draw=cache.queue_render_pipeline(RenderPipelineDescriptor{label:Some("Igor ground shadow".into()),layout:vec![ground.clone()],
-        vertex:fullscreen.to_vertex_state(),fragment:Some(FragmentState{shader:shader.1.clone(),entry_point:Some("fragment".into()),
-            shader_defs:vec![],constants:vec![],targets:vec![Some(ColorTargetState{format:TextureFormat::Rgba16Float,
-                blend:Some(BlendState{color:BlendComponent{src_factor:BlendFactor::Dst,dst_factor:BlendFactor::Zero,operation:BlendOperation::Add},
-                    alpha:BlendComponent{src_factor:BlendFactor::Zero,dst_factor:BlendFactor::One,operation:BlendOperation::Add}}),
-                write_mask:ColorWrites::COLOR})]}),..default()});
-    let shader=shader.0.clone();
+    let views = [1, 2, 4, 8].into_iter().filter(|&count| {
+        [TextureFormat::Rgba16Float, CORE_3D_DEPTH_FORMAT].iter().all(|&format|
+            adapter.get_texture_format_features(format).flags.sample_count_supported(count))
+    }).map(|count| {
+        let depth_binding = BindingType::Texture {
+            sample_type: TextureSampleType::Depth,
+            view_dimension: TextureViewDimension::D2,
+            multisampled: count > 1,
+        };
+        let ground_layout=BindGroupLayoutDescriptor::new("Igor ground shadow",&BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,(uniform_buffer::<FrameUniform>(false),depth_binding,
+            texture_2d(TextureSampleType::Float{filterable:true}),sampler(SamplerBindingType::Filtering))));
+        let ground_draw=cache.queue_render_pipeline(RenderPipelineDescriptor{label:Some("Igor ground shadow".into()),layout:vec![ground_layout.clone()],
+            vertex:fullscreen.to_vertex_state(),fragment:Some(FragmentState{shader:shader.1[usize::from(count > 1)].clone(),entry_point:Some("fragment".into()),
+                shader_defs:vec![],constants:vec![],targets:vec![Some(ColorTargetState{format:TextureFormat::Rgba16Float,
+                    blend:Some(BlendState{color:BlendComponent{src_factor:BlendFactor::Dst,dst_factor:BlendFactor::Zero,operation:BlendOperation::Add},
+                        alpha:BlendComponent{src_factor:BlendFactor::Zero,dst_factor:BlendFactor::One,operation:BlendOperation::Add}}),
+                    write_mask:ColorWrites::COLOR})]}),multisample: MultisampleState {count,..default()},..default()});
+        let draw=cache.queue_render_pipeline(RenderPipelineDescriptor{label:Some("original Igor depth composite".into()),layout:vec![composite.clone()],
+            vertex:fullscreen.to_vertex_state(),fragment:Some(FragmentState{shader:assets.load("shaders/point_forest_composite.wgsl"),
+                entry_point:Some("fragment".into()),shader_defs:vec![],constants:vec![],
+                targets:vec![Some(ColorTargetState{format:TextureFormat::Rgba16Float,blend:None,write_mask:ColorWrites::ALL})]}),
+            depth_stencil:Some(DepthStencilState{format:CORE_3D_DEPTH_FORMAT,depth_write_enabled:Some(true),depth_compare:Some(CompareFunction::GreaterEqual),stencil:default(),bias:default()}),
+            multisample: MultisampleState {count,..default()},..default()});
+        (count, ViewPipelines {draw, ground_layout, ground_draw})
+    }).collect();
     let pipeline=|entry:&'static str|cache.queue_compute_pipeline(ComputePipelineDescriptor{label:Some(entry.into()),
-        layout:vec![compute.clone()],shader:shader.clone(),entry_point:Some(entry.into()),zero_initialize_workgroup_memory:true,..default()});
+        layout:vec![compute.clone()],shader:shader.0.clone(),entry_point:Some(entry.into()),zero_initialize_workgroup_memory:true,..default()});
     let clear=pipeline("clear_cs");let depth=pipeline("depth_cs");let owner=pipeline("owner_cs");let resolve=pipeline("resolve_cs");
-    let draw=cache.queue_render_pipeline(RenderPipelineDescriptor{label:Some("original Igor depth composite".into()),layout:vec![composite.clone()],
-        vertex:fullscreen.to_vertex_state(),fragment:Some(FragmentState{shader:assets.load("shaders/point_forest_composite.wgsl"),
-            entry_point:Some("fragment".into()),shader_defs:vec![],constants:vec![],
-            targets:vec![Some(ColorTargetState{format:TextureFormat::Rgba16Float,blend:None,write_mask:ColorWrites::ALL})]}),
-        depth_stencil:Some(DepthStencilState{format:CORE_3D_DEPTH_FORMAT,depth_write_enabled:Some(true),depth_compare:Some(CompareFunction::GreaterEqual),stencil:default(),bias:default()}),..default()});
-    commands.insert_resource(Pipelines{compute,composite,ground,ground_draw,clear,depth,owner,resolve,draw});
+    commands.insert_resource(Pipelines{compute,composite,views,clear,depth,owner,resolve});
 }
 struct GpuPack{source:Arc<Pack>,raw:RawBufferVec<[u32;4]>,lod:RawBufferVec<[u32;4]>,
     patches:RawBufferVec<[u32;32]>,materials:RawBufferVec<[u32;16]>,_texture:Texture,color:TextureView,normal:TextureView,sampler:Sampler}
@@ -332,22 +360,24 @@ fn render_points(view:ViewQuery<(&PointCamera,&ExtractedView,&ViewTarget,&ViewDe
     let limits=device.limits();
     forest.storage_limit.store(u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size),Ordering::Release);
     forest.layer_limit.store(limits.max_texture_array_layers,Ordering::Release);
+    let v=view.viewport;let bytes=u64::from(v.z)*u64::from(v.w)*16;
+    let Some(view_pipelines) = pipelines.views.get(&msaa.samples()).filter(|_| {
+        target.main_texture_format()==TextureFormat::Rgba16Float&&v.z!=0&&v.w!=0&&
+        bytes<=u64::from(limits.max_storage_buffer_binding_size)&&limits.max_storage_buffers_per_shader_stage>=8
+    }) else {
+        forest.ready.store(false,Ordering::Release);forest.submitted.store(0,Ordering::Release);
+        if forest.status.swap(3,Ordering::AcqRel)!=3{warn!("Original Igor unsupported view/limits: {limits:?}");}return;
+    };
     let (Some(clear),Some(depth),Some(owner),Some(resolve),Some(draw))=(cache.get_compute_pipeline(pipelines.clear),
         cache.get_compute_pipeline(pipelines.depth),cache.get_compute_pipeline(pipelines.owner),cache.get_compute_pipeline(pipelines.resolve),
-        cache.get_render_pipeline(pipelines.draw))else{
+        cache.get_render_pipeline(view_pipelines.draw))else{
         forest.ready.store(false,Ordering::Release);forest.submitted.store(0,Ordering::Release);
         let states=[cache.get_compute_pipeline_state(pipelines.clear),cache.get_compute_pipeline_state(pipelines.depth),
-            cache.get_compute_pipeline_state(pipelines.owner),cache.get_compute_pipeline_state(pipelines.resolve),cache.get_render_pipeline_state(pipelines.draw)];
+            cache.get_compute_pipeline_state(pipelines.owner),cache.get_compute_pipeline_state(pipelines.resolve),cache.get_render_pipeline_state(view_pipelines.draw)];
         let failed=states.iter().any(|s|matches!(s,CachedPipelineState::Err(_)));let status=if failed{2}else{1};
         if forest.status.swap(status,Ordering::AcqRel)!=status&&failed{for s in states{if let CachedPipelineState::Err(e)=s{error!("Original Igor pipeline: {e:?}");}}}
         return;
     };
-    let v=view.viewport;let bytes=u64::from(v.z)*u64::from(v.w)*12;
-    if msaa.samples()!=1||target.main_texture_format()!=TextureFormat::Rgba16Float||v.z==0||v.w==0||
-        bytes>u64::from(limits.max_storage_buffer_binding_size)||limits.max_storage_buffers_per_shader_stage<8{
-        forest.ready.store(false,Ordering::Release);forest.submitted.store(0,Ordering::Release);
-        if forest.status.swap(3,Ordering::AcqRel)!=3{warn!("Original Igor unsupported view/limits: {limits:?}");}return;
-    }
     forest.ready.store(true,Ordering::Release);forest.status.store(4,Ordering::Release);
     let Some(pack)=forest.pack.as_ref()else{return;};
     let Some(selection)=forest.selection.as_ref().filter(|s|!s.jobs.is_empty()) else {
@@ -385,7 +415,7 @@ fn render_points(view:ViewQuery<(&PointCamera,&ExtractedView,&ViewTarget,&ViewDe
     });
     state.uniform.set(FrameUniform{origin:Vec4::ZERO,forward:camera.forward.extend(0.0),right:camera.right.extend(0.0),up:camera.up.extend(0.0),
         screen:Vec4::new(v.z as f32,v.w as f32,2.0/(v.w as f32*pr.y_axis.y.abs()),23.0),
-        extent:Vec4::new(0.0,0.0,0.0,camera.far.max(1.0)),params:UVec4::new(count,0,u32::from(std::env::var("IGOR_POINT_DEBUG").as_deref()==Ok("1")),0),
+        extent:bevy::math::DVec3::from_array(forest.eye).normalize_or_zero().as_vec3().extend(camera.far.max(1.0)),params:UVec4::new(count,0,u32::from(std::env::var("IGOR_POINT_DEBUG").as_deref()==Ok("1")),0),
         effects:Vec4::new(camera.elapsed,1.0,strength,0.0),sun:camera.sun.extend(0.0),sunlight:camera.sunlight.extend(0.0),
         depth_coeff:Vec4::new(pr.z_axis.z,pr.w_axis.z,pr.z_axis.w,pr.w_axis.w),viewport:v,
         shadow_x:Vec4::from_array(shadow_uniform[0]),shadow_z:Vec4::from_array(shadow_uniform[1]),shadow_height:Vec4::from_array(shadow_uniform[2])});
@@ -409,9 +439,9 @@ fn render_points(view:ViewQuery<(&PointCamera,&ExtractedView,&ViewTarget,&ViewDe
     // Modulate the already-rendered opaque ground before point composition.
     // Sample depth only in a pass without a depth attachment.
     if strength>0.0 {
-        if let Some(pipeline)=cache.get_render_pipeline(pipelines.ground_draw){
+        if let Some(pipeline)=cache.get_render_pipeline(view_pipelines.ground_draw){
             let depth_view=depth_texture.texture().create_view(&TextureViewDescriptor::default());
-            let bind=device.create_bind_group("Igor ground shadow",&cache.get_bind_group_layout(&pipelines.ground),
+            let bind=device.create_bind_group("Igor ground shadow",&cache.get_bind_group_layout(&view_pipelines.ground_layout),
                 &BindGroupEntries::sequential((state.uniform.binding().unwrap(),&depth_view,&state.shadow.as_ref().unwrap().view,&gpu.sampler)));
             let attachments=[Some(target.get_color_attachment())];
             let mut pass=ctx.command_encoder().begin_render_pass(&RenderPassDescriptor{label:Some("Igor ground shadow"),color_attachments:&attachments,..default()});

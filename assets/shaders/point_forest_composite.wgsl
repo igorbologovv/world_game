@@ -12,5 +12,7 @@ struct Output{@location(0) color:vec4<f32>,@builtin(frag_depth) depth:f32}
     if screen_words[n+i]==0xffffffffu{discard;}
     let z=-bitcast<f32>(screen_words[i]);
     let depth=(cam.depth_coeff.x*z+cam.depth_coeff.y)/(cam.depth_coeff.z*z+cam.depth_coeff.w);
-    return Output(vec4<f32>(unpack4x8unorm(screen_words[2u*n+i]).rgb*cam.sunlight.rgb,1.0),clamp(depth,0.0,1.0));
+    let rg = unpack2x16float(screen_words[2u*n+i]);
+    let ba = unpack2x16float(screen_words[3u*n+i]);
+    return Output(vec4<f32>(rg, ba), clamp(depth, 0.0, 1.0));
 }

@@ -21,3 +21,5 @@ The game refreshes placements when sampled terrain patches or model sources chan
 Quality trial: game default is 6,000,000 selected points per frame (override with IGOR_POINT_BUDGET). The original 22 LOD levels and selection policy remain unchanged. The job limit also respects the actual device storage limit for the padded projection cache. The settlement HUD is below the FPS readout.
 
 Shadows and legacy undergrowth are enabled by default in point mode. Set IGOR_POINT_SHADOWS=0 or IGOR_POINT_UNDERGROWTH=0 independently. The library bakes local canopy opacity asynchronously from the original 1m LOD; a ground modulation pass samples opaque scene depth before point composition. The shadow field covers a local 512m region, not the entire planet. Undergrowth is the existing renderer for grass, ferns, shrubs and flowers, not yet converted to points. Tree budget stays 6M.
+
+The Bevy adapter keeps the camera's MSAA sample count and samples opaque shadow receivers per sample. Splat lighting uses exposed HDR direct light, a hemispherical sky approximation, and distance haze. Color stays in half-float until it reaches the game's HDR target.
