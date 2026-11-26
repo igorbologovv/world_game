@@ -298,7 +298,7 @@ impl Plugin for ProceduralForestPlugin {
         );
         // Keep terrain canopy shading; legacy undergrowth contains card
         // geometry and is excluded from a clean point-renderer experiment.
-        if !point_forest::enabled() || std::env::var("IGOR_POINT_UNDERGROWTH").as_deref()==Ok("1") {
+        if !point_forest::enabled() || std::env::var("IGOR_POINT_UNDERGROWTH").as_deref()!=Ok("0") {
             app.add_plugins(fern::FernPlugin);
             ground_cover::install(app);
         } else {
