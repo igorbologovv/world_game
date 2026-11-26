@@ -11,4 +11,4 @@ world-core = { workspace = true, features = ["runtime"] }
 noise.workspace = true
 world-regions.workspace = true
 
-igor_renderer = { git = "https://github.com/igorbologovv/Igor_renderer.git", rev = "c88d818b1ebf74594d40be20b2f0e996ea71b590", default-features = false }
+igor_renderer = { git = "https://github.com/igorbologovv/Igor_renderer.git", rev = "ad5ef5361079e1c20a2f90685ad035114f0dfee7", default-features = false }

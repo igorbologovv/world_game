@@ -1,10 +1,9 @@
 //! Experimental bridge for the standalone Igor direct-compute renderer.
 //! No second device/window: use Bevy's RenderDevice and real scene depth.
-use std::{collections::{BTreeMap, HashMap}, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}};
+use std::{collections::BTreeMap, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}};
 use bevy::{
     camera::Exposure,
     core_pipeline::{core_3d::{main_opaque_pass_3d, main_transparent_pass_3d, CORE_3D_DEPTH_FORMAT}, schedule::Core3d, Core3dSystems, FullscreenShader},
-    math::DVec3,
     prelude::*,
     render::{
         render_resource::{binding_types::*, *},
@@ -15,33 +14,23 @@ use bevy::{
     },
 };
 use world_core::runtime::{WorldCamera, GridTransform, ReferenceFrames};
-use super::{impostor::{self, Portraits}, placement::Site, streaming::ForestStream,
+use super::{impostor, streaming::ForestStream,
     ForestModels, Species, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
 
 use bevy::tasks::{block_on,poll_once,AsyncComputeTaskPool,Task};
-use igor_renderer::{planetary::{Pack,Template,RAW},splat::{planetary_level,PlanetAggregate}};
+use igor_renderer::planetary::{Pack,Placement,Camera as IgorCamera,PlanetScene};
 
 const BUDGET:u32=igor_renderer::render_api::DEFAULT_POINT_BUDGET as u32;
 const JOB_WIDTH:u32=igor_renderer::render_api::JOB_WIDTH;
 pub(super) fn enabled()->bool{std::env::var("IGOR_POINT_FOREST").as_deref()==Ok("1")}
-#[derive(Clone,Copy)]
-struct GpuTree{origin_scale:Vec4,rotation:Vec4,range:UVec4}
-impl GpuTree{
-    fn words(self)->[u32;12]{
-        let a=self.origin_scale.to_array().map(f32::to_bits);
-        let b=self.rotation.to_array().map(f32::to_bits);
-        let c=self.range.to_array();
-        [a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3],c[0],c[1],c[2],c[3]]
-    }
-}
 #[derive(Resource)]
 pub(super) struct PointForest{
     pack:Option<Arc<Pack>>,pending:Option<Task<Result<Pack,String>>>,
     requested:Vec<usize>,next_build:f64,error:Option<String>,
     ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
     storage_limit:Arc<AtomicU64>,layer_limit:Arc<AtomicU32>,
-    candidates:u32,eligible:u32,clusters:u32,trees:Vec<GpuTree>,jobs:Vec<UVec4>,selected:u32,textured:u32,budget:u32,
-    threshold:f32,history:HashMap<[u64;3],u8>,spare:u32,
+    candidates:u32,eligible:u32,clusters:u32,trees:Vec<[u32;12]>,jobs:Vec<[u32;4]>,selected:u32,textured:u32,budget:u32,
+    threshold:f32,scene:PlanetScene,
 }
 impl Default for PointForest{
     fn default()->Self{Self{pack:None,pending:None,requested:Vec::new(),next_build:0.0,error:None,
@@ -49,37 +38,7 @@ impl Default for PointForest{
         storage_limit:Arc::new(AtomicU64::new(0)),layer_limit:Arc::new(AtomicU32::new(0)),
         candidates:0,eligible:0,clusters:0,trees:Vec::new(),jobs:Vec::new(),selected:0,textured:0,
         budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000),
-        threshold:2.2,history:HashMap::new(),spare:0}}
-}
-fn site_key(s:Site)->[u64;3]{s.position.to_array().map(f64::to_bits)}
-fn tree_origin(template:&Template,site:Site,eye:DVec3)->(Vec3,Quat,f32){
-    let rotation=site.rotation();let scale=site.scale/template.transform.scale;
-    let root=Vec3::from_array(template.transform.root);
-    let origin=(site.position-eye).as_vec3()+rotation*(root*site.scale-Vec3::new(8.0,0.0,8.0)*scale);
-    (origin,rotation,scale)
-}
-fn choose(template:&Template,site:Site,depth:f32,distance:f32,focal:f32,threshold:f32,prev:u8)->usize{
-    let scale=site.scale/template.transform.scale;
-    let radius=template.info.bound*scale;
-    // At the edge of a conservative sphere, an almost-zero depth must
-    // not force the entire high-poly template to raw indefinitely.
-    let ppm=focal*scale/(depth-radius).max(depth*0.25).max(0.25);
-    let stagger=0.94+0.12*(site.yaw/std::f32::consts::TAU).clamp(0.0,1.0);
-    let weight=0.18+0.82*((distance-radius).max(0.0)/160.0).clamp(0.0,1.0);
-    planetary_level(ppm,(threshold*weight*stagger).max(0.25),prev)
-}
-// Stable world-space cells, using the original demo's 16m and 4x
-// hierarchy. Only collapse well-separated distant trees.
-fn world_cell(site:Site,depth:f32,distance:f32,focal:f32,threshold:f32)->Option<(i32,i64,i64,i64)>{
-    if distance<160.0||depth<=0.0{return None;}
-    for width in [1024,256,64,16]{
-        let w=width as f64;
-        if depth>width as f32*2.0 && focal*width as f32/(depth-width as f32)<=threshold*2.0{
-            let p=site.position/w;
-            return Some((width,p.x.floor() as i64,p.y.floor() as i64,p.z.floor() as i64));
-        }
-    }
-    None
+        threshold:2.2,scene:PlanetScene::default()}}
 }
 fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:Res<ForestModels>,
     settings:Res<VegetationSettings>,hero:Res<HeroOakAssets>,assets:Res<TreeAssets>,time:Res<Time>,
@@ -89,31 +48,32 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
         points.pending=None;
         match result{Ok(pack)=>{
             info!("Original Igor pack: {} templates, {} raw, {} LOD, {} patches, {} atlas pages",pack.templates.len(),pack.raw.len(),pack.lod.len(),pack.patches.len(),pack.atlas.layers);
-            points.pack=Some(Arc::new(pack));points.history.clear();points.error=None;
+            points.pack=Some(Arc::new(pack));points.scene=PlanetScene::default();points.error=None;
         },Err(err)=>{error!("Original Igor pack: {err}");points.error=Some(err);}}
     }
     if !points.ready.load(Ordering::Acquire)||hero.is_pending()||assets.is_pending(){return;}
     let Ok((entity,grid,camera,projection))=cameras.single() else{return;};
     let Some(frame)=frames.parent_frame(entity) else{return;};
     let eye=frame.grid_position_double(&grid.cell,&grid.transform);
-    let view=View::new(camera,projection);let Projection::Perspective(perspective)=projection else{return;};
-    let aspect=camera.physical_viewport_size().map_or(1.78,|s|s.x as f32/s.y.max(1) as f32);
-    let ty=(perspective.fov*0.5).tan();let tx=ty*aspect;
-    let inverse=grid.transform.rotation.conjugate();let reach=settings.proxy_range().y;
-    let mut visible=Vec::new();let mut needed=BTreeMap::<usize,(Species,usize)>::new();
+    let view=View::new(camera,projection);let Projection::Perspective(_)=projection else{return;};
+    let size=camera.physical_viewport_size().unwrap_or(UVec2::new(1920,1080));
+    let rotation=grid.transform.rotation;
+    let reach=settings.proxy_range().y;
+    let mut placements=Vec::new();
+    let mut needed=BTreeMap::<usize,(Species,usize)>::new();
     for site in forest.point_sites(){
         points.candidates+=1;
-        let delta=(site.position-eye).as_vec3();let distance=delta.length();let radius=site.height().max(5.0)*1.25;
-        if distance>reach+radius{continue;}
-        let v=inverse*delta;let depth=-v.z;
-        if depth+radius<0.05||v.x.abs()>depth.max(0.0)*tx+radius*(1.0+tx)||v.y.abs()>depth.max(0.0)*ty+radius*(1.0+ty){continue;}
-        if !super::within_horizon(eye,site.position,f64::from(radius)){continue;}
         let variant=models.portraits.point_variant(site.species,site.variant);
-        let tile=impostor::tile(site.species,variant);needed.insert(tile,(site.species,variant));
-        visible.push((distance,depth,site,tile));
+        let tile=impostor::tile(site.species,variant);
+        needed.insert(tile,(site.species,variant));
+        placements.push(Placement{position:site.position.to_array(),rotation:site.rotation().to_array(),
+            scale:site.scale,model:tile,phase:site.yaw});
     }
-    visible.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||site_key(a.2).cmp(&site_key(b.2))));
-    points.eligible=visible.len() as u32;
+    // Stable order makes repeated calls to the library a no-op when the
+    // stream has not changed. No game-side LOD or frustum selection.
+    placements.sort_unstable_by(|a,b|a.position[0].total_cmp(&b.position[0])
+        .then_with(||a.position[1].total_cmp(&b.position[1]))
+        .then_with(||a.position[2].total_cmp(&b.position[2])).then_with(||a.model.cmp(&b.model)));
     let now=time.elapsed_secs_f64();
     let missing=needed.keys().any(|k|points.pack.as_ref().is_none_or(|p|!p.templates.contains_key(k)));
     if missing&&points.pending.is_none()&&now>=points.next_build&&!needed.is_empty(){
@@ -129,69 +89,21 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
         }
     }
     let Some(pack)=points.pack.clone() else{return;};
-    visible.retain(|v|pack.templates.contains_key(&v.3));
-    // Evaluate the actual model centre in view space, not its ground anchor.
-    for (distance,depth,site,tile) in &mut visible{
-        let t=&pack.templates[tile];let (origin,rotation,scale)=tree_origin(t,*site,eye);
-        let center=origin+rotation*(Vec3::from_array(t.info.center)*scale);
-        *distance=center.length();*depth=-(inverse*center).z;
-    }
-    visible.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||site_key(a.2).cmp(&site_key(b.2))));
+    points.scene.update_sites(&pack,placements);
+    let cam=IgorCamera{position:eye.to_array(),forward:(rotation*Vec3::NEG_Z).to_array(),
+        right:(rotation*Vec3::X).to_array(),up:(rotation*Vec3::Y).to_array(),
+        focal:view.focal,width:size.x.max(1),height:size.y.max(1),reach,planet_radius:super::RADIUS};
     let budget=u64::from(points.budget);
-    const MAX_JOBS:u64=180_000;
-    let cost=|t:f32,history:&HashMap<[u64;3],u8>|visible.iter().fold((0u64,0u64),|(n,j),&(d,z,s,k)|{
-        if world_cell(s,z,d,view.focal,t).is_some(){return (n+1,j+1);}
-        let template=&pack.templates[&k];let level=choose(template,s,z,d,view.focal,t,*history.get(&site_key(s)).unwrap_or(&255));
-        let r=template.info.ranges[level];(n+u64::from(r.count),j+u64::from(r.count.div_ceil(64)))
-    });
-    let fits=|(n,j):(u64,u64)|n<=budget&&j<=MAX_JOBS;
-    let mut threshold=points.threshold.max(2.2);
-    for _ in 0..40{if fits(cost(threshold,&points.history)){break;}threshold=(threshold*1.15).min(512.0);}
-    let c=cost(threshold,&points.history);
-    if c.0<=budget*75/100{points.spare+=1;}else{points.spare=0;}
-    if points.spare>=12{
-        let refined=(threshold/1.08).max(2.2);
-        if fits(cost(refined,&points.history)){threshold=refined;}points.spare=0;
-    }
-    points.threshold=threshold;
-    let old=std::mem::take(&mut points.history);
-    let mut groups=BTreeMap::<(i32,i64,i64,i64),PlanetAggregate>::new();
-    for (distance,depth,site,tile) in visible{
-        let template=&pack.templates[&tile];
-        let (relative,rotation,scale)=tree_origin(template,site,eye);
-        if let Some(cell)=world_cell(site,depth,distance,view.focal,threshold){
-            let mut sample=template.info.summary;
-            if sample.coverage>0.0{
-                sample.position=(relative+rotation*(Vec3::from_array(sample.position)*scale)).to_array();
-                sample.normal=(rotation*Vec3::from_array(sample.normal)).to_array();
-                sample.radius*=scale;
-                groups.entry(cell).or_default().add(sample);
-            }
-            continue;
-        }
-        let key=site_key(site);
-        let level=choose(template,site,depth,distance,view.focal,threshold,*old.get(&key).unwrap_or(&255));
-        let r=template.info.ranges[level];
-        if r.count==0||points.selected.saturating_add(r.count)>points.budget||points.jobs.len() as u64+u64::from(r.count.div_ceil(64))>MAX_JOBS{continue;}
-        let upper=((1.0-super::lod::smoothstep(reach*0.79,reach,distance))*12.0).round().clamp(0.0,12.0) as u32;
-        if upper==0{continue;}
-        let index=points.trees.len() as u32;
-        points.trees.push(GpuTree{origin_scale:relative.extend(scale),rotation:Vec4::from_array(rotation.to_array()),
-            range:UVec4::new(r.offset,r.count,0,site.yaw.to_bits())});
-        for first in (0..r.count).step_by(64){points.jobs.push(UVec4::new(index,first,(r.count-first).min(64),upper));}
-        points.history.insert(key,level as u8);points.selected+=r.count;if r.offset&RAW!=0{points.textured+=r.count;}
-    }
-    for (_,aggregate) in groups{
-        if points.selected>=points.budget||points.jobs.len() as u64>=MAX_JOBS{break;}
-        let Some((position,radius,rgba,normal))=aggregate.finish()else{continue;};
-        let index=points.trees.len() as u32;
-        // The original world record is a unit disk with world radius in
-        // the instance. Carry its color/normal directly in the instance
-        // instead of rewriting the static LOD buffer each frame.
-        points.trees.push(GpuTree{origin_scale:Vec3::from_array(position).extend(radius),
-            rotation:Vec4::W,range:UVec4::new(rgba,normal,1,0)});
-        points.jobs.push(UVec4::new(index,0,1,12));points.selected+=1;points.clusters+=1;
-    }
+    let out=points.scene.select(&pack,cam,2.2,budget,180_000);
+    points.threshold=out.threshold;
+    points.eligible=out.covered;
+    points.clusters=out.clusters;
+    points.selected=out.points;
+    points.textured=out.raw_points;
+    points.trees=out.instances;
+    points.jobs=out.jobs;
+    if !out.budget_met {points.error=Some("point budget exceeded".into());}
+    else if points.error.as_deref()==Some("point budget exceeded"){points.error=None;}
 }
 pub(super) fn install(app:&mut App) {
     if !enabled(){return;}
@@ -229,7 +141,7 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         0=>"waiting for perspective render view",1=>"compiling pipelines",2=>"pipeline error (see terminal)",
         3=>"unsupported view/limits",4=>"ready",_=>"unknown",
     };
-    let msg=format!("IGOR LIB | {status} | {} instances ({} clusters) / {} points ({} UV) | {} visible / {} sites | {} templates | LOD {:.2}px | {} GPU trees | {}",
+    let msg=format!("IGOR HIERARCHY | {status} | {} instances ({} clusters) / {} points ({} UV) | {} covered / {} sites | {} templates | LOD {:.2}px | {} GPU trees | {}",
         forest.trees.len(),forest.clusters,forest.selected,forest.textured,forest.eligible,forest.candidates,forest.pack.as_ref().map_or(0,|p|p.templates.len()),forest.threshold,forest.submitted.load(Ordering::Acquire),
         if forest.pending.is_some(){"baking original geometry"}else{forest.error.as_deref().unwrap_or("")});
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
@@ -242,7 +154,7 @@ fn single_sample_camera(mut cameras:Query<&mut Msaa,With<WorldCamera>>) {
 #[derive(Resource)]
 struct ExtractedForest{
     pack:Option<Arc<Pack>>,ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
-    storage_limit:Arc<AtomicU64>,layer_limit:Arc<AtomicU32>,trees:Vec<GpuTree>,jobs:Vec<UVec4>,
+    storage_limit:Arc<AtomicU64>,layer_limit:Arc<AtomicU32>,trees:Vec<[u32;12]>,jobs:Vec<[u32;4]>,
 }
 #[derive(Component)]
 struct PointCamera{forward:Vec3,right:Vec3,up:Vec3,sun:Vec3,sunlight:Vec3,elapsed:f32,projection:Mat4,far:f32}
@@ -351,8 +263,8 @@ fn render_points(view:ViewQuery<(&PointCamera,&ExtractedView,&ViewTarget,&ViewDe
     let Some(pack)=forest.pack.as_ref()else{return;};
     if forest.jobs.is_empty(){forest.submitted.store(0,Ordering::Release);return;}
     if state.pack.as_ref().is_none_or(|old|!Arc::ptr_eq(&old.source,pack)){state.pack=Some(GpuPack::upload(pack.clone(),&device,&queue));}
-    state.trees.clear();state.trees.extend(forest.trees.iter().map(|t|t.words()));state.trees.write_buffer(&device,&queue);
-    state.jobs.clear();state.jobs.extend(forest.jobs.iter().map(|j|j.to_array()));state.jobs.write_buffer(&device,&queue);
+    state.trees.clear();state.trees.extend(forest.trees.iter().copied());state.trees.write_buffer(&device,&queue);
+    state.jobs.clear();state.jobs.extend(forest.jobs.iter().copied());state.jobs.write_buffer(&device,&queue);
     let count=forest.jobs.len() as u32;let pr=camera.projection;
     state.uniform.set(FrameUniform{origin:Vec4::ZERO,forward:camera.forward.extend(0.0),right:camera.right.extend(0.0),up:camera.up.extend(0.0),
         screen:Vec4::new(v.z as f32,v.w as f32,2.0/(v.w as f32*pr.y_axis.y.abs()),23.0),
