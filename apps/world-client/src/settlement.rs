@@ -324,7 +324,7 @@ fn setup(
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(18.0),
-            top: Val::Px(18.0),
+            top: Val::Px(42.0),
             ..default()
         },
     ));

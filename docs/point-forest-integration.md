@@ -19,3 +19,5 @@ Look for IGOR LIB in the overlay. Cargo may update Cargo.lock on first run.
 No second wgpu device, window or legacy billboard fallback is used.
 
 The game now sends stable world placements and camera parameters to PlanetScene in the pinned renderer library. It no longer selects individual tree LODs, aggregates distant groups or manages threshold hysteresis. The library produces GPU instance/job words. The overlay reports represented sites (including groups), not a precise per-tree frustum count. Original planar shadow adaptation remains separate.
+
+Quality trial: game default is 6,000,000 selected points per frame (override with IGOR_POINT_BUDGET). The original 22 LOD levels and selection policy remain unchanged. The job limit also respects the actual device storage limit for the padded projection cache. The settlement HUD is below the FPS readout.

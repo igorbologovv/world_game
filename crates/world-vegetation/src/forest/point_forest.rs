@@ -20,7 +20,8 @@ use super::{impostor, streaming::ForestStream,
 use bevy::tasks::{block_on,poll_once,AsyncComputeTaskPool,Task};
 use igor_renderer::planetary::{Pack,Placement,Camera as IgorCamera,PlanetScene};
 
-const BUDGET:u32=igor_renderer::render_api::DEFAULT_POINT_BUDGET as u32;
+// Planetary scene quality experiment; keep the standalone demo default unchanged.
+const BUDGET:u32=6_000_000;
 const JOB_WIDTH:u32=igor_renderer::render_api::JOB_WIDTH;
 pub(super) fn enabled()->bool{std::env::var("IGOR_POINT_FOREST").as_deref()==Ok("1")}
 #[derive(Resource)]
@@ -94,7 +95,9 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
         right:(rotation*Vec3::X).to_array(),up:(rotation*Vec3::Y).to_array(),
         focal:view.focal,width:size.x.max(1),height:size.y.max(1),reach,planet_radius:super::RADIUS};
     let budget=u64::from(points.budget);
-    let out=points.scene.select(&pack,cam,2.2,budget,180_000);
+    // Each job reserves 64 * 8 bytes of projection cache, including padding.
+    let max_jobs=(points.storage_limit.load(Ordering::Acquire)/512).min(180_000);
+    let out=points.scene.select(&pack,cam,2.2,budget,max_jobs);
     points.threshold=out.threshold;
     points.eligible=out.covered;
     points.clusters=out.clusters;
@@ -141,8 +144,8 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         0=>"waiting for perspective render view",1=>"compiling pipelines",2=>"pipeline error (see terminal)",
         3=>"unsupported view/limits",4=>"ready",_=>"unknown",
     };
-    let msg=format!("IGOR HIERARCHY | {status} | {} instances ({} clusters) / {} points ({} UV) | {} covered / {} sites | {} templates | LOD {:.2}px | {} GPU trees | {}",
-        forest.trees.len(),forest.clusters,forest.selected,forest.textured,forest.eligible,forest.candidates,forest.pack.as_ref().map_or(0,|p|p.templates.len()),forest.threshold,forest.submitted.load(Ordering::Acquire),
+    let msg=format!("IGOR HIERARCHY | {status} | {} instances ({} clusters) / {} / {} points ({} UV) | {} covered / {} sites | {} templates | LOD {:.2}px | {} GPU trees | {}",
+        forest.trees.len(),forest.clusters,forest.selected,forest.budget,forest.textured,forest.eligible,forest.candidates,forest.pack.as_ref().map_or(0,|p|p.templates.len()),forest.threshold,forest.submitted.load(Ordering::Acquire),
         if forest.pending.is_some(){"baking original geometry"}else{forest.error.as_deref().unwrap_or("")});
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
 }
