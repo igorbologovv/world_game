@@ -10,6 +10,12 @@ pub(super) fn replace_once(source: &str, original: &str, replacement: &str) -> S
 
 pub(super) fn compute() -> String {
     let source = igor_renderer::planetary::compute_shader();
+    // Keep the authored shading orientation used by the aggregate bake.
+    let source = replace_once(
+        &source,
+        "        if dot(n,cam.origin.xyz-world)<0.0 {n=-n;}\n",
+        "",
+    );
     let source = replace_once(
         &source,
         "    let sun=normalize(cam.sun.xyz);\n    return c*(0.10+0.24*max(dot(n,sun),0.0)*planet_visibility(world));",
@@ -174,4 +180,47 @@ pub(super) fn temporal() -> String {
                             let c = sample.rgb;"#,
     );
     replace_once(&source, "mix(0.88,0.50,", "mix(0.62,0.22,")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute;
+
+    #[test]
+    fn generated_compute_shader_compiles_to_spirv() {
+        let source = compute();
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
+        naga::back::spv::write_vec(&module, &info, &Default::default(), None)
+            .expect("Bevy point shader should compile to SPIR-V");
+    }
+
+    #[test]
+    fn raw_and_aggregate_preserve_normal_orientation_for_lighting() {
+        let source = compute();
+        let (_, color_at) = source.split_once("\nfn color_at(").unwrap();
+        let (body, _) = color_at.split_once("\n}\n").unwrap();
+        let (_, shading) = body.split_once("\n    var color=").unwrap();
+
+        // Matching input normals must reach the same lighting call from either LOD,
+        // even when the camera is behind the authored normal.
+        assert_eq!(
+            shading,
+            "unpack4x8unorm(p.point.rgba).rgb;
+    var n=rotate(normal_at(p.point.normal),p.inst.rotation);
+    if p.detailed{
+        let surface=surfaces[p.point.rgba];
+        let mat=materials[surface.material];
+        color=base_color(mat,surface,s.bary).rgb;
+        n=rotate(surface_normal(mat,surface,s.bary),p.inst.rotation);
+    }
+    return light(color,n,world);"
+        );
+    }
 }

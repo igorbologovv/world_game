@@ -7695,6 +7695,7 @@ dependencies = [
  "blake3",
  "flate2",
  "igor_renderer",
+ "naga",
  "noise",
  "world-core",
  "world-regions",

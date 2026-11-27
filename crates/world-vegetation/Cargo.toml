@@ -12,3 +12,6 @@ noise.workspace = true
 world-regions.workspace = true
 
 igor_renderer.workspace = true
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
