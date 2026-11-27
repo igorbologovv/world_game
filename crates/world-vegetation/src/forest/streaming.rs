@@ -41,6 +41,8 @@ const SPAWNS_PER_FRAME: usize = 26;
 const RETIREMENTS_PER_FRAME: usize = 34;
 const MAX_BATCH_UPLOADS: usize = 4;
 const MAX_BATCH_RETIREMENTS: usize = 12;
+// A stalled or inactive consumer can catch up with one full snapshot.
+const MAX_POINT_PATCH_CHANGES: usize = 4096;
 
 pub(super) type Sites = Arc<[Site]>;
 
@@ -48,6 +50,20 @@ pub(super) type Sites = Arc<[Site]>;
 pub(super) struct PointRevision {
     pub sites: u64,
     pub construction: u64,
+}
+
+pub(super) struct PointSiteChanges {
+    pub reset: bool,
+    pub patches: Vec<(PatchKey, Option<Sites>)>,
+}
+
+fn mark_point_patch(dirty: &mut Option<HashSet<PatchKey>>, key: PatchKey) {
+    if let Some(keys) = dirty {
+        keys.insert(key);
+        if keys.len() > MAX_POINT_PATCH_CHANGES {
+            *dirty = None;
+        }
+    }
 }
 
 struct Leaf {
@@ -121,6 +137,8 @@ struct ProxyAtlas {
 pub(super) struct ForestStream {
     construction_revision: u64,
     point_revision: u64,
+    // None requests a complete capture. Otherwise this holds only the latest dirty keys.
+    point_dirty: Option<HashSet<PatchKey>>,
     nodes: HashMap<NodeKey, Node>,
     order: Vec<NodeKey>,
     mask: HashMap<PatchKey, (f32, f32)>,
@@ -155,15 +173,27 @@ impl ForestStream {
         }
     }
 
-    // A worker can read the canonical placements after the stream moves on.
-    pub(super) fn point_site_batches(&self) -> Vec<Sites> {
-        self.nodes
-            .values()
-            .flat_map(|node| &node.leaves)
-            .filter_map(|leaf| leaf.sites.as_ref())
-            .filter(|sites| !sites.is_empty())
-            .cloned()
-            .collect()
+    // Capture changed batches by stable key. A worker can keep reading the Arc after eviction.
+    pub(super) fn take_point_changes(&mut self, force_reset: bool) -> PointSiteChanges {
+        let dirty = self.point_dirty.replace(HashSet::new());
+        if let Some(keys) = dirty.filter(|_| !force_reset) {
+            let patches = keys.into_iter().map(|key| {
+                let sites = self.nodes.get(&key.parent())
+                    .and_then(|node| node.leaves.iter().find(|leaf| leaf.key == key))
+                    .and_then(|leaf| leaf.sites.as_ref())
+                    .filter(|sites| !sites.is_empty())
+                    .cloned();
+                (key, sites)
+            }).collect();
+            PointSiteChanges { reset: false, patches }
+        } else {
+            let patches = self.nodes.values().flat_map(|node| &node.leaves)
+                .filter_map(|leaf| {
+                    let sites = leaf.sites.as_ref().filter(|sites| !sites.is_empty())?;
+                    Some((leaf.key, Some(sites.clone())))
+                }).collect();
+            PointSiteChanges { reset: true, patches }
+        }
     }
 
     pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
@@ -240,7 +270,10 @@ impl ForestStream {
             }
             node.parent.retire(commands, &mut self.retiring_batches);
             for leaf in &mut node.leaves {
-                removed_sites |= leaf.sites.as_ref().is_some_and(|sites| !sites.is_empty());
+                if leaf.sites.as_ref().is_some_and(|sites| !sites.is_empty()) {
+                    removed_sites = true;
+                    mark_point_patch(&mut self.point_dirty, leaf.key);
+                }
                 leaf.impostor.retire(commands, &mut self.retiring_batches);
                 self.retiring.append(&mut leaf.trees);
             }
@@ -289,24 +322,28 @@ impl ForestStream {
         clearing: Option<&ForestClearing>,
     ) {
         let mut pending = 0;
-        let mut added_sites = false;
+        let mut changed_sites = false;
         for leaf in self.nodes.values_mut().flat_map(|node| &mut node.leaves) {
             let ready = leaf
                 .placement
                 .as_mut()
                 .and_then(|task| block_on(poll_once(task)));
             if let Some(sites) = ready {
-                added_sites |= !sites.is_empty();
+                let old = leaf.sites.as_ref().filter(|old| !old.is_empty());
+                if old.map_or(!sites.is_empty(), |old| !Arc::ptr_eq(old, &sites)) {
+                    changed_sites = true;
+                    mark_point_patch(&mut self.point_dirty, leaf.key);
+                }
                 leaf.placement = None;
                 leaf.sites = Some(sites);
             }
             pending += usize::from(leaf.placement.is_some());
         }
-        if added_sites {
+        if changed_sites {
             self.point_revision += 1;
             trace!(
                 point_revision = self.point_revision,
-                cause = "sites_arrived",
+                cause = "sites_changed",
                 "Forest stream point revision changed"
             );
         }
@@ -618,6 +655,7 @@ pub(super) fn stream(
     if forest.construction_revision != heights.construction_revision() {
         forest.construction_revision = heights.construction_revision();
         forest.point_revision += 1;
+        forest.point_dirty = None;
         trace!(
             point_revision = forest.point_revision,
             construction_revision = forest.construction_revision,
@@ -880,6 +918,50 @@ pub(super) fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_changes_coalesce_replacements_and_capture_eviction() {
+        let key = PatchKey(10, 20);
+        let site = Site {
+            position: DVec3::Y,
+            species: super::super::Species::Oak,
+            variant: 0,
+            scale: 1.0,
+            yaw: 0.0,
+        };
+        let original = Sites::from([site]);
+        let replacement = Sites::from([Site { scale: 1.5, ..site }]);
+        let mut stream = ForestStream::default();
+        stream.nodes.insert(key.parent(), Node {
+            anchor: DVec3::Y,
+            leaves: vec![Leaf {
+                key, anchor: DVec3::Y, sites: Some(original.clone()), placement: None,
+                impostor: MeshState::Missing, trees: Vec::new(), coverage: 0.0, detail: 0.0,
+            }],
+            parent: MeshState::Missing,
+            arrival: 0.0,
+        });
+        let initial = stream.take_point_changes(false);
+        assert!(initial.reset);
+        assert!(Arc::ptr_eq(initial.patches[0].1.as_ref().unwrap(), &original));
+
+        // Retirement and re-arrival before dispatch leave only the latest batch.
+        mark_point_patch(&mut stream.point_dirty, key);
+        stream.nodes.get_mut(&key.parent()).unwrap().leaves[0].sites = Some(replacement.clone());
+        mark_point_patch(&mut stream.point_dirty, key);
+        let modified = stream.take_point_changes(false);
+        assert!(!modified.reset);
+        assert_eq!(modified.patches.len(), 1);
+        assert_eq!(modified.patches[0].0, key);
+        assert!(Arc::ptr_eq(modified.patches[0].1.as_ref().unwrap(), &replacement));
+
+        stream.nodes.remove(&key.parent());
+        mark_point_patch(&mut stream.point_dirty, key);
+        let removed = stream.take_point_changes(false);
+        assert!(!removed.reset);
+        assert_eq!(removed.patches, [(key, None)]);
+        assert!(stream.take_point_changes(false).patches.is_empty());
+    }
 
     #[derive(Resource)]
     struct Fixture {

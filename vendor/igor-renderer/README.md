@@ -468,6 +468,17 @@ without needing the tree assets. GPU execution must be tested on hardware.
 
 ### Persistent planetary selection
 
-`planetary::PlanetHierarchy` stores the sparse 16/64/256/1024/4096 m hierarchy and exact weighted parent reductions. Build it from sorted placements and a geometry pack with `PlanetHierarchy::build`, then install it with `PlanetScene::replace_hierarchy`. That method returns the previous hierarchy and keeps the scene's per-cell and per-tree hysteresis and global budget controller. Use the same geometry pack for `select` and shadow baking as for the installed hierarchy. `PlanetScene::update_sites` is available for synchronous placement updates against the same pack. Selection results contain GPU-ready instance and job words.
+`planetary::PlanetHierarchy` stores the sparse 16/64/256/1024/4096 m hierarchy
+and exact weighted parent reductions. Use `Placement::leaf_key` to group
+placements for `PlanetHierarchy::build_cells`. Order each group's placements
+with `Placement::spatial_cmp`. For changes with the same pack, pass the complete
+placement list for each dirty cell to `PlanetHierarchy::update_cells`. An empty
+list removes the cell. Unchanged blocks and branches are shared. Use
+`PlanetScene::replace_hierarchy` to install the result and keep the scene's
+per-cell and per-tree hysteresis and global budget controller. The method returns
+the previous hierarchy for retirement. Select and bake shadows with the pack
+used to build the installed hierarchy. `PlanetScene::update_sites` is available
+for synchronous placement-list updates. Selection returns GPU-ready instance
+and job words.
 
 Planetary shadows use `PlanetShadow::bake`, the original opacity raster with a local sun-projected tangent basis, 512x512 at 1m per texel and four 8m height bands. The host can cache/rebuild asynchronously and use the shared visibility function for both point color and opaque-scene modulation. Original demo shader and default planar field remain unchanged. This is an approximate static canopy field, not animated per-leaf shadow casting.

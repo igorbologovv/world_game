@@ -49,7 +49,7 @@ impl Pack{
 pub fn compute_shader()->String{crate::planetary_shader::shader()}
 
 pub use crate::splat::planetary_selection::{
-    Camera, Placement, PlanetHierarchy, PlanetScene, PlanetSelection, PlanetShadow,
+    Camera, LeafKey, Placement, PlanetHierarchy, PlanetScene, PlanetSelection, PlanetShadow,
 };
 
 pub fn ground_shadow_shader()->String{crate::planetary_shader::ground_shadow_shader()}

@@ -79,7 +79,7 @@ impl Default for PointForest{
         shadows:std::env::var("IGOR_POINT_SHADOWS").as_deref()!=Ok("0"),
         shadow:None,previous_shadow:None,shadow_changed_at:0.0,shadow_task:None,shadow_dirty:true,shadow_next:0.0,eye:[0.0;3]}}
 }
-fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:Res<ForestModels>,
+fn select_points(mut points:ResMut<PointForest>,mut forest:ResMut<ForestStream>,models:Res<ForestModels>,
     settings:Res<VegetationSettings>,hero:Res<HeroOakAssets>,assets:Res<TreeAssets>,time:Res<Time>,
     cameras:Query<(Entity,GridTransform,&Camera,&Projection),With<WorldCamera>>,frames:ReferenceFrames,lights:Query<(&DirectionalLight,&Transform),Without<WorldCamera>>){
     points.active = false;
@@ -99,7 +99,7 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
     if !hero.is_pending() && !assets.is_pending() {
         let layers = points.layer_limit.load(Ordering::Acquire);
         let models_revision = points.models_revision;
-        if points.snapshots.update(&forest, &models.portraits, models_revision, now, (storage, layers)) {
+        if points.snapshots.update(&mut forest, &models.portraits, models_revision, now, (storage, layers)) {
             points.selection_view = None;
             points.shadow_dirty = true;
         }

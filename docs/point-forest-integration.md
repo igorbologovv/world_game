@@ -19,14 +19,18 @@ IGOR_POINT_FOREST=1 cargo run --release -p world-client
 Look for IGOR HIERARCHY in the overlay.
 No second wgpu device, window or legacy billboard fallback is used.
 
-The game captures shared site batches when sampled terrain patches or model
-sources change. Async compute workers collect and sort placements, build the
-immutable hierarchy, and bake geometry packs as needed. The selector continues
-using the published hierarchy and its matching pack until a compatible result
-is ready. There is one hierarchy task and one geometry bake at a time. New
-placement revisions are captured when the hierarchy worker slot opens. Results
-from the current terrain and model generations can publish in stream order
-while patches arrive. An obsolete hierarchy is retired on a worker.
+Forest streaming records changed patch keys at placement arrival, replacement,
+and eviction. When the worker slot opens, the frame captures the latest batch
+or removal for each dirty key. The worker updates its patch-to-cell index and
+rebuilds affected 16 m blocks and their 64, 256, 1024, and 4096 m ancestors. Each
+block owns a contiguous local tree array, and each branch stores child references
+in spatial key order. Snapshots share untouched allocations.
+
+The selector uses the published hierarchy and its matching pack until a
+compatible result is ready. One hierarchy task and one geometry bake can be in
+flight, and obsolete snapshots are retired on a worker. Geometry changes
+rebuild all blocks using cached placements. Terrain or model generation changes
+and a dirty set exceeding 4,096 keys trigger a complete placement capture.
 
 PlanetScene retains per-tree and per-cell LOD history and the budget controller
 across swaps. A stationary view can continue to reuse its selection and uploaded
@@ -36,15 +40,25 @@ hierarchy and geometry.
 
 The frame still captures patch and portrait references, polls task readiness,
 and swaps completed snapshots. Camera culling, LOD and budget selection, and
-instance and job generation run on the main thread when the view or hierarchy
-requires a new selection. GPU uploads and render passes remain in the render
-world.
+instance and job generation still run on the main thread when a new selection
+is required. Shadow caster collection and geometry baking run on workers. GPU
+uploads and render passes remain in the render world.
+
+Memory overhead comes from reference-counted nodes and the worker's patch-to-cell
+index. Per-tree leaf indices and cached per-tree summaries are gone, and the
+worker's per-patch placement arrays take the place of the game's previous flat
+placement list. During an incremental update the old and new snapshots share
+untouched blocks and branches. A full rebuild can temporarily retain two
+complete hierarchies.
 
 For Tracy, build with `--features bevy/trace_tracy` and set
 `IGOR_POINT_FOREST=1` and `RUST_LOG=world_vegetation=trace,igor_renderer=trace`.
 Compare `point_forest.capture_site_batches` and `point_forest.publish_snapshot`
 with the worker's `point_forest.build_hierarchy` and its placement and hierarchy
-stages. The revision messages link stream changes, scheduling, and publication.
+stages. `PlanetHierarchy::incremental_update` and
+`PlanetHierarchy::full_rebuild` emit per-build counters for rebuilt, reused, and
+removed blocks, updated ancestors, and full rebuilds. The revision messages link
+stream changes, scheduling, and publication.
 
 Quality trial: game default is 6,000,000 selected points per frame (override with IGOR_POINT_BUDGET). The original 22 LOD levels and selection policy remain unchanged. The job limit also respects the actual device storage limit for the padded projection cache. The settlement HUD is below the FPS readout.
 

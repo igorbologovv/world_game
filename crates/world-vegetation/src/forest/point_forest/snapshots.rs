@@ -1,3 +1,5 @@
+mod placements;
+
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -10,15 +12,14 @@ use bevy::{
     log::{error, info, trace, trace_span},
     tasks::{AsyncComputeTaskPool, Task},
 };
-use igor_renderer::planetary::{
-    Camera, Pack, Placement, PlanetHierarchy, PlanetScene, PlanetSelection,
-};
+use igor_renderer::planetary::{Camera, Pack, PlanetHierarchy, PlanetScene, PlanetSelection};
 
 use super::super::{
-    impostor::{self, Portraits},
-    streaming::{ForestStream, PointRevision, Sites},
+    impostor::Portraits,
+    streaming::{ForestStream, PointRevision, PointSiteChanges},
     Species,
 };
+use placements::PlacementIndex;
 
 type Templates = BTreeMap<usize, (Species, usize)>;
 
@@ -94,6 +95,7 @@ struct TemplateDemand {
 struct BuildResult {
     demand: TemplateDemand,
     snapshot: Option<Snapshot>,
+    placements: PlacementIndex,
 }
 
 struct GeometryResult {
@@ -107,6 +109,7 @@ pub(super) struct Snapshots {
     scene: PlanetScene,
     hierarchy_task: Option<Task<BuildResult>>,
     last_build: Option<BuildKey>,
+    placements: PlacementIndex,
     demand: Option<TemplateDemand>,
     geometry_task: Option<Task<GeometryResult>>,
     prepared_geometry: Option<Arc<Geometry>>,
@@ -147,7 +150,7 @@ impl Snapshots {
 
     pub(super) fn update(
         &mut self,
-        stream: &ForestStream,
+        stream: &mut ForestStream,
         portraits: &Portraits,
         models: u64,
         now: f64,
@@ -209,6 +212,9 @@ impl Snapshots {
         let Some(result) = take_ready(&mut self.hierarchy_task) else {
             return false;
         };
+        // This index travelled with the one in-flight job. If its generation is
+        // obsolete, the next worker replaces it from a complete stream capture.
+        self.placements = result.placements;
         if !result.demand.revision.same_generation(revision) {
             trace!(
                 point_revision = result.demand.revision.points.sites,
@@ -266,7 +272,7 @@ impl Snapshots {
     fn request_hierarchy(
         &mut self,
         revision: SourceRevision,
-        stream: &ForestStream,
+        stream: &mut ForestStream,
         portraits: &Portraits,
     ) {
         if self.hierarchy_task.is_some() {
@@ -279,20 +285,26 @@ impl Snapshots {
         if self.last_build == Some(key) {
             return;
         }
-        let batches = trace_span!("point_forest.capture_site_batches")
-            .in_scope(|| stream.point_site_batches());
+        let previous = self.last_build.map(|build| build.revision);
+        let changes = trace_span!("point_forest.capture_site_batches").in_scope(|| {
+            stream.take_point_changes(previous.is_none_or(|old| !old.same_generation(revision)))
+        });
         trace!(
             point_revision = revision.points.sites,
             construction_revision = revision.points.construction,
-            batches = batches.len(),
+            batches = changes.patches.len(),
+            full_capture = changes.reset,
             "Scheduling point forest hierarchy"
         );
         let portraits = portraits.clone();
         let prepared = self.prepared_geometry.clone();
         let active = self.active.clone();
+        let placements = std::mem::take(&mut self.placements);
         self.last_build = Some(key);
         self.hierarchy_task = Some(AsyncComputeTaskPool::get().spawn(async move {
-            build_hierarchy(revision, batches, &portraits, prepared, active)
+            build_hierarchy(
+                revision, previous, changes, placements, &portraits, prepared, active,
+            )
         }));
     }
 
@@ -353,60 +365,43 @@ impl Snapshots {
 
 fn build_hierarchy(
     revision: SourceRevision,
-    batches: Vec<Sites>,
+    previous: Option<SourceRevision>,
+    changes: PointSiteChanges,
+    mut placements: PlacementIndex,
     portraits: &Portraits,
     prepared: Option<Arc<Geometry>>,
     active: Option<Snapshot>,
 ) -> BuildResult {
     let _span = trace_span!("point_forest.build_hierarchy").entered();
-    let (mut placements, templates) =
-        trace_span!("point_forest.collect_placements").in_scope(|| {
-            let mut placements = Vec::with_capacity(batches.iter().map(|batch| batch.len()).sum());
-            let mut templates = BTreeMap::new();
-            for batch in batches {
-                for site in batch.iter() {
-                    let variant = portraits.point_variant(site.species, site.variant);
-                    let tile = impostor::tile(site.species, variant);
-                    templates.insert(tile, (site.species, variant));
-                    placements.push(Placement {
-                        position: site.position.to_array(),
-                        rotation: site.rotation().to_array(),
-                        scale: site.scale,
-                        model: tile,
-                        phase: site.yaw,
-                    });
-                }
-            }
-            (placements, templates)
-        });
+    let reset = changes.reset;
+    let dirty = placements.apply(changes, portraits);
+    let templates = placements.required_templates();
     let snapshot =
         choose_geometry(revision, &templates, prepared, active.as_ref()).map(|geometry| {
-            // Retain the selector's tie order regardless of patch arrival order.
-            trace_span!("point_forest.sort_placements").in_scope(|| {
-                placements.sort_unstable_by(|a, b| {
-                    a.position[0]
-                        .total_cmp(&b.position[0])
-                        .then_with(|| a.position[1].total_cmp(&b.position[1]))
-                        .then_with(|| a.position[2].total_cmp(&b.position[2]))
-                        .then_with(|| a.model.cmp(&b.model))
-                });
+            let baseline = active.filter(|old| {
+                !reset && previous == Some(old.revision) && Arc::ptr_eq(&old.geometry, &geometry)
             });
-            let candidates = placements.len();
-            let hierarchy = active
-                .filter(|old| {
-                    Arc::ptr_eq(&old.geometry, &geometry)
-                        && trace_span!("PlanetScene::compare_placements")
-                            .in_scope(|| old.hierarchy.has_placements(&placements))
-                })
-                .map_or_else(
-                    || Arc::new(PlanetHierarchy::build(geometry.pack(), placements)),
-                    |old| old.hierarchy,
-                );
+            let hierarchy = if let Some(old) = baseline {
+                let cells = trace_span!("point_forest.sort_placements").in_scope(|| {
+                    dirty
+                        .into_iter()
+                        .map(|key| (key, placements.cell_placements(key)))
+                        .collect::<Vec<_>>()
+                });
+                old.hierarchy
+                    .update_cells(geometry.pack(), cells)
+                    .map_or_else(|| old.hierarchy, Arc::new)
+            } else {
+                Arc::new(PlanetHierarchy::build_cells(
+                    geometry.pack(),
+                    placements.all_cells(),
+                ))
+            };
             Snapshot {
                 revision,
                 geometry,
                 hierarchy,
-                candidates,
+                candidates: placements.candidates,
             }
         });
     BuildResult {
@@ -415,6 +410,7 @@ fn build_hierarchy(
             templates,
         },
         snapshot,
+        placements,
     }
 }
 
@@ -454,7 +450,11 @@ pub(super) fn take_ready<T>(slot: &mut Option<Task<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forest::placement::Site;
+    use crate::forest::{
+        impostor,
+        placement::{PatchKey, Site},
+        streaming::Sites,
+    };
     use bevy::{math::DVec3, tasks::TaskPool};
     use igor_renderer::{
         planetary::{AtlasData, Summary, Template, TemplateInfo, Transform, LEVELS},
@@ -467,7 +467,7 @@ mod tests {
         let template = Template {
             transform: Transform {
                 tile,
-                root: [0.0; 3],
+                root: [id as f32, 0.0, 0.0],
                 scale: 1.0,
             },
             info: TemplateInfo {
@@ -527,77 +527,201 @@ mod tests {
     }
 
     #[test]
-    fn reordered_batches_reuse_hierarchy_only_with_the_same_pack() {
+    fn duplicate_batch_edits_share_blocks_and_pack_changes_rebuild() {
         let portraits = Portraits::default();
         let old_pack = geometry(1, 0, Species::Oak);
+        let first = revision(1, 0);
+        let second = revision(2, 0);
+        let a = PatchKey(0, 0);
+        let b = PatchKey(0, 1);
         let old = build_hierarchy(
-            revision(1, 0),
-            vec![batch(8.0), batch(-8.0)],
+            first,
+            None,
+            PointSiteChanges {
+                reset: true,
+                patches: vec![(a, Some(batch(8.0))), (b, Some(batch(-8.0)))],
+            },
+            PlacementIndex::default(),
             &portraits,
             Some(old_pack.clone()),
+            None,
+        );
+        let original = old.snapshot.unwrap();
+        let repeated = build_hierarchy(
+            second,
+            Some(first),
+            PointSiteChanges {
+                reset: false,
+                patches: vec![(b, Some(batch(-8.0))), (a, Some(batch(8.0)))],
+            },
+            old.placements,
+            &portraits,
+            Some(old_pack),
+            Some(original.clone()),
+        );
+        let repeated_snapshot = repeated.snapshot.unwrap();
+        assert!(Arc::ptr_eq(
+            &original.hierarchy,
+            &repeated_snapshot.hierarchy
+        ));
+
+        let new_pack = geometry(2, 0, Species::Oak);
+        let next = build_hierarchy(
+            second,
+            Some(second),
+            PointSiteChanges {
+                reset: false,
+                patches: vec![],
+            },
+            repeated.placements,
+            &portraits,
+            Some(new_pack.clone()),
+            Some(repeated_snapshot),
+        )
+        .snapshot
+        .unwrap();
+        assert!(!Arc::ptr_eq(&original.hierarchy, &next.hierarchy));
+        assert!(Arc::ptr_eq(&new_pack, &next.geometry));
+        let full = build_hierarchy(
+            second,
+            None,
+            PointSiteChanges {
+                reset: true,
+                patches: vec![(a, Some(batch(8.0))), (b, Some(batch(-8.0)))],
+            },
+            PlacementIndex::default(),
+            &portraits,
+            Some(new_pack),
             None,
         )
         .snapshot
         .unwrap();
-        let reordered = build_hierarchy(
-            revision(2, 0),
-            vec![batch(-8.0), batch(8.0)],
-            &portraits,
-            Some(old_pack),
-            Some(old.clone()),
-        )
-        .snapshot
-        .unwrap();
-        assert!(Arc::ptr_eq(&old.hierarchy, &reordered.hierarchy));
+        assert_eq!(
+            next.hierarchy.shadow_placements([0.0; 3]),
+            full.hierarchy.shadow_placements([0.0; 3])
+        );
+        let select = |snapshot: &Snapshot| {
+            let mut scene = PlanetScene::default();
+            scene.replace_hierarchy(snapshot.hierarchy.clone());
+            let camera = Camera {
+                position: [0.0; 3],
+                forward: [0.0, 1.0, 0.0],
+                right: [1.0, 0.0, 0.0],
+                up: [0.0, 0.0, 1.0],
+                focal: 800.0,
+                width: 4096,
+                height: 4096,
+                reach: 2000.0,
+                planet_radius: 0.0,
+            };
+            scene
+                .select(snapshot.geometry.pack(), camera, 2.2, 1000, 1000)
+                .instances
+        };
+        let updated = select(&next);
+        assert!(!updated.is_empty());
+        assert_eq!(updated, select(&full));
+        assert_ne!(updated, select(&original));
+    }
 
-        let next_pack = geometry(2, 0, Species::Oak);
-        let next = build_hierarchy(
-            revision(2, 0),
-            vec![batch(-8.0), batch(8.0)],
+    #[test]
+    fn patch_edits_rebuild_shared_cells_without_discarding_other_contributors() {
+        let portraits = Portraits::default();
+        let pack = geometry(1, 0, Species::Oak);
+        let a = PatchKey(0, 0);
+        let b = PatchKey(0, 1);
+        let c = PatchKey(0, 2);
+        let first = revision(1, 0);
+        let second = revision(2, 0);
+        let old = build_hierarchy(
+            first,
+            None,
+            PointSiteChanges {
+                reset: true,
+                patches: vec![(a, Some(batch(6.0))), (b, Some(batch(8.0)))],
+            },
+            PlacementIndex::default(),
             &portraits,
-            Some(next_pack.clone()),
-            Some(reordered),
+            Some(pack.clone()),
+            None,
+        );
+        let edited = build_hierarchy(
+            second,
+            Some(first),
+            PointSiteChanges {
+                reset: false,
+                patches: vec![(a, None), (c, Some(batch(24.0)))],
+            },
+            old.placements,
+            &portraits,
+            Some(pack.clone()),
+            old.snapshot,
         )
         .snapshot
         .unwrap();
-        assert!(!Arc::ptr_eq(&old.hierarchy, &next.hierarchy));
-        assert!(Arc::ptr_eq(&next_pack, &next.geometry));
+        let positions: Vec<_> = edited
+            .hierarchy
+            .shadow_placements([0.0; 3])
+            .into_iter()
+            .map(|placement| placement.position[0])
+            .collect();
+        assert_eq!(positions, [8.0, 24.0]);
+        assert_eq!(edited.candidates, 2);
+
+        let full = build_hierarchy(
+            second,
+            None,
+            PointSiteChanges {
+                reset: true,
+                patches: vec![(b, Some(batch(8.0))), (c, Some(batch(24.0)))],
+            },
+            PlacementIndex::default(),
+            &portraits,
+            Some(pack),
+            None,
+        )
+        .snapshot
+        .unwrap();
+        assert_eq!(
+            edited.hierarchy.shadow_placements([0.0; 3]),
+            full.hierarchy.shadow_placements([0.0; 3])
+        );
     }
 
     #[test]
     fn partial_or_obsolete_prepared_pack_does_not_displace_active_geometry() {
         let portraits = Portraits::default();
-        let old_pack = geometry(1, 0, Species::Oak);
+        let patch = PatchKey(0, 0);
+        let first = revision(1, 0);
         let old = build_hierarchy(
-            revision(1, 0),
-            vec![batch(8.0)],
+            first,
+            None,
+            PointSiteChanges {
+                reset: true,
+                patches: vec![(patch, Some(batch(8.0)))],
+            },
+            PlacementIndex::default(),
             &portraits,
-            Some(old_pack),
+            Some(geometry(1, 0, Species::Oak)),
             None,
         )
         .snapshot
         .unwrap();
-        let partial_pack = geometry(2, 0, Species::Palm);
-        let next = build_hierarchy(
-            revision(2, 0),
-            vec![batch(8.0)],
-            &portraits,
-            Some(partial_pack),
-            Some(old.clone()),
+        let demand = BTreeMap::from([(impostor::tile(Species::Oak, 0), (Species::Oak, 0))]);
+        let next = choose_geometry(
+            first,
+            &demand,
+            Some(geometry(2, 0, Species::Palm)),
+            Some(&old),
         )
-        .snapshot
         .unwrap();
-        assert!(Arc::ptr_eq(&old.geometry, &next.geometry));
-
-        let obsolete_pack = geometry(3, 0, Species::Oak);
-        let incompatible = build_hierarchy(
+        assert!(Arc::ptr_eq(&old.geometry, &next));
+        assert!(choose_geometry(
             revision(2, 1),
-            vec![batch(8.0)],
-            &portraits,
-            Some(obsolete_pack),
-            Some(old),
-        );
-        assert!(incompatible.snapshot.is_none());
-        assert_eq!(incompatible.demand.templates.len(), 1);
+            &demand,
+            Some(geometry(3, 0, Species::Oak)),
+            Some(&old),
+        )
+        .is_none());
     }
 }

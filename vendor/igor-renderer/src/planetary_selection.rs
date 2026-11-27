@@ -4,13 +4,28 @@
 use super::{Aggregate,Sample,Point,Range,choose_local,collapse_world,raster_shadow_sample,point_position,point_radius,LOCAL_WIDTHS,ORIGINAL_LEVELS,UNKNOWN,RAW};
 use crate::{planetary::Pack,render_api::LANES};
 use glam::{DVec3,Vec3,Quat};
-use std::{collections::{BTreeMap,HashMap}, sync::Arc};
-use tracing::trace_span;
+use std::{cmp::Ordering, collections::{BTreeMap,HashMap}, sync::Arc};
+use tracing::{trace, trace_span};
 
 /// Unmodified game-world placement, before the loader normalization.
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub struct Placement{
     pub position:[f64;3],pub rotation:[f32;4],pub scale:f32,pub model:usize,pub phase:f32,
+}
+
+impl Placement {
+    /// Stable key of the 16 m cell containing the untransformed placement.
+    pub fn leaf_key(&self) -> LeafKey {
+        cell(DVec3::from_array(self.position), WIDTHS[0])
+    }
+
+    /// Order placements by world position and then by model.
+    pub fn spatial_cmp(&self, other: &Self) -> Ordering {
+        self.position[0].total_cmp(&other.position[0])
+            .then_with(|| self.position[1].total_cmp(&other.position[1]))
+            .then_with(|| self.position[2].total_cmp(&other.position[2]))
+            .then_with(|| self.model.cmp(&other.model))
+    }
 }
 #[derive(Clone,Copy)]
 pub struct Camera{
@@ -43,7 +58,9 @@ impl Camera{
         ((1.0-t*t*(3.0-2.0*t))*12.0).round() as u32
     }
 }
-type Cell=[i64;3];
+/// Signed world-grid coordinates of a 16 m leaf cell.
+pub type LeafKey = [i64; 3];
+type Cell = LeafKey;
 type Identity=[u64;3];
 const WIDTHS:[f64;5]=[16.0,64.0,256.0,1024.0,4096.0];
 fn cell(p:DVec3,width:f64)->Cell{(p/width).to_array().map(|v|v.floor() as i64)}
@@ -52,10 +69,10 @@ fn identity(p:Placement)->Identity{p.position.map(f64::to_bits)}
 fn parent(k:Cell)->Cell{k.map(|v|v.div_euclid(4))}
 #[derive(Clone,Copy)]
 struct Tree{
-    input:Placement,origin:DVec3,rotation:Quat,scale:f32,center:DVec3,radius:f32,summary:Sample,
+    input:Placement,origin:DVec3,rotation:Quat,scale:f32,center:DVec3,radius:f32,
 }
 impl Tree{
-    fn new(input:Placement,pack:&Pack)->Option<Self>{
+    fn new(input:Placement,pack:&Pack)->Option<(Self, Sample)>{
         let t=pack.templates.get(&input.model)?;
         let rotation=Quat::from_array(input.rotation);
         let scale=input.scale/t.transform.scale;
@@ -67,31 +84,36 @@ impl Tree{
         // Keep the summary in tree-local coordinates until building a cell.
         let summary=Sample{pos:rotation*(Vec3::from_array(s.position)*scale),normal:rotation*Vec3::from_array(s.normal),
             color:Vec3::from_array(s.color),radius:s.radius*scale,coverage:s.coverage};
-        Some(Self{input,origin,rotation,scale,center,radius,summary})
+        Some((Self{input,origin,rotation,scale,center,radius}, summary))
     }
 }
+enum Members {
+    Trees(Box<[Tree]>),
+    Children(Box<[Arc<Node>]>),
+}
+
 struct Node{
     key:Cell,anchor:DVec3,lo:DVec3,hi:DVec3,aggregate:Aggregate,
-    members:Vec<usize>,count:u32,
+    members:Members,count:u32,
 }
 impl Node{
-    fn new(key:Cell,width:f64)->Self{
+    fn new(key:Cell,width:f64,members:Members)->Self{
         Self{key,anchor:anchor(key,width),lo:DVec3::splat(f64::INFINITY),hi:DVec3::splat(f64::NEG_INFINITY),
-            aggregate:Aggregate::default(),members:Vec::new(),count:0}
+            aggregate:Aggregate::default(),members,count:0}
     }
     fn bounds(&mut self,lo:DVec3,hi:DVec3){self.lo=self.lo.min(lo);self.hi=self.hi.max(hi);}
-    fn add_tree(&mut self,index:usize,t:Tree){
-        self.members.push(index);self.count+=1;
+    fn add_tree(&mut self,t:Tree,summary:Sample){
+        self.count+=1;
         let r=DVec3::splat(f64::from(t.radius));
         self.bounds(t.center-r,t.center+r);
-        if t.summary.coverage>0.0{
-            let mut s=t.summary;
+        if summary.coverage>0.0{
+            let mut s=summary;
             s.pos+=(t.origin-self.anchor).as_vec3();
             self.aggregate.add(s);
         }
     }
-    fn add_child(&mut self,index:usize,c:&Node){
-        self.members.push(index);self.count+=c.count;self.bounds(c.lo,c.hi);
+    fn add_child(&mut self,c:&Node){
+        self.count+=c.count;self.bounds(c.lo,c.hi);
         // Same exact weighted-sum reduction as the original planar grid,
         // translated between cell-local origins to preserve precision.
         let a=c.aggregate;
@@ -107,6 +129,51 @@ impl Node{
         }
     }
     fn sphere(&self)->(DVec3,f32){((self.lo+self.hi)*0.5,((self.hi-self.lo).length()*0.5) as f32)}
+
+    fn leaf(key: Cell, trees: impl Iterator<Item = (Tree, Sample)>) -> Option<Arc<Self>> {
+        let mut node = Self::new(key, WIDTHS[0], Members::Trees(Box::default()));
+        let trees: Vec<_> = trees.map(|(tree, summary)| {
+            node.add_tree(tree, summary);
+            tree
+        }).collect();
+        if trees.is_empty() {
+            return None;
+        }
+        node.members = Members::Trees(trees.into_boxed_slice());
+        Some(Arc::new(node))
+    }
+
+    fn branch(key: Cell, level: usize, children: Vec<Arc<Self>>) -> Option<Arc<Self>> {
+        if children.is_empty() {
+            return None;
+        }
+        let mut node = Self::new(key, WIDTHS[level], Members::Children(Box::default()));
+        for child in &children {
+            node.add_child(child);
+        }
+        node.members = Members::Children(children.into_boxed_slice());
+        Some(Arc::new(node))
+    }
+
+    fn children(&self) -> &[Arc<Self>] {
+        match &self.members {
+            Members::Children(children) => children,
+            Members::Trees(_) => &[],
+        }
+    }
+
+    fn shadow_placements(&self, eye: DVec3, placements: &mut Vec<Placement>) {
+        match &self.members {
+            Members::Trees(trees) => placements.extend(trees.iter()
+                .filter(|tree| tree.center.distance_squared(eye) < 500.0f64.powi(2))
+                .map(|tree| tree.input)),
+            Members::Children(children) => {
+                for child in children.iter() {
+                    child.shadow_placements(eye, placements);
+                }
+            }
+        }
+    }
 }
 #[derive(Default)]
 struct History{
@@ -136,55 +203,175 @@ pub struct PlanetSelection{
     pub covered:u32,pub clusters:u32,pub visited:u32,pub threshold:f32,pub budget_met:bool,
     pub lod_counts:[u32;22],
 }
-/// Immutable tree transforms and world hierarchy built against one geometry pack.
+/// Immutable spatial blocks and hierarchy nodes built against one geometry pack.
 #[derive(Default)]
 pub struct PlanetHierarchy {
-    placements: Vec<Placement>,
-    trees: Vec<Tree>,
-    levels: Vec<Vec<Node>>,
+    roots: Vec<Arc<Node>>,
+    blocks: usize,
+    // Retained only by the synchronous placement-list API.
+    placements: Option<Vec<Placement>>,
 }
 
 impl PlanetHierarchy {
-    /// Build from placements in deterministic order, skipping models absent from the pack.
+    /// Build from a complete placement list. Order within a leaf follows the input.
     /// Use the same pack for selection and shadow baking.
     pub fn build(pack: &Pack, placements: Vec<Placement>) -> Self {
-        let _span = trace_span!("PlanetHierarchy::build").entered();
-        let trees: Vec<_> = trace_span!("PlanetScene::collect_trees")
-            .in_scope(|| placements.iter().filter_map(|&p| Tree::new(p, pack)).collect());
-        let leaves = trace_span!("PlanetScene::build_leaf_level").in_scope(|| {
-            let mut leaves = BTreeMap::<Cell, Node>::new();
-            for (i, &tree) in trees.iter().enumerate() {
-                let key = cell(DVec3::from_array(tree.input.position), WIDTHS[0]);
-                leaves.entry(key).or_insert_with(|| Node::new(key, WIDTHS[0])).add_tree(i, tree);
-            }
-            leaves.into_values().collect()
-        });
-        let mut levels: Vec<Vec<Node>> = vec![leaves];
-        {
-            let _span = trace_span!("PlanetScene::build_parent_levels").entered();
-            for level in 1..WIDTHS.len() {
-                let mut parents = BTreeMap::<Cell, Node>::new();
-                for (i, child) in levels[level - 1].iter().enumerate() {
-                    let key = parent(child.key);
-                    parents.entry(key).or_insert_with(|| Node::new(key, WIDTHS[level])).add_child(i, child);
-                }
-                levels.push(parents.into_values().collect());
-            }
+        let mut cells = BTreeMap::<LeafKey, Vec<Placement>>::new();
+        for &placement in &placements {
+            cells.entry(placement.leaf_key()).or_default().push(placement);
         }
-        Self { placements, trees, levels }
+        let mut hierarchy = Self::build_cells(pack, cells);
+        hierarchy.placements = Some(placements);
+        hierarchy
     }
 
-    /// Compare sorted inputs before rebuilding with the same geometry pack.
+    /// Build from complete, ordered placement lists for distinct 16 m cells.
+    pub fn build_cells(
+        pack: &Pack,
+        cells: impl IntoIterator<Item = (LeafKey, Vec<Placement>)>,
+    ) -> Self {
+        let _span = trace_span!("PlanetHierarchy::full_rebuild").entered();
+        Self::default().replace_cells(pack, cells, true).unwrap_or_default()
+    }
+
+    /// Replace complete placement lists for distinct dirty cells, sharing all
+    /// unchanged blocks and branches. An empty list removes the cell. Returns
+    /// `None` when the renderable contents of all supplied cells are unchanged.
+    /// The pack must be the same one used to build this hierarchy.
+    pub fn update_cells(
+        &self,
+        pack: &Pack,
+        cells: impl IntoIterator<Item = (LeafKey, Vec<Placement>)>,
+    ) -> Option<Self> {
+        let _span = trace_span!("PlanetHierarchy::incremental_update").entered();
+        self.replace_cells(pack, cells, false)
+    }
+
+    fn replace_cells(
+        &self,
+        pack: &Pack,
+        cells: impl IntoIterator<Item = (LeafKey, Vec<Placement>)>,
+        full: bool,
+    ) -> Option<Self> {
+        let mut blocks = self.blocks;
+        let mut rebuilt_blocks = 0;
+        let mut removed_blocks = 0;
+        let mut changes = BTreeMap::new();
+        {
+            let _span = trace_span!("PlanetScene::build_leaf_level").entered();
+            for (key, placements) in cells {
+                let old = self.node(0, key);
+                let old_trees = match old.map(|node| &node.members) {
+                    Some(Members::Trees(trees)) => trees.as_ref(),
+                    _ => &[],
+                };
+                if old_trees.iter().map(|tree| tree.input).eq(placements.iter().copied()) {
+                    continue;
+                }
+                let leaf = Node::leaf(key, placements.into_iter().filter_map(|p| Tree::new(p, pack)));
+                let new_trees = match leaf.as_ref().map(|node| &node.members) {
+                    Some(Members::Trees(trees)) => trees.as_ref(),
+                    _ => &[],
+                };
+                // Unavailable templates and invalid scales may leave this cell unchanged.
+                if old_trees.iter().map(|tree| tree.input).eq(new_trees.iter().map(|tree| tree.input)) {
+                    continue;
+                }
+                if leaf.is_some() {
+                    rebuilt_blocks += 1;
+                    blocks += usize::from(old.is_none());
+                } else {
+                    removed_blocks += 1;
+                    blocks -= 1;
+                }
+                changes.insert(key, leaf);
+            }
+        }
+
+        let mut updated_ancestors = 0;
+        let updated = if changes.is_empty() {
+            None
+        } else {
+            let _span = trace_span!("PlanetScene::build_parent_levels").entered();
+            for level in 1..WIDTHS.len() {
+                let mut parents = BTreeMap::<_, Vec<_>>::new();
+                for (key, node) in changes {
+                    parents.entry(parent(key)).or_default().push((key, node));
+                }
+                updated_ancestors += parents.len();
+                changes = parents.into_iter().map(|(key, updates)| {
+                    let old = self.node(level, key).map_or(&[][..], Node::children);
+                    (key, Node::branch(key, level, merge_children(old, updates)))
+                }).collect();
+            }
+            Some(Self { roots: merge_children(&self.roots, changes), blocks, placements: None })
+        };
+        trace!(
+            rebuilt_blocks,
+            reused_blocks = blocks - rebuilt_blocks,
+            removed_blocks,
+            updated_ancestors,
+            full_rebuilds = usize::from(full),
+            "Point forest hierarchy work"
+        );
+        updated
+    }
+
+    fn node(&self, level: usize, key: Cell) -> Option<&Node> {
+        let mut keys = [key; WIDTHS.len()];
+        for depth in level + 1..WIDTHS.len() {
+            keys[depth] = parent(keys[depth - 1]);
+        }
+        let mut siblings = &self.roots[..];
+        for depth in (level..WIDTHS.len()).rev() {
+            let index = siblings.binary_search_by_key(&keys[depth], |node| node.key).ok()?;
+            let node = &siblings[index];
+            if depth == level {
+                return Some(node);
+            }
+            siblings = node.children();
+        }
+        None
+    }
+
+    /// Compare inputs supplied through the complete placement-list API.
     pub fn has_placements(&self, placements: &[Placement]) -> bool {
-        self.placements == placements && !self.levels.is_empty()
+        self.placements.as_deref() == Some(placements)
     }
 
     /// Off-screen placements are included; selection and camera LOD do not affect shadows.
-    pub fn shadow_placements(&self,eye:[f64;3])->Vec<Placement>{
+    pub fn shadow_placements(&self, eye: [f64; 3]) -> Vec<Placement> {
         let _span = trace_span!("PlanetScene::shadow_placements").entered();
-        let eye=DVec3::from_array(eye);
-        self.trees.iter().filter(|t|t.center.distance_squared(eye)<500.0f64.powi(2)).map(|t|t.input).collect()
+        let eye = DVec3::from_array(eye);
+        let mut placements = Vec::new();
+        for root in &self.roots {
+            root.shadow_placements(eye, &mut placements);
+        }
+        // Shadow baking previously consumed world-position order from the game.
+        placements.sort_by(Placement::spatial_cmp);
+        placements
     }
+}
+
+// Changes arrive in key order. Each surviving old child only needs one Arc clone.
+fn merge_children(
+    old: &[Arc<Node>],
+    changes: impl IntoIterator<Item = (Cell, Option<Arc<Node>>)>,
+) -> Vec<Arc<Node>> {
+    let changes = changes.into_iter();
+    let mut children = Vec::with_capacity(old.len().max(changes.size_hint().0));
+    let mut old = old.iter().peekable();
+    for (key, replacement) in changes {
+        while old.peek().is_some_and(|node| node.key < key) {
+            children.push(old.next().unwrap().clone());
+        }
+        if old.peek().is_some_and(|node| node.key == key) {
+            old.next();
+        }
+        children.extend(replacement);
+    }
+    children.extend(old.cloned());
+    children
 }
 
 /// Reuse the selector across frames and hierarchy swaps to preserve LOD history.
@@ -215,8 +402,8 @@ impl PlanetScene{
         std::mem::replace(&mut self.hierarchy, hierarchy)
     }
 
-    fn visit(&self,pack:&Pack,cam:Camera,level:usize,index:usize,threshold:f32,work:&mut Work){
-        let node=&self.hierarchy.levels[level][index];work.visited+=1;
+    fn visit(&self,pack:&Pack,cam:Camera,level:usize,node:&Node,threshold:f32,work:&mut Work){
+        work.visited+=1;
         let (center,radius)=node.sphere();
         let Some(px)=cam.projected(center,radius,WIDTHS[level] as f32)else{return;};
         let key=(level,node.key);
@@ -232,12 +419,16 @@ impl PlanetScene{
             }
             return;
         }
-        if level>0{
-            for &i in &node.members{self.visit(pack,cam,level-1,i,threshold,work);}
-            return;
-        }
-        for &i in &node.members{
-            let t=self.hierarchy.trees[i];
+        let trees = match &node.members {
+            Members::Children(children) => {
+                for child in children.iter() {
+                    self.visit(pack, cam, level - 1, child, threshold, work);
+                }
+                return;
+            }
+            Members::Trees(trees) => trees,
+        };
+        for t in trees.iter() {
             let Some(ppm)=cam.projected(t.center,t.radius,t.scale)else{continue;};
             let model=&pack.templates[&t.input.model];
             let distance=((t.center-cam.eye()).length() as f32-t.radius).max(0.0);
@@ -256,8 +447,8 @@ impl PlanetScene{
     fn probe(&self,pack:&Pack,cam:Camera,threshold:f32)->Work{
         let _span = trace_span!("PlanetScene::traverse_hierarchy").entered();
         let mut work=Work::default();
-        if let Some(top)=self.hierarchy.levels.len().checked_sub(1){
-            for i in 0..self.hierarchy.levels[top].len(){self.visit(pack,cam,top,i,threshold,&mut work);}
+        for root in &self.hierarchy.roots {
+            self.visit(pack, cam, WIDTHS.len() - 1, root, threshold, &mut work);
         }
         work
     }
@@ -338,7 +529,7 @@ mod tests{
         let sites=vec![placement(0.0,20.0),placement(-2.0,1000.0),placement(-3.0,1001.0)];
         assert!(scene.update_sites(&pack,sites.clone()));
         assert!(!scene.update_sites(&pack,sites));
-        assert_eq!(scene.hierarchy.levels[4].iter().map(|n|n.count).sum::<u32>(),3);
+        assert_eq!(scene.hierarchy.roots.iter().map(|n|n.count).sum::<u32>(),3);
         let out=scene.select(&pack,camera(),2.2,1000,1000);
         assert!(out.budget_met);assert_eq!(out.covered,3);
         assert!(out.clusters>=1);
@@ -368,11 +559,85 @@ mod tests{
         assert_eq!(scene.history.trees, history);
         assert_eq!((scene.threshold, scene.spare, scene.budget, scene.max_jobs), (threshold, spare, 1000, 1000));
     }
+
+    #[test]
+    fn incremental_cells_match_full_reconstruction_and_share_untouched_paths() {
+        let pack = pack();
+        let changed = placement(-80.0, 78.0);
+        let removed = placement(-4140.0, 80.0);
+        let nearby = placement(-76.0, 90.0);
+        let untouched = placement(4200.0, 80.0);
+        let distant = placement(50.0, 1200.0);
+        let original = PlanetHierarchy::build(
+            &pack, vec![changed, removed, nearby, untouched, distant],
+        );
+        let replacement = Placement { scale: 1.5, phase: 0.3, ..changed };
+        let added = placement(-16.0, 400.0);
+        let incremental = original.update_cells(&pack, [
+            (changed.leaf_key(), vec![replacement]),
+            (removed.leaf_key(), vec![]),
+            (added.leaf_key(), vec![added]),
+            ([1000; 3], vec![]),
+        ]).unwrap();
+        assert_eq!(incremental.blocks, 5);
+        assert!(incremental.node(0, removed.leaf_key()).is_none());
+        let removed_root = (1..WIDTHS.len()).fold(removed.leaf_key(), |key, _| parent(key));
+        assert!(incremental.node(WIDTHS.len() - 1, removed_root).is_none());
+        for placement in [nearby, untouched, distant] {
+            assert!(std::ptr::eq(
+                original.node(0, placement.leaf_key()).unwrap(),
+                incremental.node(0, placement.leaf_key()).unwrap(),
+            ));
+        }
+        let untouched_root = (1..WIDTHS.len()).fold(untouched.leaf_key(), |key, _| parent(key));
+        assert!(std::ptr::eq(
+            original.node(WIDTHS.len() - 1, untouched_root).unwrap(),
+            incremental.node(WIDTHS.len() - 1, untouched_root).unwrap(),
+        ));
+        assert!(incremental.update_cells(&pack, [
+            (replacement.leaf_key(), vec![replacement]),
+            ([1000; 3], vec![]),
+        ]).is_none());
+
+        let full = PlanetHierarchy::build(&pack, vec![replacement, nearby, added, distant, untouched]);
+        assert_eq!(incremental.shadow_placements([0.0; 3]), full.shadow_placements([0.0; 3]));
+        let mut edited_scene = PlanetScene::default();
+        let mut full_scene = PlanetScene::default();
+        edited_scene.replace_hierarchy(Arc::new(incremental));
+        full_scene.replace_hierarchy(Arc::new(full));
+        for (position, budget) in [([0.0, 2.0, 0.0], 1000), ([-14.0, 1.0, 8.0], 10)] {
+            let view = Camera { position, ..camera() };
+            let edited = edited_scene.select(&pack, view, 2.2, budget, 1000);
+            let rebuilt = full_scene.select(&pack, view, 2.2, budget, 1000);
+            assert!(edited.covered > 0);
+            assert_eq!(edited.instances, rebuilt.instances);
+            assert_eq!(edited.jobs, rebuilt.jobs);
+            assert_eq!(edited.lod_counts, rebuilt.lod_counts);
+            assert_eq!((edited.covered, edited.visited, edited.threshold, edited.budget_met),
+                (rebuilt.covered, rebuilt.visited, rebuilt.threshold, rebuilt.budget_met));
+        }
+    }
+
+    #[test]
+    fn removing_last_cell_produces_an_empty_hierarchy() {
+        let pack = pack();
+        let site = placement(0.0, 20.0);
+        let full = PlanetHierarchy::build(&pack, vec![site]);
+        let empty = full.update_cells(&pack, [(site.leaf_key(), vec![])]).unwrap();
+        assert_eq!(empty.blocks, 0);
+        assert!(empty.roots.is_empty());
+        let mut scene = PlanetScene::default();
+        scene.replace_hierarchy(Arc::new(empty));
+        let selection = scene.select(&pack, camera(), 2.2, 100, 100);
+        assert!(selection.budget_met);
+        assert!(selection.instances.is_empty() && selection.jobs.is_empty());
+    }
+
     #[test]fn translated_parent_preserves_weighted_summary(){
-        let mut child=Node::new([-1,0,0],16.0);
+        let mut child=Node::new([-1,0,0],16.0,Members::Trees(Box::default()));
         child.aggregate.add(Sample{pos:Vec3::new(15.0,1.0,2.0),color:Vec3::ONE,normal:Vec3::Y,radius:1.0,coverage:1.0});
         child.lo=child.anchor;child.hi=child.anchor+DVec3::splat(16.0);
-        let mut p=Node::new([-1,0,0],64.0);p.add_child(0,&child);
+        let mut p=Node::new([-1,0,0],64.0,Members::Children(Box::default()));p.add_child(&child);
         let a=child.anchor+child.aggregate.sample().unwrap().pos.as_dvec3();
         let b=p.anchor+p.aggregate.sample().unwrap().pos.as_dvec3();
         assert_eq!(a,b);
@@ -407,7 +672,7 @@ impl PlanetShadow{
         let mut pixels=vec![0u8;side as usize*side as usize*4];
         let level=LOCAL_WIDTHS.iter().position(|&w|w==1.0)?;
         for input in sites{
-            let Some(t)=Tree::new(input,pack) else{continue;};
+            let Some((t,_))=Tree::new(input,pack) else{continue;};
             let rel=(t.origin-origin).as_vec3();
             let range=pack.templates[&input.model].info.ranges[level];
             if range.offset&RAW!=0{continue;}
