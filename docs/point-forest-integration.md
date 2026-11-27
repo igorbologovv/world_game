@@ -38,11 +38,25 @@ instance and job buffers after the library's refinement interval. Workers also
 collect shadow casters and bake the same opacity field from the matching
 hierarchy and geometry.
 
+Set `IGOR_SELECTION_WORKERS` to `1` for the serial reference or to a number from
+`2` to `8` for a maximum lane count. Unset or `auto` uses up to eight lanes,
+limited by the available CPUs and Bevy compute threads plus the caller.
+The planner uses projected subtree sizes to split larger branches below the
+root. Small or heavily culled selections stay serial.
+
+The selector assigns contiguous ranges of the original traversal order to
+lanes. The main thread runs one lane while Bevy's compute pool runs the others.
+One scoped join completes the probe before the budget decision. Lanes borrow
+the same snapshot and previous LOD history and write to separate scratch
+buffers. Only the accepted probe merges items in traversal order and commits
+history updates. The final stable instance ordering, point and job budgets,
+and GPU job generation use the existing rules.
+
 The frame still captures patch and portrait references, polls task readiness,
-and swaps completed snapshots. Camera culling, LOD and budget selection, and
-instance and job generation still run on the main thread when a new selection
-is required. Shadow caster collection and geometry baking run on workers. GPU
-uploads and render passes remain in the render world.
+and swaps completed snapshots. Workload partitioning, budget retries, history
+commit, and instance and job generation are serial. Shadow caster collection
+and geometry baking run on background workers. GPU uploads and render passes
+remain in the render world.
 
 Memory overhead comes from reference-counted nodes and the worker's patch-to-cell
 index. Per-tree leaf indices and cached per-tree summaries are gone, and the
@@ -59,6 +73,12 @@ stages. `PlanetHierarchy::incremental_update` and
 `PlanetHierarchy::full_rebuild` emit per-build counters for rebuilt, reused, and
 removed blocks, updated ancestors, and full rebuilds. The revision messages link
 stream changes, scheduling, and publication.
+
+For selection, compare `PlanetScene::partition_workloads`,
+`PlanetScene::parallel_traversal`, `PlanetScene::worker_workload`,
+`PlanetScene::synchronize_workloads`, and `PlanetScene::merge_workloads`.
+The synchronization zone includes the caller's lane. Compare these with
+`PlanetScene::traverse_hierarchy` and `PlanetScene::select` across worker counts.
 
 Quality trial: game default is 6,000,000 selected points per frame (override with IGOR_POINT_BUDGET). The original 22 LOD levels and selection policy remain unchanged. The job limit also respects the actual device storage limit for the padded projection cache. The settlement HUD is below the FPS readout.
 

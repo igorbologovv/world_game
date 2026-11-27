@@ -12,7 +12,9 @@ use bevy::{
     log::{error, info, trace, trace_span},
     tasks::{AsyncComputeTaskPool, Task},
 };
-use igor_renderer::planetary::{Camera, Pack, PlanetHierarchy, PlanetScene, PlanetSelection};
+use igor_renderer::planetary::{
+    Camera, Pack, PlanetHierarchy, PlanetScene, PlanetSelection, SelectionExecutor,
+};
 
 use super::super::{
     impostor::Portraits,
@@ -139,13 +141,14 @@ impl Snapshots {
         base: f32,
         budget: u64,
         max_jobs: u64,
+        executor: &impl SelectionExecutor,
     ) -> PlanetSelection {
         let snapshot = self
             .active
             .as_ref()
             .expect("select requires a published snapshot");
         self.scene
-            .select(snapshot.geometry.pack(), camera, base, budget, max_jobs)
+            .select_with_executor(snapshot.geometry.pack(), camera, base, budget, max_jobs, executor)
     }
 
     pub(super) fn update(

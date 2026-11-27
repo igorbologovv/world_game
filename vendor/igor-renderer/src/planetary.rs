@@ -50,6 +50,7 @@ pub fn compute_shader()->String{crate::planetary_shader::shader()}
 
 pub use crate::splat::planetary_selection::{
     Camera, LeafKey, Placement, PlanetHierarchy, PlanetScene, PlanetSelection, PlanetShadow,
+    SelectionExecutor,
 };
 
 pub fn ground_shadow_shader()->String{crate::planetary_shader::ground_shadow_shader()}

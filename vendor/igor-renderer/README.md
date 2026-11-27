@@ -481,4 +481,9 @@ used to build the installed hierarchy. `PlanetScene::update_sites` is available
 for synchronous placement-list updates. Selection returns GPU-ready instance
 and job words.
 
+`PlanetScene::select` is serial. Hosts can use `select_with_executor` to supply
+a scoped `SelectionExecutor`. The host runs each independent workload once and
+joins them before returning. Igor partitions the immutable hierarchy, merges the
+ordered results, and retains control of budget probes and LOD history.
+
 Planetary shadows use `PlanetShadow::bake`, the original opacity raster with a local sun-projected tangent basis, 512x512 at 1m per texel and four 8m height bands. The host can cache/rebuild asynchronously and use the shared visibility function for both point color and opaque-scene modulation. Original demo shader and default planar field remain unchanged. This is an approximate static canopy field, not animated per-leaf shadow casting.

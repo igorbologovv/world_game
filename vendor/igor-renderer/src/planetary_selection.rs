@@ -1,11 +1,17 @@
 //! Sparse spherical-world adapter to the original point hierarchy.
 //! Same weighted aggregates, 4x parent reduction, local LODs, hysteresis
 //! and budget policy as the demo. No Bevy types or GPU device dependencies.
-use super::{Aggregate,Sample,Point,Range,choose_local,collapse_world,raster_shadow_sample,point_position,point_radius,LOCAL_WIDTHS,ORIGINAL_LEVELS,UNKNOWN,RAW};
+#[path = "planetary_selection/traversal.rs"]
+mod traversal;
+
+use super::{Aggregate,Point,Sample,raster_shadow_sample,point_position,point_radius,LOCAL_WIDTHS,ORIGINAL_LEVELS,RAW};
+#[cfg(test)]
+use super::Range;
 use crate::{planetary::Pack,render_api::LANES};
 use glam::{DVec3,Vec3,Quat};
 use std::{cmp::Ordering, collections::{BTreeMap,HashMap}, sync::Arc};
 use tracing::{trace, trace_span};
+use traversal::SelectionScratch;
 
 /// Unmodified game-world placement, before the loader normalization.
 #[derive(Clone,Copy,Debug,PartialEq)]
@@ -182,19 +188,28 @@ struct History{
 struct Item{
     origin:[f32;4],rotation:[f32;4],range:[u32;4],count:u32,fade:u32,level:usize,model:usize,
 }
-#[derive(Default)]
-struct Work{
-    items:Vec<Item>,history:History,points:u64,jobs:u64,raw:u64,covered:u32,clusters:u32,visited:u32,
+/// Host-provided scoped execution for independent selection workloads.
+pub trait SelectionExecutor {
+    /// Maximum simultaneous workloads, including one on the calling thread if used.
+    fn worker_count(&self) -> usize;
+
+    /// Run every workload exactly once and return after all writes are complete.
+    /// Workloads may run in any order. Implementations may borrow the slice and callback.
+    fn for_each<T: Send>(&self, workloads: &mut [T], run: impl Fn(&mut T) + Sync);
 }
-impl Work{
-    fn push(&mut self,item:Item,represented:u32,cluster:bool){
-        if item.count==0||item.fade==0{return;}
-        self.points+=u64::from(item.count);self.jobs+=u64::from(item.count.div_ceil(LANES));
-        if !cluster && item.range[0]&RAW!=0{self.raw+=u64::from(item.count);}
-        self.covered+=represented;self.clusters+=u32::from(cluster);self.items.push(item);
+
+struct SerialSelection;
+
+impl SelectionExecutor for SerialSelection {
+    fn worker_count(&self) -> usize {
+        1
     }
-    fn fits(&self,budget:u64,max_jobs:u64)->bool{self.points<=budget&&self.jobs<=max_jobs}
+
+    fn for_each<T: Send>(&self, workloads: &mut [T], run: impl Fn(&mut T) + Sync) {
+        workloads.iter_mut().for_each(run);
+    }
 }
+
 /// GPU word arrays match the existing planetary shader ABI: 48 byte
 /// instance, 16 byte job. A cluster stores its color/normal inline.
 #[derive(Default)]
@@ -378,7 +393,7 @@ fn merge_children(
 #[derive(Default)]
 pub struct PlanetScene{
     hierarchy: Arc<PlanetHierarchy>,
-    history:History,threshold:f32,base:f32,budget:u64,max_jobs:u64,spare:u32,
+    history:History,scratch:SelectionScratch,threshold:f32,base:f32,budget:u64,max_jobs:u64,spare:u32,
 }
 impl PlanetScene{
     /// Return shadow casters from the installed hierarchy.
@@ -402,63 +417,32 @@ impl PlanetScene{
         std::mem::replace(&mut self.hierarchy, hierarchy)
     }
 
-    fn visit(&self,pack:&Pack,cam:Camera,level:usize,node:&Node,threshold:f32,work:&mut Work){
-        work.visited+=1;
-        let (center,radius)=node.sphere();
-        let Some(px)=cam.projected(center,radius,WIDTHS[level] as f32)else{return;};
-        let key=(level,node.key);
-        let collapse=collapse_world(px,threshold,*self.history.nodes.get(&key).unwrap_or(&UNKNOWN));
-        work.history.nodes.insert(key,u8::from(collapse));
-        if collapse{
-            if let Some(s)=node.aggregate.sample(){
-                let pos=node.anchor+s.pos.as_dvec3();
-                let p=Point::encode(Vec3::ZERO,1.0,s.color,s.normal,s.coverage);
-                work.push(Item{origin:(pos-cam.eye()).as_vec3().extend(s.radius).to_array(),
-                    rotation:Quat::IDENTITY.to_array(),range:[p.rgba,p.normal,1,0],
-                    count:1,fade:cam.fade(pos),level:22,model:0},node.count,true);
-            }
-            return;
-        }
-        let trees = match &node.members {
-            Members::Children(children) => {
-                for child in children.iter() {
-                    self.visit(pack, cam, level - 1, child, threshold, work);
-                }
-                return;
-            }
-            Members::Trees(trees) => trees,
-        };
-        for t in trees.iter() {
-            let Some(ppm)=cam.projected(t.center,t.radius,t.scale)else{continue;};
-            let model=&pack.templates[&t.input.model];
-            let distance=((t.center-cam.eye()).length() as f32-t.radius).max(0.0);
-            let weight=0.18+0.82*(distance/160.0).clamp(0.0,1.0);
-            let id=identity(t.input);
-            let hash=(id[0]^id[1].rotate_left(21)^id[2].rotate_left(42)) as u32;
-            let stagger=if pack.levels.len()>ORIGINAL_LEVELS.len(){0.94+0.12*crate::random(hash^0x3f912ac7)}else{1.0};
-            let local=(threshold*weight*stagger).max(0.25);
-            let chosen=choose_local(ppm,local,*self.history.trees.get(&id).unwrap_or(&UNKNOWN),&pack.levels);
-            work.history.trees.insert(id,chosen as u8);
-            let Range{offset,count}=model.info.ranges[chosen];
-            work.push(Item{origin:(t.origin-cam.eye()).as_vec3().extend(t.scale).to_array(),rotation:t.rotation.to_array(),
-                range:[offset,count,0,t.input.phase.to_bits()],count,fade:cam.fade(t.center),level:chosen,model:t.input.model},1,false);
-        }
-    }
-    fn probe(&self,pack:&Pack,cam:Camera,threshold:f32)->Work{
-        let _span = trace_span!("PlanetScene::traverse_hierarchy").entered();
-        let mut work=Work::default();
-        for root in &self.hierarchy.roots {
-            self.visit(pack, cam, WIDTHS.len() - 1, root, threshold, &mut work);
-        }
-        work
-    }
     /// Select visible points using the pack used to build the installed hierarchy.
     pub fn select(&mut self,pack:&Pack,cam:Camera,base:f32,budget:u64,max_jobs:u64)->PlanetSelection{
+        self.select_with_executor(pack, cam, base, budget, max_jobs, &SerialSelection)
+    }
+
+    /// Select using the host's scoped executor. Probes share the previous LOD
+    /// history and only the accepted probe commits its updates.
+    pub fn select_with_executor(
+        &mut self,
+        pack: &Pack,
+        cam: Camera,
+        base: f32,
+        budget: u64,
+        max_jobs: u64,
+        executor: &impl SelectionExecutor,
+    ) -> PlanetSelection {
         let _span = trace_span!("PlanetScene::select").entered();
         let base=base.clamp(0.25,512.0);
         if self.base!=base||self.budget!=budget||self.max_jobs!=max_jobs{
-            self.base=base;self.budget=budget;self.max_jobs=max_jobs;self.threshold=base;self.spare=0;self.history=History::default();
+            self.base=base;self.budget=budget;self.max_jobs=max_jobs;self.threshold=base;self.spare=0;
+            self.history.nodes.clear();
+            self.history.trees.clear();
         }
+        let mut probe = |threshold| {
+            self.scratch.probe(&self.hierarchy, &self.history, pack, cam, threshold, executor)
+        };
         let current=self.threshold.max(base);
         let dense=pack.levels.len()>ORIGINAL_LEVELS.len();
         let mut threshold=current;
@@ -468,13 +452,13 @@ impl PlanetScene{
         if self.spare>=12&&current>base{
             tried=true;
             let candidate=(current/if dense{1.08}else{1.125}).max(base);
-            let work=self.probe(pack,cam,candidate);
+            let work=probe(candidate);
             if work.fits(budget,max_jobs)&&work.points<=budget.saturating_mul(85)/100{
                 threshold=candidate;accepted=Some(work);
             }
         }
         let work=accepted.unwrap_or_else(||loop{
-            let work=self.probe(pack,cam,threshold);
+            let work=probe(threshold);
             if work.fits(budget,max_jobs)||threshold>=512.0{break work;}
             threshold=(threshold*if dense{1.15}else{1.25}).min(512.0);
         });
@@ -487,14 +471,13 @@ impl PlanetScene{
             // Never send an over-budget dispatch or silently drop trees.
             return PlanetSelection{threshold,budget_met:false,visited:work.visited,..Default::default()};
         }
-        let Work{mut items,history,points,jobs,raw,covered,clusters,visited}=work;
-        self.history=history;
+        let items = self.scratch.commit(&mut self.history);
         // Same demo ordering: fine levels first, model next, world last.
         items.sort_by_key(|i|(i.level,i.model));
         let _span = trace_span!("PlanetScene::generate_instances_and_jobs").entered();
-        let mut out=PlanetSelection{instances:Vec::with_capacity(items.len()),jobs:Vec::with_capacity(jobs as usize),
-            points:points as u32,raw_points:raw as u32,covered,clusters,visited,threshold,budget_met:true,lod_counts:[0;22]};
-        for item in items{
+        let mut out=PlanetSelection{instances:Vec::with_capacity(items.len()),jobs:Vec::with_capacity(work.jobs as usize),
+            points:work.points as u32,raw_points:work.raw as u32,covered:work.covered,clusters:work.clusters,visited:work.visited,threshold,budget_met:true,lod_counts:[0;22]};
+        for item in items.drain(..){
             let a=item.origin.map(f32::to_bits);let b=item.rotation.map(f32::to_bits);let c=item.range;
             let index=out.instances.len() as u32;
             out.instances.push([a[0],a[1],a[2],a[3],b[0],b[1],b[2],b[3],c[0],c[1],c[2],c[3]]);
@@ -524,6 +507,132 @@ mod tests{
     fn placement(x:f64,z:f64)->Placement{Placement{position:[x,0.0,z],rotation:[0.0,0.0,0.0,1.0],scale:1.0,model:0,phase:0.0}}
     fn camera()->Camera{Camera{position:[0.0,2.0,0.0],forward:[0.0,0.0,1.0],right:[1.0,0.0,0.0],up:[0.0,1.0,0.0],
         focal:800.0,width:1600,height:900,reach:2000.0,planet_radius:0.0}}
+
+    struct TestExecutor {
+        workers: usize,
+        largest_dispatch: std::cell::Cell<usize>,
+    }
+
+    impl SelectionExecutor for TestExecutor {
+        fn worker_count(&self) -> usize {
+            self.workers
+        }
+
+        fn for_each<T: Send>(&self, workloads: &mut [T], run: impl Fn(&mut T) + Sync) {
+            self.largest_dispatch.set(self.largest_dispatch.get().max(workloads.len()));
+            std::thread::scope(|scope| {
+                let run = &run;
+                // Start in reverse order to exercise ordered merging independently of scheduling.
+                for workload in workloads.iter_mut().rev() {
+                    scope.spawn(move || run(workload));
+                }
+            });
+        }
+    }
+
+    fn dense_hierarchy(pack: &Pack) -> Arc<PlanetHierarchy> {
+        let mut placements = Vec::new();
+        for x in 0..64 {
+            for z in 0..64 {
+                let mut site = placement(20.0 + f64::from(x) * 4.0, 100.0 + f64::from(z) * 4.0);
+                site.phase = (x * 64 + z) as f32;
+                placements.push(site);
+            }
+        }
+        Arc::new(PlanetHierarchy::build(pack, placements))
+    }
+
+    fn assert_same_selection(serial: &PlanetSelection, parallel: &PlanetSelection) {
+        assert_eq!(serial.instances, parallel.instances);
+        assert_eq!(serial.jobs, parallel.jobs);
+        assert_eq!(serial.points, parallel.points);
+        assert_eq!(serial.raw_points, parallel.raw_points);
+        assert_eq!(serial.covered, parallel.covered);
+        assert_eq!(serial.clusters, parallel.clusters);
+        assert_eq!(serial.visited, parallel.visited);
+        assert_eq!(serial.threshold.to_bits(), parallel.threshold.to_bits());
+        assert_eq!(serial.budget_met, parallel.budget_met);
+        assert_eq!(serial.lod_counts, parallel.lod_counts);
+    }
+
+    #[test]
+    fn parallel_selection_matches_serial_with_one_dense_root_and_budget_retries() {
+        let pack = pack();
+        let hierarchy = dense_hierarchy(&pack);
+        assert_eq!(hierarchy.roots.len(), 1);
+        assert_eq!(hierarchy.roots[0].children().len(), 1);
+        let edited_hierarchy = Arc::new(hierarchy.update_cells(
+            &pack, [(placement(20.0, 100.0).leaf_key(), vec![])],
+        ).unwrap());
+        let mut views = vec![
+            ([148.0, 2.0, -160.0], 1_000_000, 200_000),
+            ([180.0, 3.0, -360.0], 1_000_000, 200_000),
+            ([216.0, 2.0, -650.0], 1_000_000, 200_000),
+            ([148.0, 2.0, -160.0], 4_000, 2_000),
+            ([85.0, 2.0, -1000.0], 4_000, 2_000),
+        ];
+        // Exercise spare-capacity hysteresis across multiple frames and then a job-limited probe.
+        views.extend(std::iter::repeat_n(([148.0, 2.0, -1500.0], 4_000, 2_000), 16));
+        views.extend([
+            ([148.0, 2.0, -160.0], 1_000_000, 64),
+            ([148.0, 2.0, -160.0], 0, 0),
+        ]);
+        for workers in [1, 2, 4, 8] {
+            let executor = TestExecutor { workers, largest_dispatch: std::cell::Cell::new(0) };
+            let mut serial = PlanetScene::default();
+            let mut parallel = PlanetScene::default();
+            serial.replace_hierarchy(hierarchy.clone());
+            parallel.replace_hierarchy(hierarchy.clone());
+            let mut earlier_lods = None;
+            let mut changed_lods = false;
+            let mut tightened_threshold = false;
+            for (frame, &(position, budget, jobs)) in views.iter().enumerate() {
+                if frame == 2 {
+                    serial.replace_hierarchy(edited_hierarchy.clone());
+                    parallel.replace_hierarchy(edited_hierarchy.clone());
+                }
+                let cam = Camera { position, ..camera() };
+                let reference = serial.select(&pack, cam, 2.2, budget, jobs);
+                let selected = parallel.select_with_executor(&pack, cam, 2.2, budget, jobs, &executor);
+                assert_same_selection(&reference, &selected);
+                assert_eq!(serial.history.nodes, parallel.history.nodes);
+                assert_eq!(serial.history.trees, parallel.history.trees);
+                assert_eq!(serial.spare, parallel.spare);
+                if budget == 1_000_000 && jobs == 200_000 {
+                    changed_lods |= earlier_lods.is_some_and(|earlier| earlier != selected.lod_counts);
+                    earlier_lods = Some(selected.lod_counts);
+                }
+                tightened_threshold |= budget == 4_000 && selected.threshold > 2.2;
+                if selected.budget_met {
+                    assert!(u64::from(selected.points) <= budget);
+                    assert!(selected.jobs.len() as u64 <= jobs);
+                }
+                if budget == 0 {
+                    assert!(!selected.budget_met);
+                    assert!(parallel.history.nodes.is_empty() && parallel.history.trees.is_empty());
+                }
+            }
+            assert!(changed_lods && tightened_threshold);
+            assert_eq!(executor.largest_dispatch.get(), if workers == 1 { 0 } else { workers });
+        }
+    }
+
+    #[test]
+    fn parallel_selection_falls_back_for_small_and_culled_workloads() {
+        let pack = pack();
+        let mut scene = PlanetScene::default();
+        let executor = TestExecutor { workers: 8, largest_dispatch: std::cell::Cell::new(0) };
+        scene.update_sites(&pack, vec![placement(0.0, 30.0)]);
+        let near = scene.select_with_executor(&pack, camera(), 2.2, 1000, 1000, &executor);
+        assert_eq!(near.covered, 1);
+        scene.replace_hierarchy(dense_hierarchy(&pack));
+        let culled = Camera { forward: [0.0, 0.0, -1.0], ..camera() };
+        let far = scene.select_with_executor(&pack, culled, 2.2, 1000, 1000, &executor);
+        assert_eq!(far.covered, 0);
+        assert_eq!(far.visited, 1);
+        assert_eq!(executor.largest_dispatch.get(), 0);
+    }
+
     #[test]fn hierarchy_reuses_static_placement_and_covers_once(){
         let pack=pack();let mut scene=PlanetScene::default();
         let sites=vec![placement(0.0,20.0),placement(-2.0,1000.0),placement(-3.0,1001.0)];

@@ -1,6 +1,7 @@
 //! Experimental bridge for the standalone Igor direct-compute renderer.
 //! No second device/window: use Bevy's RenderDevice and real scene depth.
 mod occlusion;
+mod selection_workers;
 mod shader;
 mod snapshots;
 mod temporal;
@@ -10,6 +11,7 @@ use bevy::{
     camera::Exposure,
     math::DVec3,
     core_pipeline::{core_3d::{main_opaque_pass_3d, main_transparent_pass_3d, CORE_3D_DEPTH_FORMAT}, schedule::Core3d, Core3dSystems, FullscreenShader},
+    ecs::system::NonSendMarker,
     log::trace_span,
     prelude::*,
     render::{
@@ -28,6 +30,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use igor_renderer::planetary::{Camera as IgorCamera, PlanetSelection, PlanetShadow};
 
 use snapshots::{take_ready, Geometry, Snapshots};
+use selection_workers::SelectionWorkers;
 
 // Planetary scene quality experiment; keep the standalone demo default unchanged.
 const BUDGET:u32=6_000_000;
@@ -58,6 +61,7 @@ struct ShadowSource {
 #[derive(Resource)]
 pub(super) struct PointForest{
     snapshots: Snapshots,
+    selection_workers: SelectionWorkers,
     models_revision: u64,
     budget_exceeded: bool,
     ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
@@ -71,7 +75,7 @@ pub(super) struct PointForest{
     shadow_changed_at:f64,shadow_task:Option<Task<(ShadowSource, Option<PlanetShadow>)>>,shadow_dirty:bool,shadow_next:f64,eye:[f64;3],
 }
 impl Default for PointForest{
-    fn default()->Self{Self{snapshots:Snapshots::default(),models_revision:0,budget_exceeded:false,
+    fn default()->Self{Self{snapshots:Snapshots::default(),selection_workers:SelectionWorkers::from_env(),models_revision:0,budget_exceeded:false,
         ready:Arc::new(AtomicBool::new(false)),status:Arc::new(AtomicU32::new(0)),submitted:Arc::new(AtomicU32::new(0)),
         storage_limit:Arc::new(AtomicU64::new(0)),layer_limit:Arc::new(AtomicU32::new(0)),
         selection_view:None, selection:None, stable_frames:0, active:false,
@@ -79,7 +83,8 @@ impl Default for PointForest{
         shadows:std::env::var("IGOR_POINT_SHADOWS").as_deref()!=Ok("0"),
         shadow:None,previous_shadow:None,shadow_changed_at:0.0,shadow_task:None,shadow_dirty:true,shadow_next:0.0,eye:[0.0;3]}}
 }
-fn select_points(mut points:ResMut<PointForest>,mut forest:ResMut<ForestStream>,models:Res<ForestModels>,
+// Keep the caller lane off the compute pool so its scoped join never ties up a worker.
+fn select_points(_main_thread: NonSendMarker,mut points:ResMut<PointForest>,mut forest:ResMut<ForestStream>,models:Res<ForestModels>,
     settings:Res<VegetationSettings>,hero:Res<HeroOakAssets>,assets:Res<TreeAssets>,time:Res<Time>,
     cameras:Query<(Entity,GridTransform,&Camera,&Projection),With<WorldCamera>>,frames:ReferenceFrames,lights:Query<(&DirectionalLight,&Transform),Without<WorldCamera>>){
     points.active = false;
@@ -157,7 +162,8 @@ fn select_points(mut points:ResMut<PointForest>,mut forest:ResMut<ForestStream>,
     if same_view && points.stable_frames >= LOD_SETTLE_FRAMES {
         return;
     }
-    let out = points.snapshots.select(cam, BASE_LOD_PIXELS, budget, max_jobs);
+    let points = &mut *points;
+    let out = points.snapshots.select(cam, BASE_LOD_PIXELS, budget, max_jobs, &points.selection_workers);
     let same_threshold = points.selection.as_ref().is_some_and(|old| old.threshold == out.threshold);
     points.stable_frames = if out.threshold == BASE_LOD_PIXELS {
         LOD_SETTLE_FRAMES
