@@ -80,7 +80,20 @@ For selection, compare `PlanetScene::partition_workloads`,
 The synchronization zone includes the caller's lane. Compare these with
 `PlanetScene::traverse_hierarchy` and `PlanetScene::select` across worker counts.
 
-Quality trial: game default is 6,000,000 selected points per frame (override with IGOR_POINT_BUDGET). The original 22 LOD levels and selection policy remain unchanged. The job limit also respects the actual device storage limit for the padded projection cache. The settlement HUD is below the FPS readout.
+For the LOD quality trial, launch with `IGOR_POINT_FOREST=1` and set
+`IGOR_LOD_PIXELS` to `0.75`, `1.0`, `1.5`, or `2.2`. The default is `2.2` px.
+The game reads the setting at startup, clamps finite values to `0.25–512` px,
+and uses the default for invalid values. Keep `IGOR_POINT_BUDGET` at its default
+of 6,000,000 for the threshold comparison. The GPU job limit also depends on
+the device storage limit for the padded projection cache. The settlement HUD is
+below the FPS readout.
+
+The Igor HUD shows the base and accepted thresholds, selected and raw points,
+jobs and job limit, and lane utilization (selected points divided by 64 lanes
+per issued job). Probe rejections are counted for the last selection and show
+which hard limit was exceeded, or whether a refinement missed the 85% point
+headroom target. Set `RUST_LOG=igor_renderer=trace` for individual rejected
+probes with thresholds, counts, and limits.
 
 Shadows and legacy undergrowth are enabled by default in point mode. Set IGOR_POINT_SHADOWS=0 or IGOR_POINT_UNDERGROWTH=0 independently. The library bakes local canopy opacity asynchronously from the original 1m LOD; a ground modulation pass samples opaque scene depth before point composition. The shadow field covers a local 512m region, not the entire planet. Undergrowth is the existing renderer for grass, ferns, shrubs and flowers, not yet converted to points. Tree budget stays 6M.
 

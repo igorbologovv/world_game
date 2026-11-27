@@ -11,7 +11,7 @@ use crate::{planetary::Pack,render_api::LANES};
 use glam::{DVec3,Vec3,Quat};
 use std::{cmp::Ordering, collections::{BTreeMap,HashMap}, sync::Arc};
 use tracing::{trace, trace_span};
-use traversal::SelectionScratch;
+use traversal::{SelectionScratch, Totals};
 
 /// Unmodified game-world placement, before the loader normalization.
 #[derive(Clone,Copy,Debug,PartialEq)]
@@ -217,6 +217,37 @@ pub struct PlanetSelection{
     pub instances:Vec<[u32;12]>,pub jobs:Vec<[u32;4]>,pub points:u32,pub raw_points:u32,
     pub covered:u32,pub clusters:u32,pub visited:u32,pub threshold:f32,pub budget_met:bool,
     pub lod_counts:[u32;22],
+    /// Maximum jobs allowed for this selection, including padding.
+    pub job_limit: u64,
+    /// Rejections during this selection, including a failed terminal probe.
+    pub probe_rejections: ProbeRejections,
+}
+
+/// Mutually exclusive counts of rejected probes in one selection.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProbeRejections {
+    /// Probes over the hard point limit alone.
+    pub points: u32,
+    /// Probes over the hard job limit alone.
+    pub jobs: u32,
+    /// Probes over both hard limits.
+    pub both: u32,
+    /// Refinement probes within both hard limits but over 85% of the point budget.
+    pub refinement_headroom: u32,
+}
+
+impl ProbeRejections {
+    fn record(&mut self, threshold: f32, work: Totals, point_limit: u64, job_limit: u64) {
+        let (count, reason) = match (work.points > point_limit, work.jobs > job_limit) {
+            (true, true) => (&mut self.both, "points_and_jobs"),
+            (true, false) => (&mut self.points, "point_limit"),
+            (false, true) => (&mut self.jobs, "job_limit"),
+            (false, false) => (&mut self.refinement_headroom, "refinement_headroom"),
+        };
+        *count += 1;
+        trace!(threshold, points = work.points, jobs = work.jobs, point_limit, job_limit, reason,
+            "Point forest budget probe rejected");
+    }
 }
 /// Immutable spatial blocks and hierarchy nodes built against one geometry pack.
 #[derive(Default)]
@@ -448,6 +479,7 @@ impl PlanetScene{
         let mut threshold=current;
         let mut tried=false;
         let mut accepted=None;
+        let mut probe_rejections = ProbeRejections::default();
         // Identical refinement cadence and hysteresis acceptance to demo.
         if self.spare>=12&&current>base{
             tried=true;
@@ -455,11 +487,15 @@ impl PlanetScene{
             let work=probe(candidate);
             if work.fits(budget,max_jobs)&&work.points<=budget.saturating_mul(85)/100{
                 threshold=candidate;accepted=Some(work);
+            } else {
+                probe_rejections.record(candidate, work, budget, max_jobs);
             }
         }
         let work=accepted.unwrap_or_else(||loop{
             let work=probe(threshold);
-            if work.fits(budget,max_jobs)||threshold>=512.0{break work;}
+            if work.fits(budget,max_jobs){break work;}
+            probe_rejections.record(threshold, work, budget, max_jobs);
+            if threshold>=512.0{break work;}
             threshold=(threshold*if dense{1.15}else{1.25}).min(512.0);
         });
         let fits=work.fits(budget,max_jobs);
@@ -469,14 +505,16 @@ impl PlanetScene{
         self.threshold=threshold;
         if !fits{
             // Never send an over-budget dispatch or silently drop trees.
-            return PlanetSelection{threshold,budget_met:false,visited:work.visited,..Default::default()};
+            return PlanetSelection{threshold,budget_met:false,visited:work.visited,
+                job_limit:max_jobs,probe_rejections,..Default::default()};
         }
         let items = self.scratch.commit(&mut self.history);
         // Same demo ordering: fine levels first, model next, world last.
         items.sort_by_key(|i|(i.level,i.model));
         let _span = trace_span!("PlanetScene::generate_instances_and_jobs").entered();
         let mut out=PlanetSelection{instances:Vec::with_capacity(items.len()),jobs:Vec::with_capacity(work.jobs as usize),
-            points:work.points as u32,raw_points:work.raw as u32,covered:work.covered,clusters:work.clusters,visited:work.visited,threshold,budget_met:true,lod_counts:[0;22]};
+            points:work.points as u32,raw_points:work.raw as u32,covered:work.covered,clusters:work.clusters,visited:work.visited,threshold,budget_met:true,lod_counts:[0;22],
+            job_limit:max_jobs,probe_rejections};
         for item in items.drain(..){
             let a=item.origin.map(f32::to_bits);let b=item.rotation.map(f32::to_bits);let c=item.range;
             let index=out.instances.len() as u32;
@@ -553,6 +591,42 @@ mod tests{
         assert_eq!(serial.threshold.to_bits(), parallel.threshold.to_bits());
         assert_eq!(serial.budget_met, parallel.budget_met);
         assert_eq!(serial.lod_counts, parallel.lod_counts);
+        assert_eq!(serial.job_limit, parallel.job_limit);
+        assert_eq!(serial.probe_rejections, parallel.probe_rejections);
+    }
+
+    #[test]
+    fn probe_diagnostics_report_hard_limits_and_refinement_headroom() {
+        let pack = pack();
+        let mut scene = PlanetScene::default();
+        scene.update_sites(&pack, vec![placement(0.0, 20.0)]);
+        for (points, jobs) in [(0, 2), (140, 0), (0, 0)] {
+            let out = scene.select(&pack, camera(), 2.2, points, jobs);
+            assert!(!out.budget_met);
+            assert_eq!(out.threshold, 512.0);
+            assert_eq!(out.job_limit, jobs);
+            assert!(out.jobs.is_empty());
+            let rejections = out.probe_rejections;
+            assert_eq!(rejections.points > 0, points == 0 && jobs != 0);
+            assert_eq!(rejections.jobs > 0, jobs == 0 && points != 0);
+            assert_eq!(rejections.both > 0, points == 0 && jobs == 0);
+            assert_eq!(rejections.refinement_headroom, 0);
+        }
+
+        let first = scene.select(&pack, camera(), 2.2, 140, 2);
+        assert_eq!(first.points, 128);
+        assert_eq!(first.probe_rejections, ProbeRejections::default());
+        scene.threshold = 3.0;
+        scene.spare = 12;
+        let out = scene.select(&pack, camera(), 2.2, 140, 2);
+        assert!(out.budget_met);
+        assert_eq!(out.threshold, 3.0);
+        assert_eq!(out.points, 128);
+        assert_eq!(out.jobs.len(), 2);
+        assert_eq!(out.probe_rejections, ProbeRejections {
+            refinement_headroom: 1,
+            ..Default::default()
+        });
     }
 
     #[test]

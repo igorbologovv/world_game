@@ -7,6 +7,7 @@ mod snapshots;
 mod temporal;
 
 use std::{collections::BTreeMap, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}};
+use std::fmt::Write;
 use bevy::{
     camera::Exposure,
     math::DVec3,
@@ -63,10 +64,10 @@ pub(super) struct PointForest{
     snapshots: Snapshots,
     selection_workers: SelectionWorkers,
     models_revision: u64,
-    budget_exceeded: bool,
     ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
     storage_limit:Arc<AtomicU64>,layer_limit:Arc<AtomicU32>,
     budget:u32,
+    base_lod_pixels: f32,
     selection_view: Option<SelectionView>,
     selection: Option<Arc<PlanetSelection>>,
     stable_frames: u8,
@@ -75,13 +76,50 @@ pub(super) struct PointForest{
     shadow_changed_at:f64,shadow_task:Option<Task<(ShadowSource, Option<PlanetShadow>)>>,shadow_dirty:bool,shadow_next:f64,eye:[f64;3],
 }
 impl Default for PointForest{
-    fn default()->Self{Self{snapshots:Snapshots::default(),selection_workers:SelectionWorkers::from_env(),models_revision:0,budget_exceeded:false,
-        ready:Arc::new(AtomicBool::new(false)),status:Arc::new(AtomicU32::new(0)),submitted:Arc::new(AtomicU32::new(0)),
-        storage_limit:Arc::new(AtomicU64::new(0)),layer_limit:Arc::new(AtomicU32::new(0)),
-        selection_view:None, selection:None, stable_frames:0, active:false,
-        budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000),
-        shadows:std::env::var("IGOR_POINT_SHADOWS").as_deref()!=Ok("0"),
-        shadow:None,previous_shadow:None,shadow_changed_at:0.0,shadow_task:None,shadow_dirty:true,shadow_next:0.0,eye:[0.0;3]}}
+    fn default() -> Self {
+        let base_lod_pixels = match std::env::var("IGOR_LOD_PIXELS") {
+            Ok(value) => match value.parse::<f32>() {
+                Ok(parsed) if parsed.is_finite() => parsed.clamp(0.25, 512.0),
+                _ => {
+                    warn!("Invalid IGOR_LOD_PIXELS={value:?}, using {BASE_LOD_PIXELS}");
+                    BASE_LOD_PIXELS
+                }
+            },
+            Err(std::env::VarError::NotPresent) => BASE_LOD_PIXELS,
+            Err(error) => {
+                warn!("Invalid IGOR_LOD_PIXELS ({error}), using {BASE_LOD_PIXELS}");
+                BASE_LOD_PIXELS
+            }
+        };
+        Self {
+            snapshots: Snapshots::default(),
+            selection_workers: SelectionWorkers::from_env(),
+            models_revision: 0,
+            ready: Arc::new(AtomicBool::new(false)),
+            status: Arc::new(AtomicU32::new(0)),
+            submitted: Arc::new(AtomicU32::new(0)),
+            storage_limit: Arc::new(AtomicU64::new(0)),
+            layer_limit: Arc::new(AtomicU32::new(0)),
+            selection_view: None,
+            selection: None,
+            stable_frames: 0,
+            active: false,
+            budget: std::env::var("IGOR_POINT_BUDGET")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(BUDGET)
+                .clamp(1, 8_000_000),
+            base_lod_pixels,
+            shadows: std::env::var("IGOR_POINT_SHADOWS").as_deref() != Ok("0"),
+            shadow: None,
+            previous_shadow: None,
+            shadow_changed_at: 0.0,
+            shadow_task: None,
+            shadow_dirty: true,
+            shadow_next: 0.0,
+            eye: [0.0; 3],
+        }
+    }
 }
 // Keep the caller lane off the compute pool so its scoped join never ties up a worker.
 fn select_points(_main_thread: NonSendMarker,mut points:ResMut<PointForest>,mut forest:ResMut<ForestStream>,models:Res<ForestModels>,
@@ -163,9 +201,10 @@ fn select_points(_main_thread: NonSendMarker,mut points:ResMut<PointForest>,mut 
         return;
     }
     let points = &mut *points;
-    let out = points.snapshots.select(cam, BASE_LOD_PIXELS, budget, max_jobs, &points.selection_workers);
+    let base = points.base_lod_pixels;
+    let out = points.snapshots.select(cam, base, budget, max_jobs, &points.selection_workers);
     let same_threshold = points.selection.as_ref().is_some_and(|old| old.threshold == out.threshold);
-    points.stable_frames = if out.threshold == BASE_LOD_PIXELS {
+    points.stable_frames = if out.threshold == base {
         LOD_SETTLE_FRAMES
     } else if same_view && same_threshold {
         points.stable_frames + 1
@@ -173,7 +212,6 @@ fn select_points(_main_thread: NonSendMarker,mut points:ResMut<PointForest>,mut 
         0
     };
     points.selection_view = Some(key);
-    points.budget_exceeded = !out.budget_met;
     points.selection = Some(Arc::new(out));
 }
 pub(super) fn install(app:&mut App) {
@@ -227,23 +265,66 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
     let selection = forest.selection.as_deref().filter(|_| forest.active);
     let snapshot = forest.snapshots.active();
     let build_status = if forest.snapshots.baking_geometry() {
-        "baking original geometry"
+        Some("baking original geometry")
     } else if let Some(error) = &forest.snapshots.geometry_error {
-        error
-    } else if forest.budget_exceeded {
-        "point budget exceeded"
+        Some(error.as_str())
     } else if forest.snapshots.rebuilding() {
-        "building hierarchy"
+        Some("building hierarchy")
     } else {
-        ""
+        None
     };
-    let msg=format!("IGOR HIERARCHY | {status} | {} instances ({} clusters) / {} / {} points ({} UV) | {} covered / {} sites | {} templates | LOD {:.2}px | {} GPU trees | shadows:{} | {}",
-        selection.map_or(0,|s|s.instances.len()),selection.map_or(0,|s|s.clusters),selection.map_or(0,|s|s.points),forest.budget,selection.map_or(0,|s|s.raw_points),
-        selection.map_or(0,|s|s.covered),snapshot.map_or(0, |s| s.candidates),snapshot.map_or(0, |s| s.geometry.pack().templates.len()),
-        selection.map_or(BASE_LOD_PIXELS,|s|s.threshold),forest.submitted.load(Ordering::Acquire),
-        if !forest.shadows{"off"}else if forest.shadow.is_some(){"on"}else{"baking"},
-        build_status);
-    if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
+    let mut msg = format!("IGOR HIERARCHY | {status}");
+    if let Some(build_status) = build_status {
+        msg.push_str(" | ");
+        msg.push_str(build_status);
+    }
+    let _ = write!(msg, "\nLOD base {:.2} px", forest.base_lod_pixels);
+    if let Some(selection) = selection {
+        if selection.budget_met {
+            let _ = write!(msg, " | accepted {:.2} px", selection.threshold);
+        } else {
+            let _ = write!(msg, " | budget exceeded at {:.2} px", selection.threshold);
+        }
+        let jobs = selection.jobs.len();
+        let lanes = if jobs == 0 {
+            "—".to_owned()
+        } else {
+            let utilization = 100.0 * f64::from(selection.points)
+                / (jobs as f64 * f64::from(igor_renderer::render_api::LANES));
+            format!("{utilization:.1}%")
+        };
+        let _ = write!(
+            msg,
+            "\nPoints {} / {} | raw {} | jobs {} / {} | lanes {}",
+            selection.points, forest.budget, selection.raw_points, jobs, selection.job_limit, lanes,
+        );
+        let rejects = &selection.probe_rejections;
+        let _ = write!(
+            msg,
+            "\nProbe rejects | points {} | jobs {} | both {} | refinement headroom {}",
+            rejects.points, rejects.jobs, rejects.both, rejects.refinement_headroom,
+        );
+    }
+    let shadows = if !forest.shadows {
+        "off"
+    } else if forest.shadow.is_some() {
+        "on"
+    } else {
+        "baking"
+    };
+    let _ = write!(
+        msg,
+        "\n{} instances ({} clusters) | {} / {} sites covered | {} templates | {} GPU instances | shadows {shadows}",
+        selection.map_or(0, |s| s.instances.len()),
+        selection.map_or(0, |s| s.clusters),
+        selection.map_or(0, |s| s.covered),
+        snapshot.map_or(0, |s| s.candidates),
+        snapshot.map_or(0, |s| s.geometry.pack().templates.len()),
+        forest.submitted.load(Ordering::Acquire),
+    );
+    if let Ok(mut text) = overlay.single_mut() {
+        text.0 = msg;
+    }
 }
 fn sampleable_camera_depth(mut cameras:Query<&mut Camera3d,With<WorldCamera>>) {
     for mut camera in &mut cameras {
