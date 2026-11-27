@@ -8,15 +8,75 @@ pub mod planetary_selection;
 const BRICKS:usize=64;
 const BRICK_WIDTH:f32=4.0;
 const BRICK_MAX:f32=2.0;
-const LEVELS:usize=22;
 const RAW:u32=0x8000_0000;
 // Units are template-local meters. Densify the mid-field only; keep
 // the original near levels and distant 4/8/16 m hierarchy.
-const LOCAL_WIDTHS:[f32;LEVELS]=[0.0,0.0625,0.09375,0.125,0.1875,0.25,0.375,0.5,0.625,0.75,0.875,1.0,1.25,1.5,1.75,2.0,2.5,3.0,3.5,4.0,8.0,16.0];
-const ORIGINAL_LEVELS:[usize;8]=[0,5,7,11,15,19,20,21];
-const DENSE_LEVELS:[usize;15]=[0,1,2,3,4,5,6,7,9,11,13,15,19,20,21];
-const EXTRA_LEVELS:[usize;7]=[1,2,3,4,6,9,13];
-const MID_LEVELS:[usize;7]=[8,10,12,14,16,17,18];
+pub(crate) const LOCAL_WIDTHS: &[f32] = &[0.0,0.0625,0.09375,0.125,0.1875,0.25,0.375,0.5,0.625,0.75,0.875,1.0,1.25,1.5,1.75,2.0,2.5,3.0,3.5,4.0,8.0,16.0];
+const ORIGINAL_WIDTHS: &[f32] = &[0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+const EXTRA_WIDTHS: &[f32] = &[0.0625, 0.09375, 0.125, 0.1875, 0.375, 0.75, 1.5];
+const MID_WIDTHS: &[f32] = &[0.625, 0.875, 1.25, 1.75, 2.5, 3.0, 3.5];
+pub(crate) const SHADOW_WIDTH: f32 = 1.0;
+const BASELINE_LEVELS: [usize; LOCAL_WIDTHS.len()] = {
+    let mut levels = [0; LOCAL_WIDTHS.len()];
+    let mut index = 0;
+    while index < levels.len() {
+        levels[index] = index;
+        index += 1;
+    }
+    levels
+};
+
+pub(crate) fn width_index(widths: &[f32], width: f32) -> Option<usize> {
+    widths.binary_search_by(|candidate| candidate.total_cmp(&width)).ok()
+}
+
+pub(crate) fn dense_policy(levels: &[usize]) -> bool {
+    levels.len() > ORIGINAL_WIDTHS.len()
+}
+
+struct LodLayout {
+    widths: Vec<f32>,
+    levels: Vec<usize>,
+    baseline: Vec<usize>,
+    original: Vec<usize>,
+    sparse: Vec<usize>,
+    added: Vec<usize>,
+}
+
+impl LodLayout {
+    fn new(count: usize, dense: bool, mid: bool) -> Self {
+        let mut widths = LOCAL_WIDTHS.to_vec();
+        while widths.len() < count {
+            // Bisect the largest logarithmic gap in the near and middle tiers.
+            // Inserting more levels keeps every previous width exactly.
+            let (index, gap) = widths.windows(2).enumerate()
+                .filter(|(_, gap)| gap[0] > 0.0 && gap[1] <= 4.0)
+                .max_by(|(_, a), (_, b)| (a[1] / a[0]).total_cmp(&(b[1] / b[0])))
+                .unwrap();
+            let midpoint = (gap[0] * gap[1]).sqrt();
+            widths.insert(index + 1, midpoint);
+        }
+        let indices = |group: &[f32]| group.iter().map(|&w| width_index(&widths, w).unwrap()).collect::<Vec<_>>();
+        let original = indices(ORIGINAL_WIDTHS);
+        let mut sparse = Vec::new();
+        if dense { sparse.extend(indices(EXTRA_WIDTHS)); }
+        if mid { sparse.extend(indices(MID_WIDTHS)); }
+        let added: Vec<_> = widths.iter().enumerate().filter_map(|(index, width)| {
+            width_index(LOCAL_WIDTHS, *width).is_none().then_some(index)
+        }).collect();
+        let mut baseline = [original.as_slice(), sparse.as_slice()].concat();
+        baseline.sort_unstable();
+        let mut levels = [baseline.as_slice(), added.as_slice()].concat();
+        levels.sort_unstable();
+        Self { widths, levels, baseline, original, sparse, added }
+    }
+
+    fn from_legacy_env() -> Self {
+        let dense = std::env::var("IGOR_DENSE_LOD").as_deref() != Ok("0");
+        let mid = dense && std::env::var("IGOR_MID_LOD").as_deref() != Ok("0");
+        Self::new(LOCAL_WIDTHS.len(), dense, mid)
+    }
+}
 
 #[repr(C)]
 #[derive(Clone,Copy,Debug,Pod,Zeroable)]
@@ -55,14 +115,10 @@ impl Aggregate {
         Some(Sample{pos:p,color:self.weighted_color/self.area,normal:self.weighted_normal.normalize_or(Vec3::Y),radius,coverage:(self.area/(radius*radius)).clamp(0.02,1.0)})
     }
 }
-#[derive(Clone,Copy,Debug,Default)]
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
 pub struct Range {pub offset:u32,pub count:u32}
-#[derive(Clone,Copy)]
-struct Brick {ranges:[Range;LEVELS],center:Vec3,radius:f32}
-impl Default for Brick{
-    fn default()->Self{Self{ranges:[Range::default();LEVELS],center:Vec3::ZERO,radius:0.0}}
-}
-struct Template {ranges:[Range;LEVELS],radii:[f32;LEVELS],lo:Vec3,hi:Vec3,summary:Sample,bricks:Vec<Brick>}
+struct Brick {ranges:Box<[Range]>,center:Vec3,radius:f32}
+struct Template {ranges:Box<[Range]>,radii:Box<[f32]>,lo:Vec3,hi:Vec3,summary:Sample,bricks:Vec<Brick>}
 // Partition in place: whole-template ranges remain valid. Aliased LOD
 // ranges reuse the same partition and never get sorted twice.
 fn point_position(p:&Point)->Vec3{
@@ -70,14 +126,15 @@ fn point_position(p:&Point)->Vec3{
 }
 fn point_radius(p:&Point)->f32{(p.zr>>16) as f32/4096.0}
 fn brick_index(p:&Point)->usize{cell_index(point_position(p),BRICK_WIDTH,4)}
-fn partition_bricks(raw:&mut [Point],lod:&mut [Point],ranges:&[Range;LEVELS],levels:&[usize])->Vec<Brick>{
-    let mut bricks=vec![Brick::default();BRICKS];
-    for (i,b) in bricks.iter_mut().enumerate(){
-        b.center=Vec3::new((i%4) as f32,(i/4%4) as f32,(i/16) as f32)*BRICK_WIDTH+Vec3::splat(BRICK_WIDTH*0.5);
-    }
+fn partition_bricks(raw:&mut [Point],lod:&mut [Point],ranges:&[Range],layout:&LodLayout)->Vec<Brick>{
+    let mut bricks: Vec<_> = (0..BRICKS).map(|i| Brick {
+        center:Vec3::new((i%4) as f32,(i/4%4) as f32,(i/16) as f32)*BRICK_WIDTH+Vec3::splat(BRICK_WIDTH*0.5),
+        radius:0.0,
+        ranges:vec![Range::default(); ranges.len()].into_boxed_slice(),
+    }).collect();
     let mut partitions=HashMap::<(u32,u32),[Range;BRICKS]>::new();
-    for &level in levels{
-        if LOCAL_WIDTHS[level]>BRICK_MAX{break;}
+    for &level in &layout.levels{
+        if layout.widths[level]>BRICK_MAX{break;}
         let range=ranges[level];
         let key=(range.offset,range.count);
         let parts=if let Some(parts)=partitions.get(&key){*parts}else{
@@ -159,7 +216,7 @@ impl TemplateLibrary{
     pub fn bounds(&self,model:usize)->(Vec3,Vec3){let t=&self.templates[model];(t.lo,t.hi)}
     pub fn radius(&self,model:usize,level:usize)->f32{self.templates[model].radii[level]}
     pub fn choose_level(&self,px_per_m:f32,threshold:f32,previous:Option<usize>)->usize{
-        choose_local(px_per_m,threshold,previous.map_or(UNKNOWN,|p|p as u8),&self.levels)
+        choose_local(px_per_m,threshold,previous.map_or(UNKNOWN,|p|p as u8),&self.levels,LOCAL_WIDTHS)
     }
 }
 pub struct PointScene {
@@ -211,33 +268,52 @@ fn collapse_world(px:f32,threshold:f32,previous:u8)->bool{
     let factor=match previous{0=>0.85,1=>1.15,_=>1.0};
     px<=threshold*2.0*factor
 }
-fn choose_local(px_per_m:f32,threshold:f32,previous:u8,levels:&[usize])->usize{
+fn choose_local(px_per_m:f32,threshold:f32,previous:u8,levels:&[usize],widths:&[f32])->usize{
     let Some(mut slot)=levels.iter().position(|&k|k==previous as usize) else {
-        return levels.iter().copied().rev().find(|&k|LOCAL_WIDTHS[k]*px_per_m<=threshold).unwrap_or(0);
+        return levels.iter().copied().rev().find(|&k|widths[k]*px_per_m<=threshold).unwrap_or(0);
     };
     // A narrower dead band for the closer-spaced levels; even identical
     // models at different sites need not switch together (see visit).
-    let h=if levels.len()>ORIGINAL_LEVELS.len(){0.10}else{0.15};
-    while slot>0 && LOCAL_WIDTHS[levels[slot]]*px_per_m>threshold*(1.0+h){slot-=1;}
-    while slot+1<levels.len() && LOCAL_WIDTHS[levels[slot+1]]*px_per_m<=threshold*(1.0-h){slot+=1;}
+    let h=if dense_policy(levels){0.10}else{0.15};
+    while slot>0 && widths[levels[slot]]*px_per_m>threshold*(1.0+h){slot-=1;}
+    while slot+1<levels.len() && widths[levels[slot+1]]*px_per_m<=threshold*(1.0-h){slot+=1;}
     levels[slot]
 }
 // Extra levels are built directly from the same alpha-tested, weighted
 // source samples. Store only occupied cells, not 256^3 empty entries.
 // Sort keys before emission: HashMap iteration order must not affect IDs.
-fn append_sparse_level(samples:&[Sample],width:f32,lod:&mut Vec<Point>)->Range{
+fn sparse_cells(samples:&[Sample],width:f32)->HashMap<usize,Aggregate>{
     let side=(16.0/width).ceil() as u32;
     let mut cells=HashMap::<usize,Aggregate>::with_capacity(samples.len().min(65536));
     for &s in samples{
         cells.entry(cell_index(s.pos,width,side)).or_default().add(s);
     }
+    cells
+}
+
+fn reserve_lod(lod: &mut Vec<Point>, additional: usize, limit: usize) -> Result<(), String> {
+    let required = lod.len() + additional;
+    if required > limit {
+        return Err(format!("LOD buffer needs at least {} bytes, limit is {} bytes",
+            required * std::mem::size_of::<Point>(), limit * std::mem::size_of::<Point>()));
+    }
+    let reservation = if lod.capacity().saturating_mul(2) > limit {
+        lod.try_reserve_exact(additional)
+    } else {
+        lod.try_reserve(additional)
+    };
+    reservation.map_err(|error| format!("could not allocate LOD points: {error}"))
+}
+
+fn append_sparse_level(cells:HashMap<usize,Aggregate>,lod:&mut Vec<Point>,limit:usize)->Result<Range,String>{
+    reserve_lod(lod, cells.len(), limit)?;
     let mut cells:Vec<_>=cells.into_iter().collect();
     cells.sort_unstable_by_key(|(key,_)|*key);
     let start=lod.len() as u32;
     for (_,a) in cells{
         if let Some(s)=a.sample(){lod.push(Point::encode(s.pos,s.radius,s.color,s.normal,s.coverage));}
     }
-    Range{offset:start,count:lod.len() as u32-start}
+    Ok(Range{offset:start,count:lod.len() as u32-start})
 }
 // Key order = finest LOD first, then model and brick. The world
 // aggregate is last. Sparse groups avoid allocating all 65*22 groups
@@ -257,7 +333,7 @@ impl Work {
 }
 // CPU-selected range is a strict upper bound. Offer the GPU two cheaper
 // alternatives, but do not cross a brick boundary or select an empty range.
-fn gpu_choice(ranges:&[Range;LEVELS],levels:&[usize],selected:usize,limit:f32,threshold:f32)->GpuChoice{
+fn gpu_choice(ranges:&[Range],levels:&[usize],selected:usize,limit:f32,threshold:f32)->GpuChoice{
     let mut c=GpuChoice::default();
     c.metric[2]=threshold;
     let base=ranges[selected];let mut k=0;
@@ -294,16 +370,14 @@ fn cell_index(p:Vec3,width:f32,side:u32)->usize {
     (c.x+side*(c.y+side*c.z)) as usize
 }
 impl PointScene {
-    fn template_data(geo:&crate::TreeGeometry)->(Vec<Point>,Vec<Point>,Vec<Template>,Vec<usize>,bool){
+    fn template_data(geo:&crate::TreeGeometry,layout:&LodLayout,brick_lod:bool,limit:usize)
+        ->Result<(Vec<Point>,Vec<Point>,Vec<Template>),String>{
         let mut raw=Vec::with_capacity(geo.surfels.len());
         let mut lod=Vec::new();
         let mut templates=Vec::with_capacity(geo.batches.len());
-        let brick_lod=std::env::var("IGOR_BRICK_LOD").as_deref()==Ok("1");
-        let dense_lod=std::env::var("IGOR_DENSE_LOD").as_deref()!=Ok("0");
-        let mid_lod=dense_lod&&std::env::var("IGOR_MID_LOD").as_deref()!=Ok("0");
-        let local_levels:Vec<usize>=if mid_lod{(0..LEVELS).collect()}else if dense_lod{DENSE_LEVELS.to_vec()}else{ORIGINAL_LEVELS.to_vec()};
+        let dense_lod = !layout.sparse.is_empty();
         for batch in &geo.batches {
-            let mut ranges=[Range::default();LEVELS];
+            let mut ranges=vec![Range::default();layout.widths.len()].into_boxed_slice();
             let start=raw.len() as u32;
             // Dense direct-address grid of 0.25 m, per template (64^3).
             // Coarser levels are reductions of it, not resampled ray images.
@@ -345,8 +419,9 @@ impl PointScene {
                 }
             }
             ranges[0]=Range{offset:RAW|start,count:raw.len() as u32-start};
-            for &level in &ORIGINAL_LEVELS[1..] {
+            for &level in &layout.original[1..] {
                 let start=lod.len() as u32;
+                reserve_lod(&mut lod, grid.iter().filter(|cell| cell.area != 0.0).count(), limit)?;
                 for a in &grid {if let Some(s)=a.sample(){lod.push(Point::encode(s.pos,s.radius,s.color,s.normal,s.coverage));}}
                 ranges[level]=Range{offset:start,count:lod.len() as u32-start};
                 if side>1 {
@@ -368,23 +443,31 @@ impl PointScene {
                 }
             }
             if dense_lod{
-                for level in EXTRA_LEVELS{
-                    ranges[level]=append_sparse_level(&samples,LOCAL_WIDTHS[level],&mut lod);
-                }
-                if mid_lod{
-                    for level in MID_LEVELS{
-                        ranges[level]=append_sparse_level(&samples,LOCAL_WIDTHS[level],&mut lod);
-                    }
+                for &level in &layout.sparse {
+                    ranges[level]=append_sparse_level(sparse_cells(&samples,layout.widths[level]),&mut lod,limit)?;
                 }
                 // Independent grids need not be nested. Repair inversions
                 // only between active levels, preserving the 15-level
                 // baseline when mid LOD is disabled. Never alias raw.
-                for pair in local_levels[1..].windows(2).rev(){
+                for pair in layout.baseline[1..].windows(2).rev(){
                     let fine=pair[0];let coarse=pair[1];
                     if ranges[fine].count<ranges[coarse].count{
                         ranges[fine]=ranges[coarse];
                     }
                 }
+            }
+            // Keep the baseline ranges, including the 1 m shadow tier. Independent
+            // voxel grids occasionally invert point counts, so clamp only the
+            // added ranges to the surrounding baseline and already-baked tiers.
+            for &level in layout.added.iter().rev() {
+                let finer = ranges[layout.baseline[layout.baseline.partition_point(|&index| index < level) - 1]];
+                let coarser = ranges[level + 1];
+                let cells = sparse_cells(&samples, layout.widths[level]);
+                ranges[level] = match cells.len() as u32 {
+                    count if count > finer.count => finer,
+                    count if count < coarser.count => coarser,
+                    _ => append_sparse_level(cells, &mut lod, limit)?,
+                };
             }
             let lo=Vec3::from(batch.lo);let hi=Vec3::from(batch.hi);
             let summary=summary.sample().unwrap_or(Sample{pos:(lo+hi)*0.5,color:Vec3::new(0.15,0.3,0.1),normal:Vec3::Y,radius:0.01,coverage:0.0});
@@ -392,38 +475,45 @@ impl PointScene {
             // Bound actual emitted disks, not the original mesh alone.
             // Raw disk centers can be snapped onto the source plane after
             // decoding; add a conservative margin for quantization/roundoff.
-            let radii=std::array::from_fn(|level|{
-                let range=ranges[level];
+            let radii=ranges.iter().map(|&range|{
                 let start=(range.offset&!RAW) as usize;
-                let data=if level==0{&raw}else{&lod};
+                let data=if range.offset&RAW!=0{&raw}else{&lod};
                 data[start..start+range.count as usize].iter().map(|p|{
                     let pos=Vec3::new((p.xy&65535) as f32,(p.xy>>16) as f32,(p.zr&65535) as f32)/4096.0;
                     let r=(p.zr>>16) as f32/4096.0;
                     (pos-center).length()+r+0.01
                 }).fold(0.01f32,f32::max)
-            });
-            let bricks=if brick_lod{partition_bricks(&mut raw,&mut lod,&ranges,&local_levels)}else{Vec::new()};
+            }).collect();
+            let bricks=if brick_lod{partition_bricks(&mut raw,&mut lod,&ranges,layout)}else{Vec::new()};
             templates.push(Template{ranges,radii,lo,hi,summary,bricks});
         }
-        (raw,lod,templates,local_levels,brick_lod)
+        Ok((raw,lod,templates))
     }
     /// Build the same shared templates used by PointScene::build, without
     /// allocating the demo's procedural grid of tree instances.
     pub fn build_templates(geo:&crate::TreeGeometry)->TemplateLibrary{
-        let (raw,lod,templates,levels,_)=Self::template_data(geo);
-        TemplateLibrary{raw,lod,templates,levels}
+        let layout = LodLayout::from_legacy_env();
+        let brick_lod = std::env::var("IGOR_BRICK_LOD").as_deref()==Ok("1");
+        let (raw,lod,templates)=Self::template_data(geo,&layout,brick_lod,RAW as usize - 1).expect("build tree templates");
+        TemplateLibrary{raw,lod,templates,levels:layout.levels}
     }
-    pub(crate) fn planet_templates(geo:&crate::TreeGeometry)->(Vec<Point>,Vec<Point>,Vec<crate::planetary::TemplateInfo>,Vec<usize>){
-        let (raw,lod,templates,levels,_)=Self::template_data(geo);
+    pub(crate) fn planet_templates(geo:&crate::TreeGeometry,count:usize,limit:usize)
+        ->Result<(Vec<Point>,Vec<Point>,Vec<crate::planetary::TemplateInfo>,Vec<f32>,Vec<usize>),String>{
+        let layout = if count == LOCAL_WIDTHS.len() { LodLayout::from_legacy_env() } else { LodLayout::new(count,true,true) };
+        let brick_lod = std::env::var("IGOR_BRICK_LOD").as_deref()==Ok("1");
+        let (raw,lod,templates)=Self::template_data(geo,&layout,brick_lod,limit)?;
         let templates=templates.into_iter().map(|t|crate::planetary::TemplateInfo{
             ranges:t.ranges,radii:t.radii,center:((t.lo+t.hi)*0.5).to_array(),bound:(t.hi-t.lo).length()*0.5,
             summary:crate::planetary::Summary{position:t.summary.pos.to_array(),color:t.summary.color.to_array(),normal:t.summary.normal.to_array(),radius:t.summary.radius,coverage:t.summary.coverage}
         }).collect();
-        (raw,lod,templates,levels)
+        Ok((raw,lod,templates,layout.widths,layout.levels))
     }
     pub fn build(scene:&Scene)->Self{
         let geo=&scene.geometry;
-        let (raw,mut lod,templates,local_levels,brick_lod)=Self::template_data(geo);
+        let layout = LodLayout::from_legacy_env();
+        let brick_lod = std::env::var("IGOR_BRICK_LOD").as_deref()==Ok("1");
+        let (raw,mut lod,templates)=Self::template_data(geo,&layout,brick_lod,RAW as usize - 1).expect("build tree templates");
+        let local_levels = layout.levels;
         let side=scene.levels[0].dims.x;
         let mut sites=vec![None;(side*side) as usize];
         let mut world=Vec::new();
@@ -485,7 +575,7 @@ impl PointScene {
         let mut pixels=vec![0u8;w as usize*h as usize*4];
         // Reuse the precomputed 1 m template LOD, independent of camera
         // visibility and current LOD. Off-screen trees cast shadows too.
-        let level=LOCAL_WIDTHS.iter().position(|&x|x==1.0).unwrap();
+        let level=width_index(LOCAL_WIDTHS, SHADOW_WIDTH).unwrap();
         for site in self.sites.iter().flatten(){
             for j in 0..2{
                 let inst=site.trees[j];
@@ -524,7 +614,7 @@ impl PointScene {
             let mut instance=Instance::new(meta.sample.pos,meta.sample.radius,meta.offset,0);
             instance.pad[0]=1; // legacy presentation only
             instance.bound=meta.sample.pos.extend(meta.sample.radius*1.001+0.01).to_array();
-            work.push((LEVELS,0,0),instance,1,GpuChoice::default());
+            work.push((LOCAL_WIDTHS.len(),0,0),instance,1,GpuChoice::default());
             work.world_splats+=1;
             return;
         }
@@ -552,11 +642,11 @@ impl PointScene {
             let identity=i*2+j;
             // Small, fixed spatial variation staggers transitions across
             // trees. It never changes with the frame or camera position.
-            let stagger=if self.local_levels.len()>ORIGINAL_LEVELS.len(){
+            let stagger=if dense_policy(&self.local_levels){
                 0.94+0.12*random((identity as u32)^0x3f912ac7)
             }else{1.0};
             let local_threshold=(threshold*weight*stagger).max(0.25);
-            let selected=choose_local(px_per_m,local_threshold,previous.map_or(UNKNOWN,|s|s.trees[identity]),&self.local_levels);
+            let selected=choose_local(px_per_m,local_threshold,previous.map_or(UNKNOWN,|s|s.trees[identity]),&self.local_levels,LOCAL_WIDTHS);
             next.trees[identity]=selected as u8;
             // Refine near and middle trees independently in template-local
             // 4 m bricks. Far trees keep the cheap whole-template path.
@@ -570,7 +660,7 @@ impl PointScene {
                     let distance=((center-view.origin).length()-radius).max(0.0);
                     let local=(threshold*(0.18+0.82*(distance/160.0).clamp(0.0,1.0))*stagger).max(0.25);
                     let id=identity*BRICKS+b;
-                    let chosen=choose_local(px,local,previous.map_or(UNKNOWN,|s|s.bricks[id]),&self.local_levels);
+                    let chosen=choose_local(px,local,previous.map_or(UNKNOWN,|s|s.bricks[id]),&self.local_levels,LOCAL_WIDTHS);
                     let Some(level)=self.local_levels.iter().copied().rev().find(|&k|k<=chosen&&LOCAL_WIDTHS[k]<=BRICK_MAX&&brick.ranges[k].count>0) else{continue;};
                     next.bricks[id]=level as u8;
                     let range=brick.ranges[level];
@@ -608,7 +698,7 @@ impl PointScene {
         let mut tried=false;
         if state.spare_frames>=12 && current>base {
             tried=true;
-            let candidate=(current/if self.local_levels.len()>ORIGINAL_LEVELS.len(){1.08}else{1.125}).max(base);
+            let candidate=(current/if dense_policy(&self.local_levels){1.08}else{1.125}).max(base);
             let (work,next)=self.build_selection(view,candidate,budget,Some(state));
             if work.budget_met && work.points<=budget.saturating_mul(85)/100{
                 let mut next=next;
@@ -616,7 +706,7 @@ impl PointScene {
                 *state=next;return work;
             }
         }
-        let (work,mut next)=self.fit(view,current,budget,Some(state),if self.local_levels.len()>ORIGINAL_LEVELS.len(){1.15}else{1.25});
+        let (work,mut next)=self.fit(view,current,budget,Some(state),if dense_policy(&self.local_levels){1.15}else{1.25});
         next.threshold=work.threshold;
         next.spare_frames=if !tried && work.budget_met && work.threshold==current && work.points<=budget.saturating_mul(75)/100{
             state.spare_frames.saturating_add(1)
@@ -664,43 +754,59 @@ mod tests {
         assert!(v.screen_size(Vec3::new(0.0,0.0,10.0),1.0,2.0).is_some());
     }
     #[test] fn local_hysteresis_keeps_previous_level_inside_band(){
-        assert_eq!(choose_local(4.0,1.0,UNKNOWN,&ORIGINAL_LEVELS),5);
-        assert_eq!(choose_local(4.2,1.0,5,&ORIGINAL_LEVELS),5);
-        assert_eq!(choose_local(4.2,1.0,0,&ORIGINAL_LEVELS),0);
-        assert_eq!(choose_local(4.8,1.0,5,&ORIGINAL_LEVELS),0);
-        assert_eq!(choose_local(3.2,1.0,0,&ORIGINAL_LEVELS),5);
+        let layout = LodLayout::new(LOCAL_WIDTHS.len(), false, false);
+        assert_eq!(choose_local(4.0,1.0,UNKNOWN,&layout.levels,LOCAL_WIDTHS),5);
+        assert_eq!(choose_local(4.2,1.0,5,&layout.levels,LOCAL_WIDTHS),5);
+        assert_eq!(choose_local(4.2,1.0,0,&layout.levels,LOCAL_WIDTHS),0);
+        assert_eq!(choose_local(4.8,1.0,5,&layout.levels,LOCAL_WIDTHS),0);
+        assert_eq!(choose_local(3.2,1.0,0,&layout.levels,LOCAL_WIDTHS),5);
     }
     #[test] fn intermediate_levels_are_selected(){
-        let levels:Vec<_>=(0..LEVELS).collect();
-        assert_eq!(choose_local(20.0,1.0,UNKNOWN,&levels),0);
-        assert_eq!(choose_local(14.0,1.0,UNKNOWN,&levels),1);
-        assert_eq!(choose_local(10.0,1.0,UNKNOWN,&levels),2);
-        assert_eq!(choose_local(7.0,1.0,UNKNOWN,&levels),3);
-        assert_eq!(choose_local(5.0,1.0,UNKNOWN,&levels),4);
-        assert_eq!(choose_local(4.2,1.0,5,&levels),5);
-        assert_eq!(choose_local(4.2,1.0,4,&levels),4);
+        let levels:Vec<_>=(0..LOCAL_WIDTHS.len()).collect();
+        assert_eq!(choose_local(20.0,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),0);
+        assert_eq!(choose_local(14.0,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),1);
+        assert_eq!(choose_local(10.0,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),2);
+        assert_eq!(choose_local(7.0,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),3);
+        assert_eq!(choose_local(5.0,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),4);
+        assert_eq!(choose_local(4.2,1.0,5,&levels,LOCAL_WIDTHS),5);
+        assert_eq!(choose_local(4.2,1.0,4,&levels,LOCAL_WIDTHS),4);
     }
     #[test] fn mid_levels_fill_gaps_without_changing_near_levels(){
-        let levels:Vec<_>=(0..LEVELS).collect();
-        assert_eq!(choose_local(1.5,1.0,UNKNOWN,&levels),8);
-        assert_eq!(choose_local(1.5,1.0,UNKNOWN,&DENSE_LEVELS),7);
-        assert_eq!(choose_local(1.1,1.0,UNKNOWN,&levels),10);
-        assert_eq!(choose_local(0.7,1.0,UNKNOWN,&levels),12);
-        assert_eq!(choose_local(0.30,1.0,UNKNOWN,&levels),17);
-        for &level in &DENSE_LEVELS{
+        let dense = LodLayout::new(LOCAL_WIDTHS.len(), true, false);
+        let levels:Vec<_>=(0..LOCAL_WIDTHS.len()).collect();
+        assert_eq!(choose_local(1.5,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),8);
+        assert_eq!(choose_local(1.5,1.0,UNKNOWN,&dense.levels,LOCAL_WIDTHS),7);
+        assert_eq!(choose_local(1.1,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),10);
+        assert_eq!(choose_local(0.7,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),12);
+        assert_eq!(choose_local(0.30,1.0,UNKNOWN,&levels,LOCAL_WIDTHS),17);
+        for &level in &dense.levels{
             assert!(levels.contains(&level));
         }
         assert!(LOCAL_WIDTHS.windows(2).all(|p|p[0]<p[1]));
-        assert_eq!(&DENSE_LEVELS[..8],&levels[..8]);
+        assert_eq!(&dense.levels[..8],&levels[..8]);
+    }
+    #[test]
+    fn added_widths_participate_in_selection_and_hysteresis() {
+        use crate::planetary::LodLevels;
+        for mode in [LodLevels::Levels40, LodLevels::Levels64] {
+            let layout = LodLayout::new(mode.count(), true, true);
+            let index = layout.added[0];
+            let width = layout.widths[index];
+            let ppm = 1.0 / width;
+            let choose = |ppm, previous| choose_local(ppm, 1.0, previous, &layout.levels, &layout.widths);
+            assert_eq!(choose(ppm * 0.999, UNKNOWN), index);
+            assert_eq!(choose(ppm * 1.09, index as u8), index);
+            assert!(choose(ppm * 1.11, index as u8) < index);
+        }
     }
     #[test] fn sparse_levels_are_deterministic(){
         let samples:Vec<_>=[0.01,0.07,0.19].into_iter().map(|x|Sample{
             pos:Vec3::new(x,0.0,0.0),color:Vec3::ONE,normal:Vec3::Y,radius:0.01,coverage:1.0
         }).collect();
         let mut a=Vec::new();let mut b=Vec::new();
-        assert_eq!(append_sparse_level(&samples,0.0625,&mut a).count,3);
-        assert_eq!(append_sparse_level(&samples,0.125,&mut b).count,2);
-        let mut c=Vec::new();append_sparse_level(&samples,0.0625,&mut c);
+        assert_eq!(append_sparse_level(sparse_cells(&samples,0.0625),&mut a,usize::MAX).unwrap().count,3);
+        assert_eq!(append_sparse_level(sparse_cells(&samples,0.125),&mut b,usize::MAX).unwrap().count,2);
+        let mut c=Vec::new();append_sparse_level(sparse_cells(&samples,0.0625),&mut c,usize::MAX).unwrap();
         assert_eq!(bytemuck::cast_slice::<Point,u8>(&a),bytemuck::cast_slice::<Point,u8>(&c));
     }
     #[test] fn world_hysteresis_keeps_previous_branch(){
@@ -723,8 +829,10 @@ mod tests {
     }
     #[test] fn brick_partition_preserves_point_counts(){
         let mut raw=vec![Point::encode(Vec3::new(9.0,1.0,1.0),0.1,Vec3::ONE,Vec3::Y,1.0),Point::encode(Vec3::ONE,0.1,Vec3::ONE,Vec3::Y,1.0)];
-        let mut ranges=[Range::default();LEVELS];ranges[0]=Range{offset:RAW,count:2};
-        let parts=partition_bricks(&mut raw,&mut [],&ranges,&[0]);
+        let mut layout = LodLayout::new(LOCAL_WIDTHS.len(), false, false);
+        layout.levels.truncate(1);
+        let mut ranges=vec![Range::default();layout.widths.len()];ranges[0]=Range{offset:RAW,count:2};
+        let parts=partition_bricks(&mut raw,&mut [],&ranges,&layout);
         assert_eq!(parts[0].ranges[0].count,1);assert_eq!(parts[2].ranges[0].count,1);
         assert_eq!(parts.iter().map(|b|b.ranges[0].count).sum::<u32>(),2);
         assert_eq!(point_position(&raw[0]),Vec3::ONE);
@@ -738,7 +846,7 @@ mod tests {
 }
 
 /// Original demo hysteresis selection, shared by the planetary adapter.
-pub fn planetary_level(px_per_m:f32,threshold:f32,previous:u8)->usize{choose_local(px_per_m,threshold,previous,&[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21])}
+pub fn planetary_level(px_per_m:f32,threshold:f32,previous:u8)->usize{choose_local(px_per_m,threshold,previous,&BASELINE_LEVELS,LOCAL_WIDTHS)}
 
 /// Use the demo's weighted area and bounds for planetary world clusters.
 #[derive(Default)]

@@ -95,6 +95,26 @@ which hard limit was exceeded, or whether a refinement missed the 85% point
 headroom target. Set `RUST_LOG=igor_renderer=trace` for individual rejected
 probes with thresholds, counts, and limits.
 
+Set `IGOR_LOD_LEVELS=22`, `40`, or `64` at startup to vary the template
+hierarchy. The default is 22 and retains the legacy `IGOR_DENSE_LOD` and
+`IGOR_MID_LOD` settings. The 40- and 64-level modes start from all 22 widths
+and repeatedly bisect the largest logarithmic gap between 0.0625 m and 4 m.
+The raw, 8 m, 16 m, and 1 m shadow data use the original bake. Independent
+voxel grids can invert point counts, so a new level may reuse a neighboring
+level's points to keep counts monotonic without changing a baseline tier.
+
+The HUD shows active and requested level counts. Startup logs report the
+negotiated device buffer and atlas layer limits. Each background bake logs its
+elapsed time, persistent CPU pack payload in bytes, and the bytes required for
+each GPU storage buffer. The GPU upload logs its buffer sizes and logical atlas
+size. CPU pack bytes cover reserved array capacity and template payloads.
+Bake scratch, hash table overhead, render-world upload copies, and driver
+allocation overhead are separate. The bake caps each storage buffer at the
+smaller of the device's buffer and storage binding limits. A failed dense
+LOD allocation retries at 40 then 22 as applicable. If the baseline cannot
+fit, the HUD reports the error and the last usable snapshot remains active
+when available.
+
 Shadows and legacy undergrowth are enabled by default in point mode. Set IGOR_POINT_SHADOWS=0 or IGOR_POINT_UNDERGROWTH=0 independently. The library bakes local canopy opacity asynchronously from the original 1m LOD; a ground modulation pass samples opaque scene depth before point composition. The shadow field covers a local 512m region, not the entire planet. Undergrowth is the existing renderer for grass, ferns, shrubs and flowers, not yet converted to points. Tree budget stays 6M.
 
 The Bevy adapter keeps the camera's MSAA sample count and samples opaque shadow receivers per sample. Splat lighting uses exposed HDR direct light, a hemispherical sky approximation, and distance haze. Color stays in half-float until it reaches the game's HDR target.

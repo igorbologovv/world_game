@@ -1,9 +1,9 @@
 use std::ops::Range as WorkRange;
 
 use super::{
-    super::{choose_local, collapse_world, Point, Range, UNKNOWN},
+    super::{choose_local, collapse_world, dense_policy, Point, Range, UNKNOWN},
     identity, Camera, Cell, History, Identity, Item, Members, Node, Pack, PlanetHierarchy,
-    SelectionExecutor, LANES, ORIGINAL_LEVELS, RAW, WIDTHS,
+    SelectionExecutor, LANES, RAW, WIDTHS,
 };
 use glam::{Quat, Vec3};
 use tracing::{trace, trace_span};
@@ -321,7 +321,7 @@ impl Traversal<'_> {
                         range: [point.rgba, point.normal, 1, 0],
                         count: 1,
                         fade: cam.fade(position),
-                        level: 22,
+                        level: pack.widths.len(),
                         model: 0,
                     },
                     node.count,
@@ -348,14 +348,14 @@ impl Traversal<'_> {
             let weight = 0.18 + 0.82 * (distance / 160.0).clamp(0.0, 1.0);
             let id = identity(tree.input);
             let hash = (id[0] ^ id[1].rotate_left(21) ^ id[2].rotate_left(42)) as u32;
-            let stagger = if pack.levels.len() > ORIGINAL_LEVELS.len() {
+            let stagger = if dense_policy(&pack.levels) {
                 0.94 + 0.12 * crate::random(hash ^ 0x3f912ac7)
             } else {
                 1.0
             };
             let local = (self.threshold * weight * stagger).max(0.25);
             let old = *self.history.trees.get(&id).unwrap_or(&UNKNOWN);
-            let chosen = choose_local(ppm, local, old, &pack.levels);
+            let chosen = choose_local(ppm, local, old, &pack.levels, &pack.widths);
             work.trees.push((id, chosen as u8));
             let Range { offset, count } = model.info.ranges[chosen];
             work.push(

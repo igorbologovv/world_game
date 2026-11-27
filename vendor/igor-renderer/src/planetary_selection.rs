@@ -4,7 +4,7 @@
 #[path = "planetary_selection/traversal.rs"]
 mod traversal;
 
-use super::{Aggregate,Point,Sample,raster_shadow_sample,point_position,point_radius,LOCAL_WIDTHS,ORIGINAL_LEVELS,RAW};
+use super::{Aggregate,Point,Sample,dense_policy,raster_shadow_sample,point_position,point_radius,width_index,SHADOW_WIDTH,RAW};
 #[cfg(test)]
 use super::Range;
 use crate::{planetary::Pack,render_api::LANES};
@@ -216,7 +216,8 @@ impl SelectionExecutor for SerialSelection {
 pub struct PlanetSelection{
     pub instances:Vec<[u32;12]>,pub jobs:Vec<[u32;4]>,pub points:u32,pub raw_points:u32,
     pub covered:u32,pub clusters:u32,pub visited:u32,pub threshold:f32,pub budget_met:bool,
-    pub lod_counts:[u32;22],
+    /// Instances selected per template width. World clusters are counted separately.
+    pub lod_counts:Vec<u32>,
     /// Maximum jobs allowed for this selection, including padding.
     pub job_limit: u64,
     /// Rejections during this selection, including a failed terminal probe.
@@ -425,6 +426,7 @@ fn merge_children(
 pub struct PlanetScene{
     hierarchy: Arc<PlanetHierarchy>,
     history:History,scratch:SelectionScratch,threshold:f32,base:f32,budget:u64,max_jobs:u64,spare:u32,
+    widths: Vec<f32>,
 }
 impl PlanetScene{
     /// Return shadow casters from the installed hierarchy.
@@ -471,11 +473,22 @@ impl PlanetScene{
             self.history.nodes.clear();
             self.history.trees.clear();
         }
+        if self.widths != pack.widths {
+            // A fallback pack can renumber levels. Preserve hysteresis for
+            // widths that still exist and discard only hints for removed tiers.
+            let new_indices: Vec<_> = self.widths.iter().map(|&width| width_index(&pack.widths, width)).collect();
+            self.history.trees.retain(|_, level| {
+                let Some(next) = new_indices[usize::from(*level)] else { return false };
+                *level = next as u8;
+                true
+            });
+            self.widths.clone_from(&pack.widths);
+        }
         let mut probe = |threshold| {
             self.scratch.probe(&self.hierarchy, &self.history, pack, cam, threshold, executor)
         };
         let current=self.threshold.max(base);
-        let dense=pack.levels.len()>ORIGINAL_LEVELS.len();
+        let dense=dense_policy(&pack.levels);
         let mut threshold=current;
         let mut tried=false;
         let mut accepted=None;
@@ -506,14 +519,14 @@ impl PlanetScene{
         if !fits{
             // Never send an over-budget dispatch or silently drop trees.
             return PlanetSelection{threshold,budget_met:false,visited:work.visited,
-                job_limit:max_jobs,probe_rejections,..Default::default()};
+                lod_counts:vec![0;pack.widths.len()],job_limit:max_jobs,probe_rejections,..Default::default()};
         }
         let items = self.scratch.commit(&mut self.history);
         // Same demo ordering: fine levels first, model next, world last.
         items.sort_by_key(|i|(i.level,i.model));
         let _span = trace_span!("PlanetScene::generate_instances_and_jobs").entered();
         let mut out=PlanetSelection{instances:Vec::with_capacity(items.len()),jobs:Vec::with_capacity(work.jobs as usize),
-            points:work.points as u32,raw_points:work.raw as u32,covered:work.covered,clusters:work.clusters,visited:work.visited,threshold,budget_met:true,lod_counts:[0;22],
+            points:work.points as u32,raw_points:work.raw as u32,covered:work.covered,clusters:work.clusters,visited:work.visited,threshold,budget_met:true,lod_counts:vec![0;pack.widths.len()],
             job_limit:max_jobs,probe_rejections};
         for item in items.drain(..){
             let a=item.origin.map(f32::to_bits);let b=item.rotation.map(f32::to_bits);let c=item.range;
@@ -522,7 +535,7 @@ impl PlanetScene{
             for first in (0..item.count).step_by(LANES as usize){
                 out.jobs.push([index,first,(item.count-first).min(LANES),item.fade]);
             }
-            if item.level<22{out.lod_counts[item.level]+=1;}
+            if let Some(count)=out.lod_counts.get_mut(item.level){*count+=1;}
         }
         out
     }
@@ -531,16 +544,19 @@ impl PlanetScene{
 #[cfg(test)]
 mod tests{
     use super::*;
-    use crate::planetary::{Template,TemplateInfo,Transform,Summary,AtlasData};
+    use crate::planetary::{Template,TemplateInfo,Transform,Summary,AtlasData,BASELINE_LOD_WIDTHS};
     fn pack()->Pack{
-        let mut ranges=[Range{offset:0,count:1};22];
+        pack_with_widths(BASELINE_LOD_WIDTHS.to_vec())
+    }
+    fn pack_with_widths(widths:Vec<f32>)->Pack{
+        let mut ranges=vec![Range{offset:0,count:1};widths.len()].into_boxed_slice();
         ranges[0]=Range{offset:RAW,count:128};
         ranges[1]=Range{offset:0,count:64};
         let template=Template{transform:Transform{tile:0,root:[0.0;3],scale:1.0},
-            info:TemplateInfo{ranges,radii:[2.0;22],center:[8.0,2.0,8.0],bound:2.0,
+            info:TemplateInfo{ranges,radii:vec![2.0;widths.len()].into_boxed_slice(),center:[8.0,2.0,8.0],bound:2.0,
                 summary:Summary{position:[8.0,2.0,8.0],color:[0.2,0.4,0.1],normal:[0.0,1.0,0.0],radius:2.0,coverage:1.0}}};
         Pack{raw:vec![],lod:vec![],patches:vec![],materials:vec![],atlas:AtlasData{side:1,layers:1,tiles:vec![]},
-            templates:HashMap::from([(0,template)]),levels:(0..22).collect()}
+            templates:HashMap::from([(0,template)]),levels:(0..widths.len()).collect(),widths}
     }
     fn placement(x:f64,z:f64)->Placement{Placement{position:[x,0.0,z],rotation:[0.0,0.0,0.0,1.0],scale:1.0,model:0,phase:0.0}}
     fn camera()->Camera{Camera{position:[0.0,2.0,0.0],forward:[0.0,0.0,1.0],right:[1.0,0.0,0.0],up:[0.0,1.0,0.0],
@@ -631,7 +647,13 @@ mod tests{
 
     #[test]
     fn parallel_selection_matches_serial_with_one_dense_root_and_budget_retries() {
-        let pack = pack();
+        use crate::{planetary::LodLevels, splat::LodLayout};
+        check_parallel_selection(pack());
+        let layout = LodLayout::new(LodLevels::Levels64.count(), true, true);
+        check_parallel_selection(pack_with_widths(layout.widths));
+    }
+
+    fn check_parallel_selection(pack: Pack) {
         let hierarchy = dense_hierarchy(&pack);
         assert_eq!(hierarchy.roots.len(), 1);
         assert_eq!(hierarchy.roots[0].children().len(), 1);
@@ -669,11 +691,12 @@ mod tests{
                 let reference = serial.select(&pack, cam, 2.2, budget, jobs);
                 let selected = parallel.select_with_executor(&pack, cam, 2.2, budget, jobs, &executor);
                 assert_same_selection(&reference, &selected);
+                assert_eq!(selected.lod_counts.len(), pack.widths.len());
                 assert_eq!(serial.history.nodes, parallel.history.nodes);
                 assert_eq!(serial.history.trees, parallel.history.trees);
                 assert_eq!(serial.spare, parallel.spare);
                 if budget == 1_000_000 && jobs == 200_000 {
-                    changed_lods |= earlier_lods.is_some_and(|earlier| earlier != selected.lod_counts);
+                    changed_lods |= earlier_lods.as_ref().is_some_and(|earlier| *earlier != selected.lod_counts);
                     earlier_lods = Some(selected.lod_counts);
                 }
                 tightened_threshold |= budget == 4_000 && selected.threshold > 2.2;
@@ -853,7 +876,7 @@ impl PlanetShadow{
         let side=512u32;let step=1.0;let band=8.0;
         let half=side as f32*step*0.5;
         let mut pixels=vec![0u8;side as usize*side as usize*4];
-        let level=LOCAL_WIDTHS.iter().position(|&w|w==1.0)?;
+        let level=width_index(&pack.widths, SHADOW_WIDTH)?;
         for input in sites{
             let Some((t,_))=Tree::new(input,pack) else{continue;};
             let rel=(t.origin-origin).as_vec3();

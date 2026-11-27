@@ -28,7 +28,7 @@ use super::{streaming::ForestStream,
     ForestModels, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
 
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use igor_renderer::planetary::{Camera as IgorCamera, PlanetSelection, PlanetShadow};
+use igor_renderer::planetary::{Camera as IgorCamera, LodLevels, PlanetSelection, PlanetShadow};
 
 use snapshots::{take_ready, Geometry, Snapshots};
 use selection_workers::SelectionWorkers;
@@ -77,6 +77,16 @@ pub(super) struct PointForest{
 }
 impl Default for PointForest{
     fn default() -> Self {
+        let lod_levels = match std::env::var("IGOR_LOD_LEVELS") {
+            Ok(value) if value == "64" => LodLevels::Levels64,
+            Ok(value) if value == "40" => LodLevels::Levels40,
+            Ok(value) if value == "22" => LodLevels::Levels22,
+            Err(std::env::VarError::NotPresent) => LodLevels::Levels22,
+            invalid => {
+                warn!("Invalid IGOR_LOD_LEVELS {invalid:?}, using 22 levels");
+                LodLevels::Levels22
+            }
+        };
         let base_lod_pixels = match std::env::var("IGOR_LOD_PIXELS") {
             Ok(value) => match value.parse::<f32>() {
                 Ok(parsed) if parsed.is_finite() => parsed.clamp(0.25, 512.0),
@@ -92,7 +102,7 @@ impl Default for PointForest{
             }
         };
         Self {
-            snapshots: Snapshots::default(),
+            snapshots: Snapshots::with_lod_levels(lod_levels),
             selection_workers: SelectionWorkers::from_env(),
             models_revision: 0,
             ready: Arc::new(AtomicBool::new(false)),
@@ -279,6 +289,10 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         msg.push_str(build_status);
     }
     let _ = write!(msg, "\nLOD base {:.2} px", forest.base_lod_pixels);
+    if let Some(snapshot) = snapshot {
+        let _ = write!(msg, " | levels {} / {}", snapshot.geometry.pack().levels.len(),
+            forest.snapshots.requested_lod_levels());
+    }
     if let Some(selection) = selection {
         if selection.budget_met {
             let _ = write!(msg, " | accepted {:.2} px", selection.threshold);
@@ -392,7 +406,11 @@ struct ViewPipelines {
 
 #[derive(Resource)]
 struct PointShader(Handle<Shader>, [Handle<Shader>; 2], Handle<Shader>, [Handle<Shader>; 2]);
-fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<PointShader>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>,adapter:Res<RenderAdapter>){
+fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<PointShader>,cache:Res<PipelineCache>,fullscreen:Res<FullscreenShader>,adapter:Res<RenderAdapter>,device:Res<RenderDevice>){
+    let limits = device.limits();
+    info!(max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size,
+        max_buffer_size = limits.max_buffer_size, max_texture_array_layers = limits.max_texture_array_layers,
+        "Igor device storage limits");
     let compute=BindGroupLayoutDescriptor::new("original Igor compute",&BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,(uniform_buffer::<FrameUniform>(false),
         storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),storage_buffer_read_only_sized(false,None),
@@ -460,6 +478,10 @@ impl GpuPack{
         let make=|format|texture.create_view(&TextureViewDescriptor{format:Some(format),dimension:Some(TextureViewDimension::D2Array),..default()});
         let color=make(TextureFormat::Rgba8UnormSrgb);let normal=make(TextureFormat::Rgba8Unorm);
         let sampler=device.create_sampler(&SamplerDescriptor{min_filter:FilterMode::Linear,mag_filter:FilterMode::Linear,..default()});
+        info!(levels = pack.levels.len(), raw_bytes = raw.buffer().unwrap().size(),
+            lod_bytes = lod.buffer().unwrap().size(), patch_bytes = patches.buffer().unwrap().size(),
+            material_bytes = materials.buffer().unwrap().size(), atlas_bytes = pack.atlas_bytes(),
+            "Igor template GPU allocations");
         Self{id:geometry.id,raw,lod,patches,materials,_texture:texture,color,normal,sampler}
     }
 }

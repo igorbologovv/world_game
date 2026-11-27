@@ -6,6 +6,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
+    time::{Duration, Instant},
 };
 
 use bevy::{
@@ -13,7 +14,7 @@ use bevy::{
     tasks::{AsyncComputeTaskPool, Task},
 };
 use igor_renderer::planetary::{
-    Camera, Pack, PlanetHierarchy, PlanetScene, PlanetSelection, SelectionExecutor,
+    Camera, LodLevels, Pack, PlanetHierarchy, PlanetScene, PlanetSelection, SelectionExecutor,
 };
 
 use super::super::{
@@ -103,6 +104,7 @@ struct BuildResult {
 struct GeometryResult {
     models: u64,
     pack: Result<Arc<Geometry>, String>,
+    elapsed: Duration,
 }
 
 #[derive(Default)]
@@ -114,6 +116,7 @@ pub(super) struct Snapshots {
     placements: PlacementIndex,
     demand: Option<TemplateDemand>,
     geometry_task: Option<Task<GeometryResult>>,
+    lod_levels: LodLevels,
     prepared_geometry: Option<Arc<Geometry>>,
     last_geometry_request: Option<(u64, Vec<usize>)>,
     next_geometry_id: u64,
@@ -123,6 +126,14 @@ pub(super) struct Snapshots {
 }
 
 impl Snapshots {
+    pub(super) fn with_lod_levels(lod_levels: LodLevels) -> Self {
+        Self { lod_levels, ..Self::default() }
+    }
+
+    pub(super) fn requested_lod_levels(&self) -> usize {
+        self.lod_levels.count()
+    }
+
     pub(super) fn active(&self) -> Option<&Snapshot> {
         self.active.as_ref()
     }
@@ -189,18 +200,24 @@ impl Snapshots {
             Ok(geometry) => {
                 let pack = geometry.pack();
                 info!(
-                    "Original Igor pack: {} templates, {} raw, {} LOD, {} patches, {} atlas pages",
-                    pack.templates.len(),
-                    pack.raw.len(),
-                    pack.lod.len(),
-                    pack.patches.len(),
-                    pack.atlas.layers
+                    templates = pack.templates.len(),
+                    requested_levels = self.requested_lod_levels(),
+                    active_levels = pack.levels.len(),
+                    raw_points = pack.raw.len(),
+                    aggregate_points = pack.lod.len(),
+                    elapsed_ms = result.elapsed.as_secs_f64() * 1000.0,
+                    cpu_pack_bytes = pack.cpu_pack_bytes(),
+                    storage_buffer_bytes = ?pack.buffer_sizes(),
+                    atlas_bytes = pack.atlas_bytes(),
+                    atlas_layers = pack.atlas.layers,
+                    "Igor template pack baked"
                 );
                 self.prepared_geometry = Some(geometry);
                 self.geometry_error = None;
             }
             Err(error) => {
-                error!("Original Igor pack: {error}");
+                error!(elapsed_ms = result.elapsed.as_secs_f64() * 1000.0, %error,
+                    "Igor template pack rejected");
                 self.geometry_error = Some(error);
             }
         }
@@ -348,20 +365,22 @@ impl Snapshots {
         let models = revision.models;
         let templates = demand.templates.clone();
         let portraits = portraits.clone();
+        let lod_levels = self.lod_levels;
         self.geometry_task = Some(AsyncComputeTaskPool::get().spawn(async move {
             let _span = trace_span!("point_forest.build_geometry_pack").entered();
+            let start = Instant::now();
             let inputs = templates
                 .into_values()
                 .map(|(species, variant)| portraits.planet_input(species, variant))
                 .collect();
-            let pack = Pack::build(inputs, storage, layers).map(|pack| {
+            let pack = Pack::build_with_lods(inputs, lod_levels, storage, layers).map(|pack| {
                 Arc::new(Geometry {
                     id,
                     models,
                     pack: Some(pack),
                 })
             });
-            GeometryResult { models, pack }
+            GeometryResult { models, pack, elapsed: start.elapsed() }
         }));
     }
 }
@@ -460,13 +479,14 @@ mod tests {
     };
     use bevy::{math::DVec3, tasks::TaskPool};
     use igor_renderer::{
-        planetary::{AtlasData, Summary, Template, TemplateInfo, Transform, LEVELS},
+        planetary::{AtlasData, Summary, Template, TemplateInfo, Transform, BASELINE_LOD_WIDTHS},
         splat::Range,
     };
 
     fn geometry(id: u64, models: u64, species: Species) -> Arc<Geometry> {
         AsyncComputeTaskPool::get_or_init(TaskPool::new);
         let tile = impostor::tile(species, 0);
+        let widths = BASELINE_LOD_WIDTHS.to_vec();
         let template = Template {
             transform: Transform {
                 tile,
@@ -474,11 +494,11 @@ mod tests {
                 scale: 1.0,
             },
             info: TemplateInfo {
-                ranges: [Range {
+                ranges: vec![Range {
                     offset: 0,
                     count: 1,
-                }; LEVELS],
-                radii: [1.0; LEVELS],
+                }; widths.len()].into_boxed_slice(),
+                radii: vec![1.0; widths.len()].into_boxed_slice(),
                 center: [8.0, 0.0, 8.0],
                 bound: 1.0,
                 summary: Summary {
@@ -504,7 +524,8 @@ mod tests {
                     tiles: vec![],
                 },
                 templates: [(tile, template)].into(),
-                levels: (0..LEVELS).collect(),
+                levels: (0..widths.len()).collect(),
+                widths,
             }),
         })
     }
