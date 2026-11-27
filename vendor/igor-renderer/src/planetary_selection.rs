@@ -4,7 +4,8 @@
 use super::{Aggregate,Sample,Point,Range,choose_local,collapse_world,raster_shadow_sample,point_position,point_radius,LOCAL_WIDTHS,ORIGINAL_LEVELS,UNKNOWN,RAW};
 use crate::{planetary::Pack,render_api::LANES};
 use glam::{DVec3,Vec3,Quat};
-use std::collections::{BTreeMap,HashMap};
+use std::{collections::{BTreeMap,HashMap}, sync::Arc};
+use tracing::trace_span;
 
 /// Unmodified game-world placement, before the loader normalization.
 #[derive(Clone,Copy,Debug,PartialEq)]
@@ -135,41 +136,87 @@ pub struct PlanetSelection{
     pub covered:u32,pub clusters:u32,pub visited:u32,pub threshold:f32,pub budget_met:bool,
     pub lod_counts:[u32;22],
 }
-/// Reuse this object across frames. Updating with the same placements is
-/// a no-op; the hierarchy and hysteresis do not depend on camera position.
+/// Immutable tree transforms and world hierarchy built against one geometry pack.
 #[derive(Default)]
-pub struct PlanetScene{
-    placements:Vec<Placement>,trees:Vec<Tree>,levels:Vec<Vec<Node>>,history:History,
-    threshold:f32,base:f32,budget:u64,max_jobs:u64,spare:u32,
+pub struct PlanetHierarchy {
+    placements: Vec<Placement>,
+    trees: Vec<Tree>,
+    levels: Vec<Vec<Node>>,
 }
-impl PlanetScene{
+
+impl PlanetHierarchy {
+    /// Build from placements in deterministic order, skipping models absent from the pack.
+    /// Use the same pack for selection and shadow baking.
+    pub fn build(pack: &Pack, placements: Vec<Placement>) -> Self {
+        let _span = trace_span!("PlanetHierarchy::build").entered();
+        let trees: Vec<_> = trace_span!("PlanetScene::collect_trees")
+            .in_scope(|| placements.iter().filter_map(|&p| Tree::new(p, pack)).collect());
+        let leaves = trace_span!("PlanetScene::build_leaf_level").in_scope(|| {
+            let mut leaves = BTreeMap::<Cell, Node>::new();
+            for (i, &tree) in trees.iter().enumerate() {
+                let key = cell(DVec3::from_array(tree.input.position), WIDTHS[0]);
+                leaves.entry(key).or_insert_with(|| Node::new(key, WIDTHS[0])).add_tree(i, tree);
+            }
+            leaves.into_values().collect()
+        });
+        let mut levels: Vec<Vec<Node>> = vec![leaves];
+        {
+            let _span = trace_span!("PlanetScene::build_parent_levels").entered();
+            for level in 1..WIDTHS.len() {
+                let mut parents = BTreeMap::<Cell, Node>::new();
+                for (i, child) in levels[level - 1].iter().enumerate() {
+                    let key = parent(child.key);
+                    parents.entry(key).or_insert_with(|| Node::new(key, WIDTHS[level])).add_child(i, child);
+                }
+                levels.push(parents.into_values().collect());
+            }
+        }
+        Self { placements, trees, levels }
+    }
+
+    /// Compare sorted inputs before rebuilding with the same geometry pack.
+    pub fn has_placements(&self, placements: &[Placement]) -> bool {
+        self.placements == placements && !self.levels.is_empty()
+    }
+
     /// Off-screen placements are included; selection and camera LOD do not affect shadows.
     pub fn shadow_placements(&self,eye:[f64;3])->Vec<Placement>{
+        let _span = trace_span!("PlanetScene::shadow_placements").entered();
         let eye=DVec3::from_array(eye);
         self.trees.iter().filter(|t|t.center.distance_squared(eye)<500.0f64.powi(2)).map(|t|t.input).collect()
     }
+}
+
+/// Reuse the selector across frames and hierarchy swaps to preserve LOD history.
+#[derive(Default)]
+pub struct PlanetScene{
+    hierarchy: Arc<PlanetHierarchy>,
+    history:History,threshold:f32,base:f32,budget:u64,max_jobs:u64,spare:u32,
+}
+impl PlanetScene{
+    /// Return shadow casters from the installed hierarchy.
+    pub fn shadow_placements(&self,eye:[f64;3])->Vec<Placement>{
+        self.hierarchy.shadow_placements(eye)
+    }
+
+    /// Rebuild synchronously when the placements change. Use a fresh hierarchy
+    /// via `replace_hierarchy` when the underlying geometry pack changes.
     pub fn update_sites(&mut self,pack:&Pack,placements:Vec<Placement>)->bool{
-        if self.placements==placements&&!self.levels.is_empty(){return false;}
-        self.placements=placements;
-        self.trees=self.placements.iter().filter_map(|&p|Tree::new(p,pack)).collect();
-        let mut leaves=BTreeMap::<Cell,Node>::new();
-        for (i,&t) in self.trees.iter().enumerate(){
-            let k=cell(DVec3::from_array(t.input.position),WIDTHS[0]);
-            leaves.entry(k).or_insert_with(||Node::new(k,WIDTHS[0])).add_tree(i,t);
+        if self.hierarchy.has_placements(&placements) {
+            return false;
         }
-        self.levels=vec![leaves.into_values().collect()];
-        for level in 1..WIDTHS.len(){
-            let mut parents=BTreeMap::<Cell,Node>::new();
-            for (i,c) in self.levels[level-1].iter().enumerate(){
-                let k=parent(c.key);
-                parents.entry(k).or_insert_with(||Node::new(k,WIDTHS[level])).add_child(i,c);
-            }
-            self.levels.push(parents.into_values().collect());
-        }
+        self.hierarchy = Arc::new(PlanetHierarchy::build(pack, placements));
         true
     }
+
+    /// Install a completed hierarchy while retaining camera LOD history and budget state.
+    /// Returns the old hierarchy so its allocations can be released on another thread.
+    pub fn replace_hierarchy(&mut self, hierarchy: Arc<PlanetHierarchy>) -> Arc<PlanetHierarchy> {
+        std::mem::replace(&mut self.hierarchy, hierarchy)
+    }
+
     fn visit(&self,pack:&Pack,cam:Camera,level:usize,index:usize,threshold:f32,work:&mut Work){
-        let node=&self.levels[level][index];work.visited+=1;
+        let node=&self.hierarchy.levels[level][index];work.visited+=1;
         let (center,radius)=node.sphere();
         let Some(px)=cam.projected(center,radius,WIDTHS[level] as f32)else{return;};
         let key=(level,node.key);
@@ -190,7 +237,7 @@ impl PlanetScene{
             return;
         }
         for &i in &node.members{
-            let t=self.trees[i];
+            let t=self.hierarchy.trees[i];
             let Some(ppm)=cam.projected(t.center,t.radius,t.scale)else{continue;};
             let model=&pack.templates[&t.input.model];
             let distance=((t.center-cam.eye()).length() as f32-t.radius).max(0.0);
@@ -207,13 +254,16 @@ impl PlanetScene{
         }
     }
     fn probe(&self,pack:&Pack,cam:Camera,threshold:f32)->Work{
+        let _span = trace_span!("PlanetScene::traverse_hierarchy").entered();
         let mut work=Work::default();
-        if let Some(top)=self.levels.len().checked_sub(1){
-            for i in 0..self.levels[top].len(){self.visit(pack,cam,top,i,threshold,&mut work);}
+        if let Some(top)=self.hierarchy.levels.len().checked_sub(1){
+            for i in 0..self.hierarchy.levels[top].len(){self.visit(pack,cam,top,i,threshold,&mut work);}
         }
         work
     }
+    /// Select visible points using the pack used to build the installed hierarchy.
     pub fn select(&mut self,pack:&Pack,cam:Camera,base:f32,budget:u64,max_jobs:u64)->PlanetSelection{
+        let _span = trace_span!("PlanetScene::select").entered();
         let base=base.clamp(0.25,512.0);
         if self.base!=base||self.budget!=budget||self.max_jobs!=max_jobs{
             self.base=base;self.budget=budget;self.max_jobs=max_jobs;self.threshold=base;self.spare=0;self.history=History::default();
@@ -250,6 +300,7 @@ impl PlanetScene{
         self.history=history;
         // Same demo ordering: fine levels first, model next, world last.
         items.sort_by_key(|i|(i.level,i.model));
+        let _span = trace_span!("PlanetScene::generate_instances_and_jobs").entered();
         let mut out=PlanetSelection{instances:Vec::with_capacity(items.len()),jobs:Vec::with_capacity(jobs as usize),
             points:points as u32,raw_points:raw as u32,covered,clusters,visited,threshold,budget_met:true,lod_counts:[0;22]};
         for item in items{
@@ -287,7 +338,7 @@ mod tests{
         let sites=vec![placement(0.0,20.0),placement(-2.0,1000.0),placement(-3.0,1001.0)];
         assert!(scene.update_sites(&pack,sites.clone()));
         assert!(!scene.update_sites(&pack,sites));
-        assert_eq!(scene.levels[4].iter().map(|n|n.count).sum::<u32>(),3);
+        assert_eq!(scene.hierarchy.levels[4].iter().map(|n|n.count).sum::<u32>(),3);
         let out=scene.select(&pack,camera(),2.2,1000,1000);
         assert!(out.budget_met);assert_eq!(out.covered,3);
         assert!(out.clusters>=1);
@@ -298,6 +349,24 @@ mod tests{
         scene.update_sites(&pack,(0..32).map(|i|placement(i as f64-16.0,600.0)).collect());
         let out=scene.select(&pack,camera(),2.2,8,8);
         assert!(out.budget_met);assert_eq!(out.covered,32);assert!(out.points<=8);
+    }
+    #[test]
+    fn replacing_hierarchy_preserves_lod_history_and_budget_state() {
+        let pack = pack();
+        let mut scene = PlanetScene::default();
+        scene.update_sites(&pack, vec![placement(0.0, 20.0)]);
+        assert!(scene.select(&pack, camera(), 2.2, 1000, 1000).budget_met);
+        let history = scene.history.trees.clone();
+        assert!(!history.is_empty());
+        let threshold = scene.threshold;
+        let spare = scene.spare;
+
+        let next = Arc::new(PlanetHierarchy::build(&pack, vec![placement(0.0, 30.0)]));
+        let retired = scene.replace_hierarchy(next.clone());
+        assert!(retired.has_placements(&[placement(0.0, 20.0)]));
+        assert!(Arc::ptr_eq(&scene.hierarchy, &next));
+        assert_eq!(scene.history.trees, history);
+        assert_eq!((scene.threshold, scene.spare, scene.budget, scene.max_jobs), (threshold, spare, 1000, 1000));
     }
     #[test]fn translated_parent_preserves_weighted_summary(){
         let mut child=Node::new([-1,0,0],16.0);

@@ -2,6 +2,7 @@
 //! No second device/window: use Bevy's RenderDevice and real scene depth.
 mod occlusion;
 mod shader;
+mod snapshots;
 mod temporal;
 
 use std::{collections::BTreeMap, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}};
@@ -9,6 +10,7 @@ use bevy::{
     camera::Exposure,
     math::DVec3,
     core_pipeline::{core_3d::{main_opaque_pass_3d, main_transparent_pass_3d, CORE_3D_DEPTH_FORMAT}, schedule::Core3d, Core3dSystems, FullscreenShader},
+    log::trace_span,
     prelude::*,
     render::{
         render_resource::{binding_types::*, *},
@@ -19,11 +21,13 @@ use bevy::{
     },
 };
 use world_core::runtime::{WorldCamera, GridTransform, ReferenceFrames};
-use super::{impostor, streaming::ForestStream,
-    ForestModels, Species, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
+use super::{streaming::ForestStream,
+    ForestModels, lod::{VegetationSettings, View}, hero_oak::HeroOakAssets, tree_assets::TreeAssets};
 
-use bevy::tasks::{block_on,poll_once,AsyncComputeTaskPool,Task};
-use igor_renderer::planetary::{Pack,Placement,Camera as IgorCamera,PlanetScene,PlanetSelection,PlanetShadow};
+use bevy::tasks::{AsyncComputeTaskPool, Task};
+use igor_renderer::planetary::{Camera as IgorCamera, PlanetSelection, PlanetShadow};
+
+use snapshots::{take_ready, Geometry, Snapshots};
 
 // Planetary scene quality experiment; keep the standalone demo default unchanged.
 const BUDGET:u32=6_000_000;
@@ -45,47 +49,44 @@ struct SelectionView {
     max_jobs: u64,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct ShadowSource {
+    geometry: u64,
+    construction: u64,
+}
+
 #[derive(Resource)]
 pub(super) struct PointForest{
-    pack:Option<Arc<Pack>>,pending:Option<Task<Result<Pack,String>>>,
-    requested:Vec<usize>,next_build:f64,error:Option<String>,
+    snapshots: Snapshots,
+    models_revision: u64,
+    budget_exceeded: bool,
     ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
     storage_limit:Arc<AtomicU64>,layer_limit:Arc<AtomicU32>,
-    candidates:usize,budget:u32,scene:PlanetScene,
-    placement_revision: Option<u64>,
-    required_templates: BTreeMap<usize,(Species,usize)>,
+    budget:u32,
     selection_view: Option<SelectionView>,
     selection: Option<Arc<PlanetSelection>>,
     stable_frames: u8,
     active: bool,
     shadows:bool,shadow:Option<Arc<PlanetShadow>>,previous_shadow:Option<Arc<PlanetShadow>>,
-    shadow_changed_at:f64,shadow_task:Option<Task<Option<PlanetShadow>>>,shadow_dirty:bool,shadow_next:f64,eye:[f64;3],
+    shadow_changed_at:f64,shadow_task:Option<Task<(ShadowSource, Option<PlanetShadow>)>>,shadow_dirty:bool,shadow_next:f64,eye:[f64;3],
 }
 impl Default for PointForest{
-    fn default()->Self{Self{pack:None,pending:None,requested:Vec::new(),next_build:0.0,error:None,
+    fn default()->Self{Self{snapshots:Snapshots::default(),models_revision:0,budget_exceeded:false,
         ready:Arc::new(AtomicBool::new(false)),status:Arc::new(AtomicU32::new(0)),submitted:Arc::new(AtomicU32::new(0)),
         storage_limit:Arc::new(AtomicU64::new(0)),layer_limit:Arc::new(AtomicU32::new(0)),
-        candidates:0, placement_revision:None, required_templates:BTreeMap::new(),
         selection_view:None, selection:None, stable_frames:0, active:false,
         budget:std::env::var("IGOR_POINT_BUDGET").ok().and_then(|v|v.parse().ok()).unwrap_or(BUDGET).clamp(1,8_000_000),
-        scene:PlanetScene::default(),shadows:std::env::var("IGOR_POINT_SHADOWS").as_deref()!=Ok("0"),
+        shadows:std::env::var("IGOR_POINT_SHADOWS").as_deref()!=Ok("0"),
         shadow:None,previous_shadow:None,shadow_changed_at:0.0,shadow_task:None,shadow_dirty:true,shadow_next:0.0,eye:[0.0;3]}}
 }
 fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:Res<ForestModels>,
     settings:Res<VegetationSettings>,hero:Res<HeroOakAssets>,assets:Res<TreeAssets>,time:Res<Time>,
     cameras:Query<(Entity,GridTransform,&Camera,&Projection),With<WorldCamera>>,frames:ReferenceFrames,lights:Query<(&DirectionalLight,&Transform),Without<WorldCamera>>){
     points.active = false;
-    if let Some(result)=points.pending.as_mut().and_then(|task|block_on(poll_once(task))){
-        points.pending=None;
-        match result{Ok(pack)=>{
-            info!("Original Igor pack: {} templates, {} raw, {} LOD, {} patches, {} atlas pages",pack.templates.len(),pack.raw.len(),pack.lod.len(),pack.patches.len(),pack.atlas.layers);
-            // Refresh template ranges while retaining the selector's site-keyed LOD history.
-            points.scene.update_sites(&pack, Vec::new());
-            points.pack=Some(Arc::new(pack));points.placement_revision=None;
-            points.selection_view=None;points.shadow_dirty=true;points.shadow_task=None;points.error=None;
-        },Err(err)=>{error!("Original Igor pack: {err}");points.error=Some(err);}}
+    if models.is_changed() {
+        points.models_revision += 1;
     }
-    if !points.ready.load(Ordering::Acquire)||hero.is_pending()||assets.is_pending(){return;}
+    if !points.ready.load(Ordering::Acquire) { return; }
     let Ok((entity,grid,camera,projection))=cameras.single() else{return;};
     let Some(frame)=frames.parent_frame(entity) else{return;};
     let eye=frame.grid_position_double(&grid.cell,&grid.transform);
@@ -93,57 +94,28 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
     let size=camera.physical_viewport_size().unwrap_or(UVec2::new(1920,1080)).max(UVec2::ONE);
     let rotation=grid.transform.rotation;
     let reach=settings.proxy_range().y;
-    let revision = forest.point_revision();
-    let pack = points.pack.clone();
-    if points.placement_revision != Some(revision) || models.is_changed() {
-        let mut placements = Vec::new();
-        let mut needed = BTreeMap::new();
-        for site in forest.point_sites() {
-            let variant = models.portraits.point_variant(site.species, site.variant);
-            let tile = impostor::tile(site.species, variant);
-            needed.insert(tile, (site.species, variant));
-            placements.push(Placement {
-                position: site.position.to_array(), rotation: site.rotation().to_array(),
-                scale: site.scale, model: tile, phase: site.yaw,
-            });
-        }
-        // Keep the selector's deterministic tie order when patches arrive out of order.
-        placements.sort_unstable_by(|a,b|a.position[0].total_cmp(&b.position[0])
-            .then_with(||a.position[1].total_cmp(&b.position[1]))
-            .then_with(||a.position[2].total_cmp(&b.position[2])).then_with(||a.model.cmp(&b.model)));
-        points.placement_revision = Some(revision);
-        points.required_templates = needed;
-        points.candidates = placements.len();
-        if let Some(pack) = &pack {
-            if points.scene.update_sites(pack, placements) {
-                points.selection_view = None;
-                points.shadow_dirty = true;
-            }
+    let now = time.elapsed_secs_f64();
+    let storage = points.storage_limit.load(Ordering::Acquire);
+    if !hero.is_pending() && !assets.is_pending() {
+        let layers = points.layer_limit.load(Ordering::Acquire);
+        let models_revision = points.models_revision;
+        if points.snapshots.update(&forest, &models.portraits, models_revision, now, (storage, layers)) {
+            points.selection_view = None;
+            points.shadow_dirty = true;
         }
     }
-    let now=time.elapsed_secs_f64();
-    let missing=points.required_templates.keys().any(|k|pack.as_ref().is_none_or(|p|!p.templates.contains_key(k)));
-    if missing&&points.pending.is_none()&&now>=points.next_build{
-        let keys:Vec<_>=points.required_templates.keys().copied().collect();
-        if keys!=points.requested{
-            let input:Vec<_>=points.required_templates.values().copied().collect();let portraits=models.portraits.clone();
-            let limit=points.storage_limit.load(Ordering::Acquire);let layers=points.layer_limit.load(Ordering::Acquire);
-            points.requested=keys;points.next_build=now+3.0;points.error=None;
-            points.pending=Some(AsyncComputeTaskPool::get().spawn(async move{
-                let inputs=input.into_iter().map(|(species,variant)|portraits.planet_input(species,variant)).collect();
-                Pack::build(inputs,limit,layers)
-            }));
-        }
-    }
-    let Some(pack)=pack else{return;};
+    let Some(snapshot) = points.snapshots.active() else { return };
+    let shadow_source = ShadowSource {
+        geometry: snapshot.geometry.id,
+        construction: snapshot.construction_revision(),
+    };
     points.eye=eye.to_array();
     points.active = true;
     if points.shadows{
         let sun=lights.iter().max_by(|a,b|a.0.illuminance.total_cmp(&b.0.illuminance))
             .map_or(Vec3::Y,|(_,t)|t.back().as_vec3()).normalize_or_zero();
-        if let Some(result)=points.shadow_task.as_mut().and_then(|task|block_on(poll_once(task))){
-            points.shadow_task = None;
-            if result.is_some() || points.shadow.is_some() {
+        if let Some((source, result)) = take_ready(&mut points.shadow_task) {
+            if source == shadow_source && (result.is_some() || points.shadow.is_some()) {
                 points.previous_shadow = points.shadow.take();
                 points.shadow = result.map(Arc::new);
                 points.shadow_changed_at = now;
@@ -157,10 +129,19 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
                 || sun.dot(Vec3::from_array(old.sun))<0.999
         });
         if points.shadow_task.is_none()&&now>=points.shadow_next&&(stale||points.shadow_dirty){
-            let sites=points.scene.shadow_placements(eye.to_array());
-            let source=pack.clone();let eye=eye.to_array();let sun=sun.to_array();
-            points.shadow_next=now+1.5;points.shadow_dirty=false;
-            points.shadow_task=Some(AsyncComputeTaskPool::get().spawn(async move{PlanetShadow::bake(&source,sites,eye,sun)}));
+            let snapshot = points.snapshots.active().unwrap();
+            let geometry = snapshot.geometry.clone();
+            let hierarchy = snapshot.hierarchy.clone();
+            let eye = eye.to_array();
+            let sun = sun.to_array();
+            points.shadow_next = now + 1.5;
+            points.shadow_dirty = false;
+            points.shadow_task = Some(AsyncComputeTaskPool::get().spawn(async move {
+                let _span = trace_span!("point_forest.build_shadow").entered();
+                let sites = hierarchy.shadow_placements(eye);
+                drop(hierarchy);
+                (shadow_source, PlanetShadow::bake(geometry.pack(), sites, eye, sun))
+            }));
         }
     }
     let cam=IgorCamera{position:eye.to_array(),forward:(rotation*Vec3::NEG_Z).to_array(),
@@ -168,7 +149,7 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
         focal:view.focal,width:size.x.max(1),height:size.y.max(1),reach,planet_radius:super::RADIUS};
     let budget=u64::from(points.budget);
     // Each job reserves 64 * 8 bytes of projection cache, including padding.
-    let max_jobs=(points.storage_limit.load(Ordering::Acquire)/512).min(180_000);
+    let max_jobs=(storage/512).min(180_000);
     let key = SelectionView {
         eye: eye.to_array(), rotation, viewport: size, focal: view.focal, reach, max_jobs,
     };
@@ -176,7 +157,7 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
     if same_view && points.stable_frames >= LOD_SETTLE_FRAMES {
         return;
     }
-    let out = points.scene.select(&pack, cam, BASE_LOD_PIXELS, budget, max_jobs);
+    let out = points.snapshots.select(cam, BASE_LOD_PIXELS, budget, max_jobs);
     let same_threshold = points.selection.as_ref().is_some_and(|old| old.threshold == out.threshold);
     points.stable_frames = if out.threshold == BASE_LOD_PIXELS {
         LOD_SETTLE_FRAMES
@@ -186,8 +167,7 @@ fn select_points(mut points:ResMut<PointForest>,forest:Res<ForestStream>,models:
         0
     };
     points.selection_view = Some(key);
-    if !out.budget_met {points.error=Some("point budget exceeded".into());}
-    else if points.error.as_deref()==Some("point budget exceeded"){points.error=None;}
+    points.budget_exceeded = !out.budget_met;
     points.selection = Some(Arc::new(out));
 }
 pub(super) fn install(app:&mut App) {
@@ -239,12 +219,24 @@ fn update_overlay(forest:Res<PointForest>,time:Res<Time>,mut elapsed:Local<f32>,
         3=>"unsupported view/limits",4=>"ready",_=>"unknown",
     };
     let selection = forest.selection.as_deref().filter(|_| forest.active);
+    let snapshot = forest.snapshots.active();
+    let build_status = if forest.snapshots.baking_geometry() {
+        "baking original geometry"
+    } else if let Some(error) = &forest.snapshots.geometry_error {
+        error
+    } else if forest.budget_exceeded {
+        "point budget exceeded"
+    } else if forest.snapshots.rebuilding() {
+        "building hierarchy"
+    } else {
+        ""
+    };
     let msg=format!("IGOR HIERARCHY | {status} | {} instances ({} clusters) / {} / {} points ({} UV) | {} covered / {} sites | {} templates | LOD {:.2}px | {} GPU trees | shadows:{} | {}",
         selection.map_or(0,|s|s.instances.len()),selection.map_or(0,|s|s.clusters),selection.map_or(0,|s|s.points),forest.budget,selection.map_or(0,|s|s.raw_points),
-        selection.map_or(0,|s|s.covered),forest.candidates,forest.pack.as_ref().map_or(0,|p|p.templates.len()),
+        selection.map_or(0,|s|s.covered),snapshot.map_or(0, |s| s.candidates),snapshot.map_or(0, |s| s.geometry.pack().templates.len()),
         selection.map_or(BASE_LOD_PIXELS,|s|s.threshold),forest.submitted.load(Ordering::Acquire),
         if !forest.shadows{"off"}else if forest.shadow.is_some(){"on"}else{"baking"},
-        if forest.pending.is_some(){"baking original geometry"}else{forest.error.as_deref().unwrap_or("")});
+        build_status);
     if let Ok(mut text)=overlay.single_mut(){text.0=msg;}
 }
 fn sampleable_camera_depth(mut cameras:Query<&mut Camera3d,With<WorldCamera>>) {
@@ -257,7 +249,7 @@ fn sampleable_camera_depth(mut cameras:Query<&mut Camera3d,With<WorldCamera>>) {
 
 #[derive(Resource)]
 struct ExtractedForest{
-    pack:Option<Arc<Pack>>,ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
+    pack:Option<Arc<Geometry>>,ready:Arc<AtomicBool>,status:Arc<AtomicU32>,submitted:Arc<AtomicU32>,
     storage_limit:Arc<AtomicU64>,layer_limit:Arc<AtomicU32>,selection:Option<Arc<PlanetSelection>>,
     shadow:Option<Arc<PlanetShadow>>,previous_shadow:Option<Arc<PlanetShadow>>,shadow_blend:f32,eye:[f64;3],
 }
@@ -266,7 +258,8 @@ struct PointCamera{forward:Vec3,right:Vec3,up:Vec3,sun:Vec3,sunlight:Vec3,elapse
 fn extract_frame(mut commands:Commands,forest:Extract<Res<PointForest>>,
     cameras:Extract<Query<(RenderEntity,&Transform,&Projection,&Exposure),With<WorldCamera>>>,
     lights:Extract<Query<(&DirectionalLight,&Transform)>>,time:Extract<Res<Time>>){
-    commands.insert_resource(ExtractedForest{pack:forest.pack.clone(),ready:forest.ready.clone(),status:forest.status.clone(),
+    let pack = forest.snapshots.active().map(|snapshot| snapshot.geometry.clone());
+    commands.insert_resource(ExtractedForest{pack,ready:forest.ready.clone(),status:forest.status.clone(),
         submitted:forest.submitted.clone(),storage_limit:forest.storage_limit.clone(),layer_limit:forest.layer_limit.clone(),
         selection:forest.selection.clone().filter(|_|forest.active),shadow:forest.shadow.clone(),
         previous_shadow:forest.previous_shadow.clone(),
@@ -358,10 +351,12 @@ fn init_pipelines(mut commands:Commands,assets:Res<AssetServer>,shader:Res<Point
     let temporal = temporal::Pipeline::new(&cache, shader.2.clone());
     commands.insert_resource(Pipelines{compute,composite,views,clear,depth,owner,resolve,temporal});
 }
-struct GpuPack{source:Arc<Pack>,raw:RawBufferVec<[u32;4]>,lod:RawBufferVec<[u32;4]>,
+struct GpuPack{id:u64,raw:RawBufferVec<[u32;4]>,lod:RawBufferVec<[u32;4]>,
     patches:RawBufferVec<[u32;32]>,materials:RawBufferVec<[u32;16]>,_texture:Texture,color:TextureView,normal:TextureView,sampler:Sampler}
 impl GpuPack{
-    fn upload(pack:Arc<Pack>,device:&RenderDevice,queue:&RenderQueue)->Self{
+    fn upload(geometry:&Geometry,device:&RenderDevice,queue:&RenderQueue)->Self{
+        let _span = trace_span!("point_forest.upload_geometry_pack").entered();
+        let pack = geometry.pack();
         let mut raw=RawBufferVec::new(BufferUsages::STORAGE);raw.extend(pack.raw.iter().copied());if pack.raw.is_empty(){raw.push([0;4]);}raw.write_buffer(device,queue);
         let mut lod=RawBufferVec::new(BufferUsages::STORAGE);lod.extend(pack.lod.iter().copied());if pack.lod.is_empty(){lod.push([0;4]);}lod.write_buffer(device,queue);
         let mut patches=RawBufferVec::new(BufferUsages::STORAGE);patches.extend(pack.patches.iter().copied());if pack.patches.is_empty(){patches.push([0;32]);}patches.write_buffer(device,queue);
@@ -378,7 +373,7 @@ impl GpuPack{
         let make=|format|texture.create_view(&TextureViewDescriptor{format:Some(format),dimension:Some(TextureViewDimension::D2Array),..default()});
         let color=make(TextureFormat::Rgba8UnormSrgb);let normal=make(TextureFormat::Rgba8Unorm);
         let sampler=device.create_sampler(&SamplerDescriptor{min_filter:FilterMode::Linear,mag_filter:FilterMode::Linear,..default()});
-        Self{source:pack,raw,lod,patches,materials,_texture:texture,color,normal,sampler}
+        Self{id:geometry.id,raw,lod,patches,materials,_texture:texture,color,normal,sampler}
     }
 }
 struct GpuShadow {
@@ -486,7 +481,15 @@ fn render_points(view:ViewQuery<(Entity,&PointCamera,&ExtractedView,&ViewTarget,
         forest.submitted.store(0,Ordering::Release);
         return;
     };
-    if state.pack.as_ref().is_none_or(|old|!Arc::ptr_eq(&old.source,pack)){state.pack=Some(GpuPack::upload(pack.clone(),&device,&queue));}
+    if state.pack.as_ref().is_none_or(|old| old.id != pack.id) {
+        let gpu = GpuPack::upload(pack, &device, &queue);
+        if let Some(old) = state.pack.replace(gpu) {
+            AsyncComputeTaskPool::get().spawn(async move {
+                let _span = trace_span!("point_forest.drop_gpu_geometry_pack").entered();
+                drop(old);
+            }).detach();
+        }
+    }
     if state.selection.as_ref().is_none_or(|old|!Arc::ptr_eq(old,selection)) {
         state.trees.clear();
         state.trees.extend(selection.instances.iter().copied());

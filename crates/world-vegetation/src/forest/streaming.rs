@@ -7,6 +7,7 @@ use std::{
 use bevy::{
     camera::primitives::Aabb,
     light::NotShadowCaster,
+    log::trace,
     math::DVec3,
     prelude::*,
     tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
@@ -41,7 +42,13 @@ const RETIREMENTS_PER_FRAME: usize = 34;
 const MAX_BATCH_UPLOADS: usize = 4;
 const MAX_BATCH_RETIREMENTS: usize = 12;
 
-type Sites = Arc<[Site]>;
+pub(super) type Sites = Arc<[Site]>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PointRevision {
+    pub sites: u64,
+    pub construction: u64,
+}
 
 struct Leaf {
     key: PatchKey,
@@ -141,16 +148,22 @@ pub(super) struct StreamStats {
 }
 
 impl ForestStream {
-    pub(super) fn point_revision(&self) -> u64 {
-        self.point_revision
+    pub(super) fn point_revision(&self) -> PointRevision {
+        PointRevision {
+            sites: self.point_revision,
+            construction: self.construction_revision,
+        }
     }
 
-    // The compute renderer consumes the canonical placement arrays directly.
-    // No ECS render entity or billboard has to exist for a tree to be drawn.
-    pub(super) fn point_sites(&self) -> impl Iterator<Item=Site> + '_ {
-        self.nodes.values().flat_map(|node| &node.leaves)
-            .filter_map(|leaf| leaf.sites.as_deref())
-            .flat_map(|sites| sites.iter().copied())
+    // A worker can read the canonical placements after the stream moves on.
+    pub(super) fn point_site_batches(&self) -> Vec<Sites> {
+        self.nodes
+            .values()
+            .flat_map(|node| &node.leaves)
+            .filter_map(|leaf| leaf.sites.as_ref())
+            .filter(|sites| !sites.is_empty())
+            .cloned()
+            .collect()
     }
 
     pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
@@ -235,6 +248,11 @@ impl ForestStream {
         });
         if removed_sites {
             self.point_revision += 1;
+            trace!(
+                point_revision = self.point_revision,
+                cause = "sites_retired",
+                "Forest stream point revision changed"
+            );
         }
         self.order.clear();
         for (_, key, location) in candidates {
@@ -286,6 +304,11 @@ impl ForestStream {
         }
         if added_sites {
             self.point_revision += 1;
+            trace!(
+                point_revision = self.point_revision,
+                cause = "sites_arrived",
+                "Forest stream point revision changed"
+            );
         }
         let mut budget = PLACEMENT_JOBS.saturating_sub(pending);
         let pool = AsyncComputeTaskPool::get();
@@ -595,6 +618,12 @@ pub(super) fn stream(
     if forest.construction_revision != heights.construction_revision() {
         forest.construction_revision = heights.construction_revision();
         forest.point_revision += 1;
+        trace!(
+            point_revision = forest.point_revision,
+            construction_revision = forest.construction_revision,
+            cause = "construction_changed",
+            "Forest stream point revision changed"
+        );
         let mut old_nodes = std::mem::take(&mut forest.nodes);
         let mut retiring = std::mem::take(&mut forest.retiring);
         let mut retiring_batches = std::mem::take(&mut forest.retiring_batches);
