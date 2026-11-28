@@ -15,7 +15,7 @@ use world_core::runtime::WorldAssets;
 
 use super::{
     library, textures, FoliageMaterial, ForestModels, ModelLod, Species, VariantModels, Wind,
-    WoodLod, BROADLEAF_TRANSMISSION,
+    WoodLod, ATTRIBUTE_TREE_WIND, BROADLEAF_TRANSMISSION,
 };
 
 const MAX_PENDING_PREFABS: usize = 8;
@@ -248,7 +248,7 @@ fn build_variant(
             })
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0; 4]; weights.len()]);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, weights);
+        mesh.insert_attribute(ATTRIBUTE_TREE_WIND, weights);
         ModelLod::from_parts(Some(wood), leaves, leaf_material.clone(), bounds)
     };
     Some(VariantModels {

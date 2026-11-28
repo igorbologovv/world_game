@@ -14,7 +14,8 @@ use bevy::{
 };
 
 use super::{
-    textures, FoliageMaterial, ForestModels, ModelLod, Wind, WoodLod, BROADLEAF_TRANSMISSION,
+    textures, FoliageMaterial, ForestModels, ModelLod, Wind, WoodLod, ATTRIBUTE_TREE_WIND,
+    BROADLEAF_TRANSMISSION,
 };
 
 pub(super) const ROOT_SINK: f64 = 0.16;
@@ -144,8 +145,7 @@ impl OakPrimitives {
         for (level, leaves) in self.leaves.iter().enumerate() {
             let mut mesh = meshes.get_mut(leaves)?;
             let foliage_bounds = mesh.get_aabb()?;
-            // The existing foliage shader uses a color and a second UV set.
-            // Prepare the imported mesh once so every oak can share it.
+            // Prepare the foliage vertex data once so every oak can share it.
             let Some(VertexAttributeValues::Float32x3(positions)) =
                 mesh.attribute(Mesh::ATTRIBUTE_POSITION)
             else {
@@ -159,7 +159,7 @@ impl OakPrimitives {
                 })
                 .collect();
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0; 4]; wind.len()]);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, wind);
+            mesh.insert_attribute(ATTRIBUTE_TREE_WIND, wind);
             drop(mesh); // Release the AssetMut guard before reading other meshes.
 
             let wood = self.wood.get(level).and_then(|handle| {
@@ -389,7 +389,8 @@ mod tests {
                     let wood = meshes.get(&lod.wood.as_ref().unwrap().mesh).unwrap();
                     assert_trunk_material_basis(wood);
                     assert!(lod.wood.is_some());
-                    assert!(leaves.contains_attribute(Mesh::ATTRIBUTE_UV_1));
+                    assert!(leaves.contains_attribute(ATTRIBUTE_TREE_WIND));
+                    assert!(!wood.contains_attribute(ATTRIBUTE_TREE_WIND));
                     assert!(leaves.contains_attribute(Mesh::ATTRIBUTE_COLOR));
 
                     let material = foliage_materials.get(&lod.foliage_material).unwrap();

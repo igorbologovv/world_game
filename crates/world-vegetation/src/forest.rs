@@ -17,7 +17,7 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::primitives::{Aabb, MeshAabb},
     math::DVec3,
-    mesh::MeshVertexBufferLayoutRef,
+    mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef},
     pbr::{
         ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
         MaterialPlugin,
@@ -28,6 +28,7 @@ use bevy::{
         mesh::Indices,
         render_resource::{
             AsBindGroup, PrimitiveTopology, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+            VertexFormat,
         },
     },
     shader::{ShaderDefVal, ShaderRef},
@@ -76,6 +77,10 @@ impl MaterialExtension for Wind {
 
 type HybridMaterial = ExtendedMaterial<StandardMaterial, HybridWind>;
 
+// Foliage displacement amplitude and phase in the hybrid tree vertex shaders.
+const ATTRIBUTE_TREE_WIND: MeshVertexAttribute =
+    MeshVertexAttribute::new("Tree_Wind", 954_572_832, VertexFormat::Float32x2);
+
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
 struct HybridWind {
     #[uniform(100)]
@@ -116,8 +121,11 @@ impl MaterialExtension for HybridWind {
                 .shader_defs
                 .push(ShaderDefVal::Bool("HYBRID_MORPH".into(), true));
         }
-        let wind = layout.0.contains(Mesh::ATTRIBUTE_UV_1);
-        if wind {
+        if layout.0.contains(ATTRIBUTE_TREE_WIND) {
+            let wind = layout
+                .0
+                .get_layout(&[ATTRIBUTE_TREE_WIND.at_shader_location(13)])?;
+            vertex.buffers[0].attributes.extend(wind.attributes);
             vertex
                 .shader_defs
                 .push(ShaderDefVal::Bool("HYBRID_WIND".into(), true));
@@ -710,8 +718,8 @@ impl MeshBuilder {
         }
     }
 
-    fn finish_canopy(mut self, variant: f32) -> Mesh {
-        self.wind = self
+    fn finish_canopy(self, variant: f32) -> Mesh {
+        let wind: Vec<_> = self
             .positions
             .iter()
             .map(|&[x, y, z]| {
@@ -719,7 +727,9 @@ impl MeshBuilder {
                 [weight, variant * 1.8 + x * 0.21 + z * 0.17 + y * 0.09]
             })
             .collect();
-        self.finish()
+        let mut mesh = self.finish();
+        mesh.insert_attribute(ATTRIBUTE_TREE_WIND, wind);
+        mesh
     }
 
     fn finish(self) -> Mesh {
@@ -1000,6 +1010,8 @@ fn leaf_cluster(
 
 #[cfg(test)]
 mod tests {
+    use bevy::mesh::VertexAttributeValues;
+
     use super::*;
 
     #[test]
@@ -1059,6 +1071,23 @@ mod tests {
             let (wood, leaves) = generate_tree(species, 0);
             let count = (wood.indices.len() + leaves.indices.len()) / 3;
             assert!(count < 6000, "{species:?} has {count} triangles");
+        }
+    }
+
+    #[test]
+    fn procedural_tree_wind_is_limited_to_foliage() {
+        for species in Species::ALL {
+            let (wood, leaves) = generate_tree(species, 0);
+            let leaves = leaves.finish_canopy(0.0);
+            let Some(VertexAttributeValues::Float32x2(wind)) =
+                leaves.attribute(ATTRIBUTE_TREE_WIND)
+            else {
+                panic!("{species:?} foliage should have tree wind data");
+            };
+            assert_eq!(wind.len(), leaves.count_vertices());
+            assert!(wind.iter().any(|[weight, _]| *weight > 0.0));
+            assert!(!leaves.contains_attribute(Mesh::ATTRIBUTE_UV_1));
+            assert!(!wood.finish().contains_attribute(ATTRIBUTE_TREE_WIND));
         }
     }
 }

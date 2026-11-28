@@ -22,6 +22,7 @@ import bevy_pbr::render::pbr_prepass_functions::calculate_motion_vector;
 fn vertex(
     input: Vertex,
     @if(HYBRID_MORPH) @location(12) morph: vec4<f32>,
+    @if(HYBRID_WIND) @location(13) wind: vec2<f32>,
 ) -> VertexOutput {
     let mesh = decompress_vertex(input, input.instance_index);
     let world = get_world_from_local(mesh.instance_index);
@@ -30,8 +31,8 @@ fn vertex(
     let phase = hybrid_phase(mesh.instance_index);
     @if(HYBRID_MORPH)
     position = hybrid_position(position, morph.xyz, phase);
-    @if(HYBRID_WIND && VERTEX_UVS_B)
-    position = hybrid_wind(position, mesh.uv_b, globals.time);
+    @if(HYBRID_WIND)
+    position = hybrid_wind(position, wind, globals.time);
     var out: VertexOutput;
     out.world_position = world * vec4(position, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);

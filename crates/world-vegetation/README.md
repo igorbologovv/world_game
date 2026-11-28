@@ -8,6 +8,9 @@ the same placement data.
 
 ## Hybrid tree renderer
 
+Tree foliage carries wind amplitude and phase in a dedicated vertex attribute.
+Bark stays stationary in the wind, and both mesh parts retain their texture UVs.
+
 The `igor_renderer` Rust library builds two spatial mesh proxies from each
 LOD0 model. It simplifies wood and reduces foliage using alpha-tested
 coverage measured from multiple directions. The shared meshes keep the
