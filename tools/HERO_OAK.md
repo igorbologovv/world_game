@@ -47,23 +47,13 @@ blender -b --python build_hero_oak.py -- --output ./oak_variant_2 --seed 18203
 
 ## Bevy runtime
 
-The client loads three meshes from `assets/models/hero_oak/`. The runtime
-mesh budgets are 33,524, 17,803, and 14,280 triangles. The original generator
-also exports cross cards for standalone previews. The client uses the shared
-multi-view atlas for both leaf and parent forest batches.
-
-To update the runtime tree, install the regenerated canonical
-`oak_lod0.glb`, then rebuild the simplified GLBs and the atlas.
-
-```sh
-blender -b --python-exit-code 1 --python tools/build_tree_lods.py
-cargo test --locked -p world-vegetation bake_tree_impostors -- --ignored
-```
-
-The runtime mesh LODs share bark and foliage textures, foliage clips at 0.46,
-and the foliage shader uses the same wind weights for each mesh level.
-See the [vegetation crate](../crates/world-vegetation/README.md) for distance
-bands and verification commands.
+The client loads `assets/models/hero_oak/oak_lod0.glb`. To update the
+runtime model, install a regenerated LOD0 export. The hybrid renderer
+builds its medium and far proxies from that mesh and shares the bark and
+foliage textures across levels. Foliage clips at 0.46 and uses the same
+wind weights during the transitions. See the
+[vegetation crate](../crates/world-vegetation/README.md) for distance bands
+and verification commands.
 
 ## Notes
 

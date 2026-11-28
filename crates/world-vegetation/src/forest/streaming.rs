@@ -1,201 +1,131 @@
-//! Bounded chunk discovery and placement, asynchronous mesh baking, and tier handoff.
+//! Streams canonical sites and attaches the shared hybrid meshes to the planet.
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
 use bevy::{
-    camera::primitives::Aabb,
-    light::NotShadowCaster,
-    log::trace,
+    camera::{
+        primitives::{Frustum, Sphere},
+        visibility::VisibilityRange,
+    },
+    light::CascadeShadowConfig,
     math::DVec3,
+    mesh::MeshTag,
     prelude::*,
     tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
 };
+use igor_renderer::Detail;
 use world_core::{
     planet::RADIUS,
-    runtime::{
-        GridTransform, PlanetRoot, ReferenceFrame, ReferenceFrames, WorldAssets, WorldCamera,
-    },
+    runtime::{GridTransform, PlanetRoot, ReferenceFrames, WorldCamera},
     SurfaceHeights,
 };
 
 use super::{
-    hero_oak::HeroOakAssets,
-    impostor,
-    lod::{coverage, fade_step, quantize, spawn_tree, VegetationSettings, View},
-    placement::{NodeKey, PatchKey, Site, PATCH_METERS},
-    proxy::{ProxyGeometry, ProxyMaterial, ProxyMesh, ProxyUniform, CHILD_SLOTS},
-    tree_assets::TreeAssets,
-    within_horizon, ForestClearing, ForestModels,
+    hybrid::{HybridModels, Model},
+    lod::{VegetationSettings, View},
+    placement::{NodeKey, PatchKey, Site},
+    within_horizon, CoconutPalm, ForestClearing, Species,
 };
 
 const MAX_NODES: usize = 112;
 const NODE_ALLOWANCE: f32 = 480.0;
 const DISCOVERY_INTERVAL: f64 = 0.16;
 const PLACEMENT_JOBS: usize = 12;
-const PARENT_JOBS: usize = 3;
-const LEAF_JOBS: usize = 5;
-const MAX_DETAILS: usize = 300;
-const SPAWNS_PER_FRAME: usize = 26;
-const RETIREMENTS_PER_FRAME: usize = 34;
-const MAX_BATCH_UPLOADS: usize = 4;
-const MAX_BATCH_RETIREMENTS: usize = 12;
-// A stalled or inactive consumer can catch up with one full snapshot.
-const MAX_POINT_PATCH_CHANGES: usize = 4096;
+const SPAWNS_PER_FRAME: usize = 384;
+const CELL_METERS: f64 = 32.0;
 
 pub(super) type Sites = Arc<[Site]>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PointRevision {
-    pub sites: u64,
-    pub construction: u64,
-}
-
-pub(super) struct PointSiteChanges {
-    pub reset: bool,
-    pub patches: Vec<(PatchKey, Option<Sites>)>,
-}
-
-fn mark_point_patch(dirty: &mut Option<HashSet<PatchKey>>, key: PatchKey) {
-    if let Some(keys) = dirty {
-        keys.insert(key);
-        if keys.len() > MAX_POINT_PATCH_CHANGES {
-            *dirty = None;
-        }
-    }
-}
 
 struct Leaf {
     key: PatchKey,
     anchor: DVec3,
     sites: Option<Sites>,
     placement: Option<Task<Sites>>,
-    impostor: MeshState,
-    trees: Vec<Entity>,
-    coverage: f32,
-    detail: f32,
+    trees: Vec<Tree>,
 }
 
 struct Node {
     anchor: DVec3,
     leaves: Vec<Leaf>,
-    parent: MeshState,
-    arrival: f32,
 }
 
-struct Batch {
-    entity: Entity,
-    material: Handle<ProxyMaterial>,
-    bounds: Aabb,
-}
-
-#[derive(Default)]
-enum MeshState {
-    #[default]
-    Missing,
-    Pending(Task<Option<ProxyGeometry>>),
-    Empty,
-    Ready(Batch),
-}
-
-impl MeshState {
-    fn ready(&self) -> Option<&Batch> {
-        match self {
-            Self::Ready(batch) => Some(batch),
-            _ => None,
-        }
-    }
-
-    fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-
-    fn retire(&mut self, commands: &mut Commands, retiring: &mut Vec<Entity>) {
-        // Dropping a pending Bevy task cancels undispatched work.
-        if let Self::Ready(batch) = std::mem::take(self) {
-            commands.entity(batch.entity).insert(Visibility::Hidden);
-            retiring.push(batch.entity);
-        }
-    }
-
-    fn poll(&mut self) -> Option<Option<ProxyGeometry>> {
-        match self {
-            Self::Pending(task) => block_on(poll_once(task)),
-            _ => None,
+impl Node {
+    fn despawn(&self, commands: &mut Commands) {
+        for tree in self.leaves.iter().flat_map(|leaf| &leaf.trees) {
+            tree.despawn(commands);
         }
     }
 }
 
-struct ProxyAtlas {
-    colors: Handle<Image>,
-    normals: Handle<Image>,
-    frames: impostor::Frames,
+struct Tree {
+    parts: Option<[Option<Entity>; 2]>,
+    center: DVec3,
+    radius: f32,
+    cell_center: DVec3,
+    rank: f32,
+    detail: Option<Detail>,
+    phase: u32,
+}
+
+impl Tree {
+    fn new(site: Site, model: &Model, index: usize, key: PatchKey, anchor: DVec3) -> Self {
+        let up = anchor.normalize();
+        let (east, north) = super::tangent_basis(up);
+        let offset = site.position - anchor;
+        let cell = [offset.dot(east), offset.dot(north)].map(|v| (v / CELL_METERS).floor() as i32);
+        let cell_center = anchor
+            + east * ((f64::from(cell[0]) + 0.5) * CELL_METERS)
+            + north * ((f64::from(cell[1]) + 0.5) * CELL_METERS)
+            + up * offset.dot(up);
+        let id = (key.0 as u32).wrapping_mul(0x9e3779b9)
+            ^ (key.1 as u32).wrapping_mul(0x85ebca6b)
+            ^ index as u32;
+        let center = site.position
+            + (site.rotation() * Vec3::from(model.bounds.center) * site.scale).as_dvec3();
+        Self {
+            parts: None,
+            center,
+            radius: model.bounds.half_extents.length() * site.scale,
+            cell_center,
+            rank: igor_renderer::rank(id, cell),
+            detail: None,
+            phase: 0,
+        }
+    }
+
+    fn despawn(&self, commands: &mut Commands) {
+        for entity in self.parts.iter().flatten().flatten() {
+            commands.entity(*entity).despawn();
+        }
+    }
 }
 
 #[derive(Resource, Default)]
 pub(super) struct ForestStream {
     construction_revision: u64,
-    point_revision: u64,
-    // None requests a complete capture. Otherwise this holds only the latest dirty keys.
-    point_dirty: Option<HashSet<PatchKey>>,
     nodes: HashMap<NodeKey, Node>,
     order: Vec<NodeKey>,
-    mask: HashMap<PatchKey, (f32, f32)>,
-    retiring: Vec<Entity>,
-    retiring_batches: Vec<Entity>,
-    atlas: Option<ProxyAtlas>,
-    atlas_task: Option<Task<impostor::Atlas>>,
-    next_debug_log: f64,
     next_plan: f64,
     last_eye: Option<DVec3>,
     last_view: DVec3,
     settings_extent: f32,
+    next_report: f64,
     pub stats: StreamStats,
 }
 
 #[derive(Default)]
 pub(super) struct StreamStats {
     pub nodes: usize,
-    pub retirement_queue: usize,
     pub unsampled: usize,
-    pub parents: usize,
-    pub impostors: usize,
     pub jobs: usize,
-    pub trees: usize,
+    pub levels: [usize; 3],
+    pub blends: usize,
+    pub triangles: usize,
 }
 
 impl ForestStream {
-    pub(super) fn point_revision(&self) -> PointRevision {
-        PointRevision {
-            sites: self.point_revision,
-            construction: self.construction_revision,
-        }
-    }
-
-    // Capture changed batches by stable key. A worker can keep reading the Arc after eviction.
-    pub(super) fn take_point_changes(&mut self, force_reset: bool) -> PointSiteChanges {
-        let dirty = self.point_dirty.replace(HashSet::new());
-        if let Some(keys) = dirty.filter(|_| !force_reset) {
-            let patches = keys.into_iter().map(|key| {
-                let sites = self.nodes.get(&key.parent())
-                    .and_then(|node| node.leaves.iter().find(|leaf| leaf.key == key))
-                    .and_then(|leaf| leaf.sites.as_ref())
-                    .filter(|sites| !sites.is_empty())
-                    .cloned();
-                (key, sites)
-            }).collect();
-            PointSiteChanges { reset: false, patches }
-        } else {
-            let patches = self.nodes.values().flat_map(|node| &node.leaves)
-                .filter_map(|leaf| {
-                    let sites = leaf.sites.as_ref().filter(|sites| !sites.is_empty())?;
-                    Some((leaf.key, Some(sites.clone())))
-                }).collect();
-            PointSiteChanges { reset: true, patches }
-        }
-    }
-
     pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
         self.nodes
             .values()
@@ -212,10 +142,6 @@ impl ForestStream {
             .find(|leaf| leaf.key == key)?
             .sites
             .as_deref()
-    }
-
-    pub fn coverage(&self, patch: PatchKey) -> (f32, f32) {
-        self.mask.get(&patch).copied().unwrap_or_default()
     }
 
     fn plan(
@@ -263,30 +189,13 @@ impl ForestStream {
         candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         candidates.truncate(MAX_NODES);
         let wanted: HashSet<_> = candidates.iter().map(|&(_, key, _)| key).collect();
-        let mut removed_sites = false;
         self.nodes.retain(|key, node| {
             if wanted.contains(key) {
                 return true;
             }
-            node.parent.retire(commands, &mut self.retiring_batches);
-            for leaf in &mut node.leaves {
-                if leaf.sites.as_ref().is_some_and(|sites| !sites.is_empty()) {
-                    removed_sites = true;
-                    mark_point_patch(&mut self.point_dirty, leaf.key);
-                }
-                leaf.impostor.retire(commands, &mut self.retiring_batches);
-                self.retiring.append(&mut leaf.trees);
-            }
+            node.despawn(commands);
             false
         });
-        if removed_sites {
-            self.point_revision += 1;
-            trace!(
-                point_revision = self.point_revision,
-                cause = "sites_retired",
-                "Forest stream point revision changed"
-            );
-        }
         self.order.clear();
         for (_, key, location) in candidates {
             self.order.push(key);
@@ -299,17 +208,12 @@ impl ForestStream {
                         anchor: anchor(heights, patch.center()),
                         sites: None,
                         placement: None,
-                        impostor: MeshState::Missing,
                         trees: Vec::new(),
-                        coverage: 0.0,
-                        detail: 0.0,
                     })
                     .collect();
                 Node {
                     anchor: location,
                     leaves,
-                    parent: MeshState::Missing,
-                    arrival: 0.0,
                 }
             });
         }
@@ -322,30 +226,16 @@ impl ForestStream {
         clearing: Option<&ForestClearing>,
     ) {
         let mut pending = 0;
-        let mut changed_sites = false;
         for leaf in self.nodes.values_mut().flat_map(|node| &mut node.leaves) {
             let ready = leaf
                 .placement
                 .as_mut()
                 .and_then(|task| block_on(poll_once(task)));
             if let Some(sites) = ready {
-                let old = leaf.sites.as_ref().filter(|old| !old.is_empty());
-                if old.map_or(!sites.is_empty(), |old| !Arc::ptr_eq(old, &sites)) {
-                    changed_sites = true;
-                    mark_point_patch(&mut self.point_dirty, leaf.key);
-                }
                 leaf.placement = None;
                 leaf.sites = Some(sites);
             }
             pending += usize::from(leaf.placement.is_some());
-        }
-        if changed_sites {
-            self.point_revision += 1;
-            trace!(
-                point_revision = self.point_revision,
-                cause = "sites_changed",
-                "Forest stream point revision changed"
-            );
         }
         let mut budget = PLACEMENT_JOBS.saturating_sub(pending);
         let pool = AsyncComputeTaskPool::get();
@@ -375,250 +265,9 @@ impl ForestStream {
             }
         }
     }
-
-    fn request_meshes(&mut self, eye: DVec3, impostor_range: f32, preload: f32) {
-        let Some(atlas) = &self.atlas else { return };
-        let frames = atlas.frames;
-        let pool = AsyncComputeTaskPool::get();
-        let mut parents = PARENT_JOBS.saturating_sub(
-            self.nodes
-                .values()
-                .filter(|node| matches!(node.parent, MeshState::Pending(_)))
-                .count(),
-        );
-        let mut leaves = LEAF_JOBS.saturating_sub(
-            self.nodes
-                .values()
-                .flat_map(|node| &node.leaves)
-                .filter(|leaf| matches!(leaf.impostor, MeshState::Pending(_)))
-                .count(),
-        );
-        for key in &self.order {
-            let node = self.nodes.get_mut(key).unwrap();
-            if parents > 0
-                && node.parent.is_missing()
-                && node.leaves.iter().all(|leaf| leaf.sites.is_some())
-            {
-                let children: Vec<_> = node
-                    .leaves
-                    .iter()
-                    .map(|leaf| leaf.sites.as_ref().unwrap().clone())
-                    .collect();
-                debug_assert!(children.len() <= CHILD_SLOTS);
-                let origin = node.anchor;
-                node.parent = MeshState::Pending(pool.spawn(async move {
-                    let mut mesh = ProxyMesh::default();
-                    for (slot, sites) in children.iter().enumerate() {
-                        for &site in sites.iter() {
-                            mesh.add(
-                                site,
-                                origin,
-                                slot,
-                                frames[impostor::tile(site.species, site.variant)],
-                            );
-                        }
-                    }
-                    mesh.finish()
-                }));
-                parents -= 1;
-            }
-            if leaves == 0 {
-                continue;
-            }
-            let reach = f64::from(impostor_range + preload.min(180.0));
-            for leaf in &mut node.leaves {
-                let Some(sites) = &leaf.sites else {
-                    continue;
-                };
-                if leaves == 0 || !leaf.impostor.is_missing() || leaf.anchor.distance(eye) > reach {
-                    continue;
-                }
-                if sites.is_empty() {
-                    leaf.impostor = MeshState::Empty;
-                    continue;
-                }
-                let sites = sites.clone();
-                let origin = leaf.anchor;
-                leaf.impostor = MeshState::Pending(pool.spawn(async move {
-                    let mut mesh = ProxyMesh::default();
-                    for &site in sites.iter() {
-                        mesh.add(
-                            site,
-                            origin,
-                            0,
-                            frames[impostor::tile(site.species, site.variant)],
-                        );
-                    }
-                    mesh.finish()
-                }));
-                leaves -= 1;
-            }
-        }
-    }
-
-    fn detail_requests(
-        &mut self,
-        commands: &mut Commands,
-        root: &PlanetRoot,
-        frame: &ReferenceFrame,
-        eye: DVec3,
-        band: Vec2,
-        step: f32,
-    ) {
-        let mut requests: Vec<_> = self
-            .nodes
-            .iter_mut()
-            .flat_map(|(&key, node)| {
-                node.leaves
-                    .iter_mut()
-                    .filter(|leaf| leaf.impostor.ready().is_some())
-                    .map(move |leaf| (eye.distance(leaf.anchor), key, leaf))
-            })
-            .collect();
-        requests.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.key.cmp(&b.2.key)));
-        let max_details = if super::point_forest::enabled() { 900 } else { MAX_DETAILS };
-        let mut admitted = 0;
-        let mut resident = requests
-            .iter()
-            .map(|(_, _, leaf)| leaf.trees.len())
-            .sum::<usize>()
-            + self.retiring.len();
-        let mut spawn_budget = SPAWNS_PER_FRAME;
-        for (distance, _, leaf) in requests {
-            let sites = leaf.sites.as_ref().unwrap();
-            let margin = PATCH_METERS * if leaf.trees.is_empty() { 0.79 } else { 0.95 };
-            let wanted =
-                distance <= f64::from(band.y) + margin && admitted + sites.len() <= max_details;
-            if wanted {
-                admitted += sites.len();
-                let begin = leaf.trees.len();
-                let count = sites
-                    .len()
-                    .saturating_sub(begin)
-                    .min(spawn_budget)
-                    .min(max_details.saturating_sub(resident));
-                for &site in &sites[begin..begin + count] {
-                    leaf.trees
-                        .push(spawn_tree(commands, root, frame, leaf.key, site));
-                }
-                spawn_budget -= count;
-                resident += count;
-            }
-            let target = if wanted && leaf.trees.len() == sites.len() {
-                1.0
-            } else {
-                0.0
-            };
-            leaf.detail = approach(leaf.detail, target, step);
-            if !wanted && leaf.detail == 0.0 {
-                self.retiring.append(&mut leaf.trees);
-            }
-        }
-    }
 }
-
 fn anchor(heights: &SurfaceHeights, direction: DVec3) -> DVec3 {
     direction * (RADIUS + heights.sample(direction).unwrap_or(0.0))
-}
-
-fn approach(from: f32, to: f32, step: f32) -> f32 {
-    from + (to - from).clamp(-step, step)
-}
-
-fn proxy_parameters(forest: Vec2, range: f32, band: Vec2, is_parent: bool) -> ProxyUniform {
-    ProxyUniform {
-        leaf: Vec4::new(0.0, 0.0, band.x, band.y),
-        forest: Vec4::new(forest.x, forest.y, 0.0, f32::from(u8::from(is_parent))),
-        impostor: Vec4::new(range * 0.78, range, 0.0, 0.0),
-        children: [Vec4::ZERO; CHILD_SLOTS / 4],
-    }
-}
-
-fn make_batch(
-    commands: &mut Commands,
-    root: &PlanetRoot,
-    frame: &ReferenceFrame,
-    geometry: ProxyGeometry,
-    anchor: DVec3,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ProxyMaterial>,
-    material: ProxyMaterial,
-) -> Option<Batch> {
-    let ProxyGeometry { mesh, bounds } = geometry;
-    let (cell, translation) = frame.translation_to_grid(anchor);
-    let material = materials.add(material);
-    let entity = root
-        .spawn(
-            commands,
-            (
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(material.clone()),
-                Transform::from_translation(translation),
-                Visibility::Hidden,
-                bounds,
-                NotShadowCaster,
-            ),
-        )
-        .insert(cell)
-        .id();
-    Some(Batch {
-        entity,
-        material,
-        bounds,
-    })
-}
-
-struct RenderAssets<'a> {
-    meshes: &'a mut Assets<Mesh>,
-    materials: &'a mut Assets<ProxyMaterial>,
-}
-
-fn upload(
-    commands: &mut Commands,
-    root: &PlanetRoot,
-    frame: &ReferenceFrame,
-    state: &mut MeshState,
-    anchor: DVec3,
-    assets: &mut RenderAssets,
-    material: impl FnOnce() -> ProxyMaterial,
-) -> bool {
-    let Some(ready) = state.poll() else {
-        return false;
-    };
-    *state = ready
-        .and_then(|mesh| {
-            make_batch(
-                commands,
-                root,
-                frame,
-                mesh,
-                anchor,
-                assets.meshes,
-                assets.materials,
-                material(),
-            )
-        })
-        .map_or(MeshState::Empty, MeshState::Ready);
-    matches!(state, MeshState::Ready(_))
-}
-
-fn show_batch(
-    commands: &mut Commands,
-    visibility: &mut Query<&mut Visibility, With<MeshMaterial3d<ProxyMaterial>>>,
-    batch: &Batch,
-    visible: bool,
-) {
-    let desired = if visible {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    if let Ok(mut current) = visibility.get_mut(batch.entity) {
-        current.set_if_neq(desired);
-    } else {
-        // A freshly uploaded batch is still in the command queue.
-        commands.entity(batch.entity).insert(desired);
-    }
 }
 
 pub(super) fn stream(
@@ -629,378 +278,229 @@ pub(super) fn stream(
     heights: Res<SurfaceHeights>,
     clearing: Option<Res<ForestClearing>>,
     cameras: Query<(Entity, GridTransform, &Camera, &Projection), With<WorldCamera>>,
+    lights: Query<(&DirectionalLight, &Transform, &CascadeShadowConfig), Without<WorldCamera>>,
     frames: ReferenceFrames,
+    models: Res<HybridModels>,
     mut forest: ResMut<ForestStream>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<ProxyMaterial>>,
-    mut models: ResMut<ForestModels>,
-    (world_assets, hero_loading, tree_loading): (
-        Res<WorldAssets>,
-        Res<HeroOakAssets>,
-        Res<TreeAssets>,
-    ),
-    mut visibility: Query<&mut Visibility, With<MeshMaterial3d<ProxyMaterial>>>,
 ) {
-    let Ok((entity, camera, view, projection)) = cameras.single() else {
+    let Ok((camera_entity, camera, view, projection)) = cameras.single() else {
         return;
     };
-    let Some(frame) = frames.parent_frame(entity) else {
+    let Some(planet_frame) = frames.parent_frame(camera_entity) else {
         return;
     };
-    let eye = frame.grid_position_double(&camera.cell, &camera.transform);
+    let eye = planet_frame.grid_position_double(&camera.cell, &camera.transform);
     let Some(up) = eye.try_normalize() else {
         return;
     };
+    let forest = &mut *forest;
     if forest.construction_revision != heights.construction_revision() {
         forest.construction_revision = heights.construction_revision();
-        forest.point_revision += 1;
-        forest.point_dirty = None;
-        trace!(
-            point_revision = forest.point_revision,
-            construction_revision = forest.construction_revision,
-            cause = "construction_changed",
-            "Forest stream point revision changed"
-        );
-        let mut old_nodes = std::mem::take(&mut forest.nodes);
-        let mut retiring = std::mem::take(&mut forest.retiring);
-        let mut retiring_batches = std::mem::take(&mut forest.retiring_batches);
-        for node in old_nodes.values_mut() {
-            node.parent.retire(&mut commands, &mut retiring_batches);
-            for leaf in &mut node.leaves {
-                leaf.impostor.retire(&mut commands, &mut retiring_batches);
-                retiring.append(&mut leaf.trees);
-            }
+        for node in std::mem::take(&mut forest.nodes).into_values() {
+            node.despawn(&mut commands);
         }
         forest.order.clear();
-        forest.mask.clear();
-        for entity in retiring.into_iter().chain(retiring_batches) {
-            commands.entity(entity).despawn();
-        }
+        forest.last_eye = None;
     }
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
-    let band = View::new(view, projection).impostor_band(&settings);
-    let range = settings.impostor_range.clamp(200.0, 600.0);
-    let forest_band = settings.proxy_range();
-    let forest_range = forest_band.y;
+    let band = settings.forest_band();
     let preload = settings.preload_margin.clamp(90.0, 420.0);
-    let step = fade_step(&time, &settings);
-    if super::point_forest::enabled() {
-        // Only placement/discovery runs in the pure point path. The atlas,
-        // proxy mesh jobs, individual mesh entities and fade masks are bypassed.
-        forest.plan(&mut commands,eye,up,forward,time.elapsed_secs_f64(),forest_range+preload,&heights);
-        forest.allocate_sites(&heights,eye,clearing.as_deref());
-        let (trees,unsampled,jobs)=forest.nodes.values().flat_map(|node|&node.leaves)
-            .fold((0usize,0usize,0usize),|(n,u,j),leaf|
-                (n+leaf.sites.as_ref().map_or(0,|s|s.len()),u+usize::from(leaf.sites.is_none()),j+usize::from(leaf.placement.is_some())));
-        forest.stats=StreamStats{nodes:forest.nodes.len(),trees,unsampled,jobs,..default()};
-        return;
-    }
-    // Build a single atlas after the authored LOD0 sources resolve. A baked
-    // fallback must never replace an authored crown after its handoff.
-    if forest.atlas.is_none()
-        && forest.atlas_task.is_none()
-        && !hero_loading.is_pending()
-        && !tree_loading.is_pending()
-    {
-        // The point renderer shares these Arc<Source> records. Moving the
-        // collection out permanently left it with only procedural fallbacks.
-        let portraits = if super::point_forest::enabled() {
-            models.portraits.clone()
-        } else {
-            std::mem::take(&mut models.portraits)
-        };
-        let directory = world_assets.directory().to_owned();
-        forest.atlas_task = Some(
-            AsyncComputeTaskPool::get()
-                .spawn(async move { impostor::load_or_bake(&directory, &portraits) }),
-        );
-    }
-    if let Some(atlas) = forest
-        .atlas_task
-        .as_mut()
-        .and_then(|task| block_on(poll_once(task)))
-    {
-        forest.atlas = Some(ProxyAtlas {
-            colors: images.add(atlas.colors),
-            normals: images.add(atlas.normals),
-            frames: atlas.frames,
-        });
-        forest.atlas_task = None;
-    }
-
+    let now = time.elapsed_secs_f64();
     forest.plan(
         &mut commands,
         eye,
         up,
         forward,
-        time.elapsed_secs_f64(),
-        forest_range + preload,
+        now,
+        band.y + preload,
         &heights,
     );
     forest.allocate_sites(&heights, eye, clearing.as_deref());
-    forest.request_meshes(eye, range, preload);
-    let retired = forest.retiring.len().saturating_sub(RETIREMENTS_PER_FRAME);
-    for tree in forest.retiring.drain(retired..) {
-        commands.entity(tree).despawn();
-    }
 
-    let retired_batches = forest
-        .retiring_batches
-        .len()
-        .saturating_sub(MAX_BATCH_RETIREMENTS);
-    for batch in forest.retiring_batches.drain(retired_batches..) {
-        commands.entity(batch).despawn();
-    }
-    let forest = &mut *forest;
-    forest.stats = StreamStats {
+    let mut stats = StreamStats {
         nodes: forest.nodes.len(),
-        retirement_queue: forest.retiring.len() + forest.retiring_batches.len(),
         ..default()
     };
-    let mut assets = RenderAssets {
-        meshes: &mut meshes,
-        materials: &mut materials,
+    let frustum = projection.compute_frustum(&GlobalTransform::from(Transform::from_rotation(
+        camera.transform.rotation,
+    )));
+    let shadows: Vec<_> = lights
+        .iter()
+        .filter(|(light, _, _)| light.shadow_maps_enabled)
+        .filter_map(|(_, transform, config)| {
+            Some((*transform.back(), config.bounds.last().copied()?))
+        })
+        .collect();
+    let view = View::new(view, projection);
+    let selection = settings.selection();
+    let elapsed = time.delta_secs().min(0.075);
+    let range = VisibilityRange {
+        start_margin: 0.0..0.0,
+        end_margin: band.x..band.y,
+        use_aabb: false,
     };
-    if let Some(atlas) = forest.atlas.as_ref() {
-        let mut uploads = MAX_BATCH_UPLOADS;
-        for key in &forest.order {
-            let node = forest.nodes.get_mut(key).unwrap();
-            for leaf in &mut node.leaves {
-                if uploads > 1
-                    && upload(
-                        &mut commands,
-                        &root,
-                        frame,
-                        &mut leaf.impostor,
-                        leaf.anchor,
-                        &mut assets,
-                        || ProxyMaterial {
-                            coverage: proxy_parameters(forest_band, range, band, false),
-                            atlas: atlas.colors.clone(),
-                            normals: atlas.normals.clone(),
-                        },
-                    )
-                {
-                    uploads -= 1;
-                }
-            }
-        }
-        for key in &forest.order {
-            if uploads == 0 {
-                break;
-            }
-            let node = forest.nodes.get_mut(key).unwrap();
-            if upload(
-                &mut commands,
-                &root,
-                frame,
-                &mut node.parent,
-                node.anchor,
-                &mut assets,
-                || ProxyMaterial {
-                    coverage: proxy_parameters(forest_band, range, band, true),
-                    atlas: atlas.colors.clone(),
-                    normals: atlas.normals.clone(),
-                },
-            ) {
-                uploads -= 1;
-            }
-        }
-    }
-    forest.detail_requests(&mut commands, &root, frame, eye, band, step);
-
-    forest.mask.clear();
+    let mut budget = SPAWNS_PER_FRAME;
     for key in &forest.order {
         let node = forest.nodes.get_mut(key).unwrap();
-        let mut uniform = proxy_parameters(forest_band, range, band, true);
-        for (slot, leaf) in node.leaves.iter_mut().enumerate() {
-            let distance = eye.distance(leaf.anchor) as f32;
-            let child_target = f32::from(u8::from(
-                leaf.impostor.ready().is_some() && distance < range + PATCH_METERS as f32,
-            ));
-            leaf.coverage = approach(leaf.coverage, child_target, step);
-            let child = coverage(quantize(leaf.coverage));
-            let detailed = coverage(quantize(leaf.detail));
-            uniform.children[slot / 4][slot % 4] = child;
-            if child != 0.0 && detailed != 0.0 {
-                forest.mask.insert(leaf.key, (child, detailed));
+        for leaf in &mut node.leaves {
+            stats.jobs += usize::from(leaf.placement.is_some());
+            let Some(sites) = &leaf.sites else {
+                stats.unsampled += 1;
+                continue;
+            };
+            if !models.ready() {
+                continue;
             }
-            if child == 0.0
-                && leaf.trees.is_empty()
-                && distance > range + preload.min(180.0) + 120.0
-                && !matches!(leaf.impostor, MeshState::Empty)
-            {
-                leaf.impostor
-                    .retire(&mut commands, &mut forest.retiring_batches);
+            let leaf_distance = eye.distance(leaf.anchor);
+            if leaf.trees.is_empty() && leaf_distance > f64::from(band.y) + 240.0 {
+                continue;
             }
-            if let Some(batch) = leaf.impostor.ready() {
-                if child != 0.0 {
-                    let new = Vec4::new(child, detailed, band.x, band.y);
-                    if assets
-                        .materials
-                        .get(batch.material.id())
-                        .is_some_and(|mat| {
-                            mat.coverage.leaf != new || mat.coverage.impostor != uniform.impostor
-                        })
-                    {
-                        if let Some(mut material) = assets.materials.get_mut(batch.material.id()) {
-                            material.coverage.leaf = new;
-                            material.coverage.impostor = uniform.impostor;
+            if leaf.trees.is_empty() {
+                leaf.trees = sites
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, site)| Tree::new(site, models.model(site), i, leaf.key, leaf.anchor))
+                    .collect();
+            }
+            for (&site, tree) in sites.iter().zip(&mut leaf.trees) {
+                let offset = tree.center - eye;
+                let distance = offset.length() as f32;
+                let resident = distance <= band.y + tree.radius + 12.0
+                    && potentially_visible(
+                        &frustum,
+                        offset.as_vec3(),
+                        distance,
+                        tree.radius,
+                        tree.parts.is_some(),
+                        &shadows,
+                    )
+                    && within_horizon(eye, tree.center, f64::from(tree.radius));
+                if !resident {
+                    if tree.parts.is_some() {
+                        tree.despawn(&mut commands);
+                        tree.parts = None;
+                        tree.detail = None;
+                    }
+                    continue;
+                }
+                if tree.parts.is_none() && budget == 0 {
+                    continue;
+                }
+                let pixels = view.pixels(2.0 * tree.radius, distance - tree.radius);
+                let cell_radius =
+                    CELL_METERS as f32 * std::f32::consts::FRAC_1_SQRT_2 + tree.radius;
+                let cell_pixels = view.pixels(
+                    2.0 * cell_radius,
+                    eye.distance(tree.cell_center) as f32 - cell_radius,
+                );
+                let phase =
+                    selection.select(&mut tree.detail, pixels, cell_pixels, tree.rank, elapsed);
+                let stage = phase.floor() as usize;
+                let tag = (phase.fract() * 65535.0).round() as u32;
+                let packed = tag | ((stage as u32) << 16);
+                let model = models.model(site);
+                let parts = [model.wood.as_ref(), Some(&model.leaves)];
+                stats.levels[stage] += 1;
+                stats.blends += usize::from(tag != 0);
+                stats.triangles += parts
+                    .iter()
+                    .flatten()
+                    .map(|part| part.triangles[stage])
+                    .sum::<usize>();
+                if let Some(entities) = tree.parts {
+                    if packed != tree.phase || settings.is_changed() {
+                        for (entity, part) in entities.into_iter().zip(parts) {
+                            let Some((id, part)) = entity.zip(part) else {
+                                continue;
+                            };
+                            let mut entity = commands.entity(id);
+                            if packed != tree.phase {
+                                entity.insert(MeshTag::new(tag));
+                                if stage != (tree.phase >> 16) as usize {
+                                    entity.insert(Mesh3d(part.meshes[stage].clone()));
+                                }
+                            }
+                            if settings.is_changed() {
+                                entity.insert(range.clone());
+                            }
                         }
                     }
-                }
-                show_batch(&mut commands, &mut visibility, batch, child != 0.0);
-                forest.stats.impostors += 1;
-            }
-            forest.stats.unsampled += usize::from(leaf.sites.is_none());
-            forest.stats.jobs += usize::from(leaf.placement.is_some())
-                + usize::from(matches!(leaf.impostor, MeshState::Pending(_)));
-            forest.stats.trees += leaf.trees.len();
-        }
-        forest.stats.jobs += usize::from(matches!(node.parent, MeshState::Pending(_)));
-        if let Some(batch) = node.parent.ready() {
-            node.arrival = (node.arrival + step).min(1.0);
-            uniform.forest.z = coverage(quantize(node.arrival));
-            let center = node.anchor + Vec3::from(batch.bounds.center).as_dvec3();
-            let radius = f64::from(batch.bounds.half_extents.length());
-            let in_range = eye.distance(center) - radius < f64::from(forest_range)
-                && within_horizon(eye, center, radius);
-            show_batch(&mut commands, &mut visibility, batch, in_range);
-            if in_range {
-                let changed = assets
-                    .materials
-                    .get(batch.material.id())
-                    .is_some_and(|mat| {
-                        mat.coverage.forest != uniform.forest
-                            || mat.coverage.children != uniform.children
-                            || mat.coverage.impostor != uniform.impostor
-                    });
-                if changed {
-                    if let Some(mut material) = assets.materials.get_mut(batch.material.id()) {
-                        material.coverage = uniform;
+                } else {
+                    let (cell, translation) = planet_frame.translation_to_grid(site.position);
+                    let transform = Transform::from_translation(translation)
+                        .with_rotation(site.rotation())
+                        .with_scale(Vec3::splat(site.scale));
+                    let mut ids = [None; 2];
+                    for (i, part) in parts.into_iter().enumerate() {
+                        let Some(part) = part else { continue };
+                        let mut entity = root.spawn(
+                            &mut commands,
+                            (
+                                transform,
+                                cell,
+                                part.bounds,
+                                range.clone(),
+                                MeshTag::new(tag),
+                                Mesh3d(part.meshes[stage].clone()),
+                                MeshMaterial3d(part.material.clone()),
+                            ),
+                        );
+                        if i == 1 {
+                            let name = super::library::asset(site.species, site.variant)
+                                .map_or_else(
+                                    || {
+                                        if site.species == Species::Jungle && site.variant == 1 {
+                                            "tree_part9/tree"
+                                        } else {
+                                            "Forest tree"
+                                        }
+                                    },
+                                    |asset| asset.path,
+                                );
+                            entity.insert(Name::new(name));
+                            if site.species == Species::Palm && site.variant == 0 {
+                                entity.insert(CoconutPalm);
+                            }
+                        }
+                        ids[i] = Some(entity.id());
                     }
+                    tree.parts = Some(ids);
+                    budget -= 1;
                 }
+                tree.phase = packed;
             }
-            forest.stats.parents += 1;
         }
     }
-    // Diagnose all stages of tree streaming, not only the empty-batch case:
-    // a resident batch can still be invisible due to its material or culling.
-    let now = time.elapsed_secs_f64();
-    if now >= forest.next_debug_log {
-        forest.next_debug_log = now + 5.0;
-        let (sampled, placements) = forest.nodes.values().flat_map(|node| &node.leaves).fold(
-            (0_usize, 0_usize),
-            |(sampled, placements), leaf| match leaf.sites.as_ref() {
-                Some(sites) => (sampled + 1, placements + sites.len()),
-                None => (sampled, placements),
-            },
-        );
-        let altitude = eye.length() - RADIUS - heights.sample(up).unwrap_or(0.0);
-        info!(
-            "Forest stream: nodes={} sampled_patches={} tree_sites={} parents={} impostors={} detail_entities={} jobs={} atlas={} atlas_baking={} hero_pending={} altitude={:.1}m",
-            forest.stats.nodes,
-            sampled,
-            placements,
-            forest.stats.parents,
-            forest.stats.impostors,
-            forest.stats.trees,
-            forest.stats.jobs,
-            forest.atlas.is_some(),
-            forest.atlas_task.is_some(),
-            hero_loading.is_pending(),
-            altitude,
-        );
+    if models.ready() && now >= forest.next_report {
+        forest.next_report = now + 5.0;
+        info!("Hybrid forest: LOD={:?} transitions={} resident_triangles={} nodes={} placement_jobs={}",
+              stats.levels, stats.blends, stats.triangles, stats.nodes, stats.jobs);
     }
+    forest.stats = stats;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn point_changes_coalesce_replacements_and_capture_eviction() {
-        let key = PatchKey(10, 20);
-        let site = Site {
-            position: DVec3::Y,
-            species: super::super::Species::Oak,
-            variant: 0,
-            scale: 1.0,
-            yaw: 0.0,
-        };
-        let original = Sites::from([site]);
-        let replacement = Sites::from([Site { scale: 1.5, ..site }]);
-        let mut stream = ForestStream::default();
-        stream.nodes.insert(key.parent(), Node {
-            anchor: DVec3::Y,
-            leaves: vec![Leaf {
-                key, anchor: DVec3::Y, sites: Some(original.clone()), placement: None,
-                impostor: MeshState::Missing, trees: Vec::new(), coverage: 0.0, detail: 0.0,
-            }],
-            parent: MeshState::Missing,
-            arrival: 0.0,
-        });
-        let initial = stream.take_point_changes(false);
-        assert!(initial.reset);
-        assert!(Arc::ptr_eq(initial.patches[0].1.as_ref().unwrap(), &original));
-
-        // Retirement and re-arrival before dispatch leave only the latest batch.
-        mark_point_patch(&mut stream.point_dirty, key);
-        stream.nodes.get_mut(&key.parent()).unwrap().leaves[0].sites = Some(replacement.clone());
-        mark_point_patch(&mut stream.point_dirty, key);
-        let modified = stream.take_point_changes(false);
-        assert!(!modified.reset);
-        assert_eq!(modified.patches.len(), 1);
-        assert_eq!(modified.patches[0].0, key);
-        assert!(Arc::ptr_eq(modified.patches[0].1.as_ref().unwrap(), &replacement));
-
-        stream.nodes.remove(&key.parent());
-        mark_point_patch(&mut stream.point_dirty, key);
-        let removed = stream.take_point_changes(false);
-        assert!(!removed.reset);
-        assert_eq!(removed.patches, [(key, None)]);
-        assert!(stream.take_point_changes(false).patches.is_empty());
+// Use camera-relative centers to keep small crowns precise across planet cells.
+// Keep the near ring and trees whose directional shadow can reach a cascade.
+fn potentially_visible(
+    frustum: &Frustum,
+    offset: Vec3,
+    distance: f32,
+    radius: f32,
+    was_resident: bool,
+    shadows: &[(Vec3, f32)],
+) -> bool {
+    if distance < 180.0 + radius {
+        return true;
     }
-
-    #[derive(Resource)]
-    struct Fixture {
-        state: MeshState,
-        retire: Vec<Entity>,
-    }
-
-    #[test]
-    fn retiring_a_tile_unlinks_it_from_the_floating_origin_hierarchy() {
-        let mut app = App::new();
-        let parent = app.world_mut().spawn_empty().id();
-        let child = app
-            .world_mut()
-            .spawn((Visibility::Inherited, ChildOf(parent)))
-            .id();
-        app.insert_resource(Fixture {
-            state: MeshState::Ready(Batch {
-                entity: child,
-                material: Handle::default(),
-                bounds: Aabb::default(),
-            }),
-            retire: Vec::new(),
+    let margin = if was_resident { 0.22 } else { 0.15 };
+    let sphere = Sphere {
+        center: offset.into(),
+        radius: radius + distance * margin,
+    };
+    frustum.intersects_sphere(&sphere, false)
+        || shadows.iter().any(|&(sun, reach)| {
+            let shadow_offset = offset - sun * offset.dot(sun).max(0.0);
+            shadow_offset.length_squared() < (reach * 1.42 + radius).powi(2)
         })
-        .add_systems(
-            Update,
-            |mut commands: Commands, mut fixture: ResMut<Fixture>| {
-                let Fixture { state, retire } = &mut *fixture;
-                state.retire(&mut commands, retire);
-                for entity in retire.drain(..) {
-                    commands.entity(entity).despawn();
-                }
-            },
-        );
-
-        app.update();
-        assert!(app.world().get_entity(child).is_err());
-        assert!(app
-            .world()
-            .get::<Children>(parent)
-            .is_none_or(|children| !children.contains(&child)));
-    }
 }

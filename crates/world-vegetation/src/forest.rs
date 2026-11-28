@@ -4,23 +4,18 @@ mod debug;
 mod fern;
 mod ground_cover;
 mod hero_oak;
-mod impostor;
+mod hybrid;
 mod library;
 mod lod;
 mod palm;
 mod placement;
-mod point_forest;
-mod proxy;
 mod streaming;
 mod textures;
 mod tree_assets;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{
-        primitives::{Aabb, MeshAabb},
-        visibility::VisibilitySystems,
-    },
+    camera::primitives::{Aabb, MeshAabb},
     math::DVec3,
     mesh::MeshVertexBufferLayoutRef,
     pbr::{
@@ -56,7 +51,6 @@ type FoliageMaterial = ExtendedMaterial<StandardMaterial, Wind>;
 struct Wind {
     #[uniform(100)]
     coverage: Vec4,
-    #[uniform(101)]
     crown_frame: Vec2,
 }
 
@@ -69,6 +63,7 @@ impl Default for Wind {
     }
 }
 
+// Ground cover keeps its own wind and distance fades.
 impl MaterialExtension for Wind {
     fn vertex_shader() -> ShaderRef {
         "shaders/foliage.wesl".into()
@@ -77,26 +72,73 @@ impl MaterialExtension for Wind {
     fn fragment_shader() -> ShaderRef {
         "shaders/vegetation_fade.wesl".into()
     }
+}
+
+type HybridMaterial = ExtendedMaterial<StandardMaterial, HybridWind>;
+
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+struct HybridWind {
+    #[uniform(100)]
+    crown_frame: Vec2,
+}
+
+impl MaterialExtension for HybridWind {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/hybrid_tree.wesl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        "shaders/hybrid_tree.wesl".into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/hybrid_tree_prepass.wesl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/hybrid_tree_prepass.wesl".into()
+    }
 
     fn specialize(
         _: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         _: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            fragment
+        let vertex = &mut descriptor.vertex;
+        let morph = layout.0.contains(hybrid::MORPH);
+        if morph {
+            let attr = layout
+                .0
+                .get_layout(&[hybrid::MORPH.at_shader_location(12)])?;
+            vertex.buffers[0].attributes.extend(attr.attributes);
+            vertex
                 .shader_defs
-                .push(ShaderDefVal::Bool("TREE_CROWN".into(), true));
+                .push(ShaderDefVal::Bool("HYBRID_MORPH".into(), true));
+        }
+        let wind = layout.0.contains(Mesh::ATTRIBUTE_UV_1);
+        if wind {
+            vertex
+                .shader_defs
+                .push(ShaderDefVal::Bool("HYBRID_WIND".into(), true));
+        }
+        let instance = ShaderDefVal::Bool("VERTEX_OUTPUT_INSTANCE_INDEX".into(), true);
+        if !vertex.shader_defs.contains(&instance) {
+            vertex.shader_defs.push(instance.clone());
+        }
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            if !fragment.shader_defs.contains(&instance) {
+                fragment.shader_defs.push(instance);
+            }
         }
         Ok(())
     }
 }
 
 impl Wind {
-    fn for_crown(frame: impostor::Framing) -> Self {
+    fn for_crown(bounds: Aabb) -> Self {
         Self {
-            crown_frame: Vec2::new(frame.center, frame.radius),
+            crown_frame: Vec2::new(bounds.center.y, bounds.half_extents.length()),
             ..default()
         }
     }
@@ -200,35 +242,6 @@ struct ForestModels {
     variants: Vec<Vec<VariantModels>>,
     bark_material: Handle<StandardMaterial>,
     hero_oak: Option<hero_oak::HeroOak>,
-    portraits: impostor::Portraits,
-}
-
-impl ForestModels {
-    fn model(
-        &self,
-        species: Species,
-        variant: usize,
-        level: usize,
-        use_hero: bool,
-    ) -> (&ModelLod, &Handle<StandardMaterial>) {
-        if use_hero {
-            let hero = self
-                .hero_oak
-                .as_ref()
-                .expect("hero models stay resident after loading");
-            return (&hero.lods[level], &hero.bark);
-        }
-        let family = &self.variants[species as usize];
-        let model = if family[variant].lods.is_empty() {
-            &family[variant % species.stock_variants()]
-        } else {
-            &family[variant]
-        };
-        (
-            &model.lods[level],
-            model.bark.as_ref().unwrap_or(&self.bark_material),
-        )
-    }
 }
 
 /// Reserve space for an authored scene among the procedurally placed trees.
@@ -249,7 +262,7 @@ impl ForestClearing {
     }
 }
 
-/// The root of a resident, individually streamed coconut palm.
+/// Marks the render entity for a resident coconut palm.
 #[derive(Component)]
 pub struct CoconutPalm;
 
@@ -262,14 +275,13 @@ pub struct ProceduralForestPlugin;
 impl Plugin for ProceduralForestPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            MaterialPlugin::<FoliageMaterial> { ..default() },
-            MaterialPlugin::<lod::BarkMaterial> { ..default() },
-            MaterialPlugin::<proxy::ProxyMaterial> { ..default() },
+            MaterialPlugin::<FoliageMaterial>::default(),
+            MaterialPlugin::<HybridMaterial>::default(),
+            MaterialPlugin::<lod::BarkMaterial>::default(),
         ))
         .init_resource::<VegetationSettings>()
         .init_resource::<streaming::ForestStream>()
-        .init_resource::<lod::FadeMaterials>()
-        .init_resource::<debug::LodDiagnostics>()
+        .init_resource::<hybrid::HybridModels>()
         .add_systems(
             Startup,
             (
@@ -284,30 +296,16 @@ impl Plugin for ProceduralForestPlugin {
             (
                 hero_oak::finish_loading,
                 tree_assets::finish_loading,
+                hybrid::prepare_models,
                 streaming::stream,
             )
                 .chain()
                 .after(WorldMovement),
         )
-        .add_systems(Update, debug::update.after(fern::FernStreaming))
-        .add_systems(
-            PostUpdate,
-            lod::update_lods
-                .after(VisibilitySystems::UpdateFrusta)
-                .before(VisibilitySystems::VisibilityPropagate),
-        );
-        // Keep terrain canopy shading; legacy undergrowth contains card
-        // geometry and is excluded from a clean point-renderer experiment.
-        if !point_forest::enabled() || std::env::var("IGOR_POINT_UNDERGROWTH").as_deref()!=Ok("0") {
-            app.add_plugins(fern::FernPlugin);
-            ground_cover::install(app);
-        } else {
-            // The vegetation diagnostics expect this resource even with no ferns.
-            app.init_resource::<fern::FernWorld>();
-            app.init_resource::<FernSettings>();
-        }
+        .add_systems(Update, debug::update.after(fern::FernStreaming));
+        app.add_plugins(fern::FernPlugin);
+        ground_cover::install(app);
         canopy::install(app);
-        point_forest::install(app);
     }
 }
 
@@ -331,26 +329,20 @@ fn build_models(
             .then(|| foliage_materials.add(cutout_material(foliage_image.clone())));
         let mut species_variants = Vec::with_capacity(species.variants());
         for variant in 0..species.stock_variants() {
-            let (wood, leaves) = generate_tree(species, variant as u64, 0);
+            let (wood, leaves) = generate_tree(species, variant as u64);
+            let wood = wood.finish();
+            let leaves = leaves.finish_canopy(variant as f32);
             let foliage_material = shared_material.clone().unwrap_or_else(|| {
                 let mut material = cutout_material(foliage_image.clone());
-                let frame = impostor::Framing::from_parts([&wood, &leaves]);
-                material.extension = Wind::for_crown(frame);
+                material.extension = Wind::for_crown(leaves.get_aabb().unwrap());
                 material.base.diffuse_transmission = BROADLEAF_TRANSMISSION;
                 foliage_materials.add(material)
             });
-            let mut lods = Vec::with_capacity(3);
-            for (wood, leaves) in std::iter::once((wood, leaves))
-                .chain((1..3).map(|level| generate_tree(species, variant as u64, level)))
-            {
-                lods.push(ModelLod::new(
-                    Some(wood.finish()),
-                    leaves.finish_canopy(variant as f32),
-                    foliage_material.clone(),
-                    &mut meshes,
-                ));
-            }
-            species_variants.push(VariantModels { lods, bark: None });
+            let lod = ModelLod::new(Some(wood), leaves, foliage_material, &mut meshes);
+            species_variants.push(VariantModels {
+                lods: vec![lod],
+                bark: None,
+            });
         }
         species_variants.resize_with(species.variants(), || VariantModels {
             lods: Vec::new(),
@@ -362,7 +354,6 @@ fn build_models(
         variants,
         bark_material,
         hero_oak: None,
-        portraits: default(),
     });
 }
 
@@ -762,9 +753,9 @@ fn tree_height(species: Species, variant: u64) -> f32 {
     }
 }
 
-fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, MeshBuilder) {
+fn generate_tree(species: Species, variant: u64) -> (MeshBuilder, MeshBuilder) {
     if species == Species::Palm {
-        return palm::procedural(lod);
+        return palm::procedural();
     }
     let mut wood = MeshBuilder::default();
     let mut leaves = MeshBuilder::default();
@@ -773,7 +764,7 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
     let height = tree_height(species, variant);
     let seed = 0xb5ee2dc653b6f7d9 ^ ((species as u64) << 20) ^ variant;
     let mut rng = Random::new(seed);
-    let sides = [10, 7, 4][lod];
+    let sides = 10;
     let trunk_radius = match species {
         Species::Jungle => 0.75,
         Species::Oak => 0.65,
@@ -788,7 +779,7 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
         Species::Acacia => height * 0.57,
         Species::Palm => unreachable!(),
     };
-    let trunk_segments = [7, 5, 3][lod];
+    let trunk_segments = 7;
     let lean = match species {
         Species::Pine => 0.42,
         Species::Jungle => 0.82,
@@ -827,10 +818,6 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
     for i in 0..roots {
         let angle = i as f32 * std::f32::consts::TAU / roots as f32 + turn + rng.range(-0.21, 0.21);
         let spread = Vec3::new(angle.cos(), 0.0, angle.sin()) * radius * rng.range(0.65, 1.15);
-        // Consume the same root draws so crown randomness stays fixed at every LOD.
-        if lod != 0 {
-            continue;
-        }
         let knee = Vec3::Y * 1.12 + spread * 0.50;
         let toe = spread + Vec3::Y * 0.48;
         let root_top = trunk((2.4 + radius * 0.42) / trunk_length);
@@ -853,8 +840,8 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
     // Keep every crown tier and major lobe in its canonical position.
     let twigs = if species == Species::Pine { 2 } else { 3 };
     let leaves_per_cluster = match species {
-        Species::Pine => [8, 5, 3][lod],
-        _ => [13, 7, 3][lod],
+        Species::Pine => 8,
+        _ => 13,
     };
     for tier in 0..levels {
         let t = (tier as f32 + 1.0) / (levels as f32 + 1.0);
@@ -921,9 +908,7 @@ fn generate_tree(species: Species, variant: u64, lod: usize) -> (MeshBuilder, Me
                 .normalize();
                 let root = middle.lerp(endpoint, 0.49 + twig as f32 * 0.09);
                 let tip = root + twig_dir * (length * rng.range(0.18, 0.39));
-                if lod < 2 {
-                    wood.tube(root, tip, radius * 0.29, 0.012, sides.min(5), bark);
-                }
+                wood.tube(root, tip, radius * 0.29, 0.012, sides.min(5), bark);
                 let cluster_radius = match species {
                     Species::Pine => length * 0.20,
                     Species::Acacia => length * 0.27,
@@ -1071,14 +1056,9 @@ mod tests {
     #[test]
     fn models_have_reasonable_triangle_counts() {
         for species in Species::ALL {
-            let (near, leaves) = generate_tree(species, 0, 0);
-            let (mid, mid_leaves) = generate_tree(species, 0, 1);
-            let (far, far_leaves) = generate_tree(species, 0, 2);
-            let near_count = (near.indices.len() + leaves.indices.len()) / 3;
-            let mid_count = (mid.indices.len() + mid_leaves.indices.len()) / 3;
-            let far_count = (far.indices.len() + far_leaves.indices.len()) / 3;
-            assert!(near_count > mid_count && mid_count > far_count);
-            assert!(near_count < 6000, "{species:?} has {near_count} triangles");
+            let (wood, leaves) = generate_tree(species, 0);
+            let count = (wood.indices.len() + leaves.indices.len()) / 3;
+            assert!(count < 6000, "{species:?} has {count} triangles");
         }
     }
 }

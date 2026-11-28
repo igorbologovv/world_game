@@ -8,7 +8,9 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use crate::forest::{placement::Site, proxy::half_width, Species};
+use crate::forest::{placement::Site, Species};
+
+use super::half_width;
 
 const SIDE: usize = 1024;
 const MIP_TEXELS: usize = (SIDE * SIDE * 4 - 1) / 3;

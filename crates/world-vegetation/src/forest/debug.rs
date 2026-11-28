@@ -3,12 +3,6 @@ use bevy::prelude::*;
 
 use super::{fern::FernWorld, lod::VegetationSettings, streaming::ForestStream};
 
-#[derive(Resource, Default)]
-pub(super) struct LodDiagnostics {
-    pub levels: [usize; 3],
-    pub blends: usize,
-}
-
 #[derive(Component)]
 pub(super) struct Overlay;
 
@@ -39,7 +33,6 @@ pub(super) fn update(
     mut elapsed: Local<f32>,
     forest: Res<ForestStream>,
     fern: Res<FernWorld>,
-    lods: Res<LodDiagnostics>,
     settings: Res<VegetationSettings>,
     mut text: Query<(&mut Node, &mut Text), With<Overlay>>,
 ) {
@@ -65,10 +58,9 @@ pub(super) fn update(
     let data = &forest.stats;
     let fern = &fern.metrics;
     text.0 = format!(
-        "Vegetation  [F8]\nLOD 0 / 1 / 2   {} / {} / {}    Blends {}\nImpostor batches {}    Forest batches {}    Trees resident {}\nNodes {}    Placement queue {}    Mesh jobs {}    Retiring {}\nImpostors {:.0} m    Forest {:.0} m\nWoodland fern ({})  LOD 0 / 1 / 2 / 3   {} / {} / {} / {}\nFern blends {}    Chunks {}    Card batches {}    Waiting {}",
-        lods.levels[0], lods.levels[1], lods.levels[2], lods.blends,
-        data.impostors, data.parents, data.trees, data.nodes, data.unsampled, data.jobs, data.retirement_queue,
-        settings.impostor_range, settings.forest_range,
+        "Vegetation  [F8]\nLOD 0 / 1 / 2   {} / {} / {}    Blends {}\nResident triangles {}    Nodes {}\nPlacement queue {}    Placement jobs {}    Forest {:.0} m\nWoodland fern ({})  LOD 0 / 1 / 2 / 3   {} / {} / {} / {}\nFern blends {}    Chunks {}    Card batches {}    Waiting {}",
+        data.levels[0], data.levels[1], data.levels[2], data.blends,
+        data.triangles, data.nodes, data.unsampled, data.jobs, settings.forest_range,
         fern.status, fern.levels[0], fern.levels[1], fern.levels[2], fern.levels[3],
         fern.blends, fern.chunks, fern.batches, fern.waiting,
     );

@@ -193,6 +193,9 @@ fn forest_altitude_sweep() {
             render_frame(&mut app);
         }
         measure(&mut app, &target, &output, label);
+        if label == "ground" {
+            assert_hybrid_pipelines(&app);
+        }
     }
     let layout = app.world().resource::<ForestCanopy>().layout;
     assert_eq!(layout.fade.z, 0.0, "the 1024² faces must finish uploading");
@@ -201,14 +204,14 @@ fn forest_altitude_sweep() {
         "the orbital canopy must finish fading in"
     );
 
-    // Compare the same woodland with impostor geometry and terrain canopy.
+    // Compare the same woodland with hybrid meshes and terrain canopy.
     // Changing only the forest range keeps the camera, air path and lighting fixed.
     set_camera(app.world_mut(), woodland, 1_250.0, 0.94);
     let settings = *app
         .world()
         .resource::<world_vegetation::VegetationSettings>();
     for (label, forest_range) in [
-        ("reference-impostors", 3_000.0),
+        ("reference-hybrid-meshes", 3_000.0),
         ("reference-canopy", 1_200.0),
     ] {
         app.insert_resource(world_vegetation::VegetationSettings {
@@ -256,13 +259,13 @@ fn tree_lod_sweep() {
     let focus = tree + up * 6.5;
     for (label, distance, azimuth, elevation) in [
         ("mesh-close", 17.0, 0.0_f64, 0.06_f64),
-        ("mesh-mid", 33.0, 0.0, 0.06),
-        ("mesh-far", 51.0, 0.0, 0.06),
-        ("handoff", 62.0, 0.0, 0.06),
-        ("impostor", 81.0, 0.0, 0.06),
-        ("impostor-side", 81.0, 1.4, 0.06),
-        ("impostor-above", 81.0, 1.4, 0.8),
-        ("forest", 330.0, 1.4, 0.45),
+        ("mesh-near-oblique", 33.0, 0.0, 0.06),
+        ("mesh-near-distance", 51.0, 0.0, 0.06),
+        ("mesh-near-edge", 62.0, 0.0, 0.06),
+        ("mesh-middle", 165.0, 0.0, 0.06),
+        ("mesh-middle-side", 165.0, 1.4, 0.06),
+        ("mesh-middle-above", 165.0, 1.4, 0.8),
+        ("mesh-far", 490.0, 1.4, 0.45),
     ] {
         let horizontal = tangent * azimuth.cos() + up.cross(tangent) * azimuth.sin();
         let eye = focus + distance * (horizontal * elevation.cos() + up * elevation.sin());
@@ -277,32 +280,52 @@ fn tree_lod_sweep() {
     // Hold the view fixed and force the representation on either side of the fade.
     let view = (origin - tree - up * (origin - tree).dot(up)).normalize();
     let position = |distance| focus + distance * (view * 0.997 + up * 0.077);
-    aim_at_tree(app.world_mut(), position(43.0), focus, up);
+    aim_at_tree(app.world_mut(), position(400.0), focus, up);
     let defaults = *app
         .world()
         .resource::<world_vegetation::VegetationSettings>();
-    for (label, mesh, band) in [
-        ("paired-lod0", [180.0, 210.0], [165.0, 205.0]),
-        ("paired-lod1", [10.0, 180.0], [165.0, 205.0]),
-        ("paired-lod2", [10.0, 20.0], [165.0, 205.0]),
-        ("paired-impostor", defaults.mesh_distances, [16.0, 20.0]),
+    let mut compared = std::collections::HashSet::new();
+    for (label, mesh) in [
+        ("paired-lod0", [1_200.0, 1_700.0]),
+        ("paired-lod1", [10.0, 1_200.0]),
+        ("paired-lod2", [10.0, 20.0]),
     ] {
         app.insert_resource(world_vegetation::VegetationSettings {
             mesh_distances: mesh,
-            impostor_blend: band,
             ..defaults
         });
         for _ in 0..75 {
             render_frame(&mut app);
         }
+        let world = app.world_mut();
+        let frame = world.get::<ReferenceFrame>(root).unwrap().clone();
+        let mut palms = world.query_filtered::<
+            (&GridCell, &Transform, &Mesh3d, &bevy::mesh::MeshTag),
+            With<world_vegetation::CoconutPalm>,
+        >();
+        let (_, _, mesh, phase) = palms
+            .iter(world)
+            .find(|(cell, transform, _, _)| {
+                frame
+                    .grid_position_double(cell, transform)
+                    .distance_squared(tree)
+                    < 0.0001
+            })
+            .expect("the same planetary palm must remain resident");
+        assert_eq!(phase.value, 0, "{label} should have settled");
+        assert!(
+            compared.insert(mesh.id()),
+            "{label} must exercise a distinct mesh prefix"
+        );
         capture(&mut app, &target, &output, label);
     }
+    assert_hybrid_pipelines(&app);
     app.insert_resource(defaults);
     for _ in 0..75 {
         render_frame(&mut app);
     }
     for frame in 0..=100 {
-        let distance = 12.0 + 0.66 * f64::from(frame);
+        let distance = 45.0 + 4.2 * f64::from(frame);
         aim_at_tree(app.world_mut(), position(distance), focus, up);
         render_frame(&mut app);
         if frame % 10 == 0 {
@@ -314,24 +337,16 @@ fn tree_lod_sweep() {
 #[test]
 #[ignore = "requires a GPU adapter and writes screenshots"]
 fn broadleaf_lighting_sweep() {
-    use bevy::gltf::{Gltf, GltfMesh};
-    use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
-
     let output = std::env::var_os("FOREST_CAPTURE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/broadleaf-lighting"));
     fs::create_dir_all(&output).unwrap();
     let (mut app, target) = render_app();
-    let asset = app
-        .world()
-        .resource::<AssetServer>()
-        .load::<Gltf>("models/vegetation/tree_part9/tree_lod0.glb");
     let settings = *app
         .world()
         .resource::<world_vegetation::VegetationSettings>();
     let mesh_settings = world_vegetation::VegetationSettings {
         mesh_distances: [180.0, 210.0],
-        impostor_blend: [165.0, 205.0],
         ..settings
     };
     app.insert_resource(mesh_settings);
@@ -340,33 +355,13 @@ fn broadleaf_lighting_sweep() {
     }
     let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
     let world = app.world_mut();
-    let gltf = world.resource::<Assets<Gltf>>().get(&asset).unwrap();
-    let leaves = &gltf.named_materials["Leaves"];
-    let leaf_mesh = gltf
-        .meshes
-        .iter()
-        .filter_map(|mesh| world.resource::<Assets<GltfMesh>>().get(mesh))
-        .flat_map(|mesh| &mesh.primitives)
-        .find(|primitive| primitive.material.as_ref() == Some(leaves))
-        .unwrap()
-        .mesh
-        .clone();
-    let mut parents = world.query::<(&Mesh3d, &ChildOf)>();
-    let trees: Vec<_> = parents
-        .iter(world)
-        .filter(|(mesh, _)| mesh.0 == leaf_mesh)
-        .map(|(_, parent)| parent.parent())
-        .collect();
     let root = world.resource::<PlanetRoot>().entity();
-    let frame = world.get::<ReferenceFrame>(root).unwrap();
-    let tree = trees
-        .into_iter()
-        .map(|entity| {
-            frame.grid_position_double(
-                world.get::<GridCell>(entity).unwrap(),
-                world.get::<Transform>(entity).unwrap(),
-            )
-        })
+    let frame = world.get::<ReferenceFrame>(root).unwrap().clone();
+    let mut sites = world.query::<(&Name, &GridCell, &Transform)>();
+    let tree = sites
+        .iter(world)
+        .filter(|(name, _, _)| name.as_str() == "tree_part9/tree")
+        .map(|(_, cell, transform)| frame.grid_position_double(cell, transform))
         .min_by(|a, b| {
             a.distance_squared(coast * RADIUS)
                 .total_cmp(&b.distance_squared(coast * RADIUS))
@@ -395,9 +390,9 @@ fn broadleaf_lighting_sweep() {
         for (representation, lods) in [
             ("mesh", mesh_settings),
             (
-                "impostor",
+                "hybrid-middle",
                 world_vegetation::VegetationSettings {
-                    impostor_blend: [16.0, 20.0],
+                    mesh_distances: [10.0, 180.0],
                     ..settings
                 },
             ),
@@ -414,11 +409,17 @@ fn broadleaf_lighting_sweep() {
             );
         }
     }
+    assert_hybrid_pipelines(&app);
+}
+
+fn assert_hybrid_pipelines(app: &App) {
+    use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
+
     let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
     let assets = app.world().resource::<AssetServer>();
     for path in [
-        "shaders/vegetation_fade.wesl",
-        "shaders/vegetation_proxy.wesl",
+        "shaders/hybrid_tree.wesl",
+        "shaders/hybrid_tree_prepass.wesl",
     ] {
         let shader = assets.load::<Shader>(path);
         let mut ready = false;
@@ -475,7 +476,9 @@ fn render_app() -> (App, Handle<Image>) {
                 ..default()
             }),
     );
-    if std::env::var("FOREST_GPU_TIMESTAMPS").as_deref() != Ok("0") {
+    if std::env::var("FOREST_GPU_TIMESTAMPS").as_deref() != Ok("0")
+        && !app.is_plugin_added::<RenderDiagnosticsPlugin>()
+    {
         app.add_plugins(RenderDiagnosticsPlugin);
     }
     install_world(&mut app, assets, PALM_COAST_REGION);

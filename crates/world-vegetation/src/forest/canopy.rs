@@ -26,9 +26,8 @@ use world_core::{
 use super::{
     lod::VegetationSettings,
     placement::{NodeKey, PatchKey, Site, PATCH_METERS},
-    proxy::half_width,
     streaming::{self, ForestStream},
-    ForestClearing,
+    ForestClearing, Species,
 };
 use crowns::CrownRaster;
 
@@ -172,7 +171,7 @@ fn stream(
         stream.jobs = std::array::from_fn(|_| None);
         stream.centers = [None; CANOPY_CASCADES];
     }
-    let fade = settings.proxy_range();
+    let fade = settings.forest_band();
     if canopy.layout.fade.truncate().truncate() != fade {
         canopy.layout.fade.x = fade.x;
         canopy.layout.fade.y = fade.y;
@@ -268,7 +267,7 @@ fn stream(
     }
 }
 
-// The impostor width describes the crown span of its actual species and variant.
+// The estimated crown width describes the crown span of its actual species and variant.
 // Area-weighted RGB gives wider trees proportionally more influence on canopy color.
 fn crown(site: Site) -> Vec4 {
     let (area, albedo) =
@@ -279,7 +278,7 @@ fn crown(site: Site) -> Vec4 {
             let area = crate::forest::library::ZENITH_AREAS[index] * site.scale * site.scale
                 / bake::ZENITH_LAYER_COUNT;
             // The terrain shader applies aggregate self-shadowing. Calibrate its
-            // diffuse response against the lit impostor stand at the handoff.
+            // diffuse response against the lit stand at the handoff.
             (
                 area,
                 Vec3::from_array(asset.color) * bake::AUTHORED_COLOR_RESPONSE,
@@ -475,5 +474,19 @@ mod tests {
                 .project(frame.direction(square))
                 .abs_diff_eq(square, 1e-12));
         }
+    }
+}
+
+pub(super) fn half_width(species: Species, variant: usize) -> f32 {
+    if let Some(entry) = super::library::asset(species, variant) {
+        return entry.width;
+    }
+    match (species, variant) {
+        (Species::Oak, _) => 0.37,
+        (Species::Pine, _) => 0.24,
+        (Species::Acacia, _) => 0.50,
+        (Species::Jungle, 1) => 0.65,
+        (Species::Jungle, _) => 0.32,
+        (Species::Palm, _) => 0.53,
     }
 }

@@ -48,18 +48,10 @@ assets/models/vegetation/woodland/
   woodland_tree_01/tree_lod2.glb
 ```
 
-When all LOD files exist, the existing procedural forest loader uses them for
-oak variants 1 and 2 at **canonical terrain-aligned locations**, with existing
-view-based LOD selection and chunk streaming. Hero Oak remains variant zero.
-When prefabs are absent or invalid, the procedural fallback stays active. No
-mass copy of the starter scene is created in the render loop.
-
-**Limitations:** the source tree sprites' silhouette differs from the
-procedural oak impostors still used in the far forest. This should be fixed
-by generating matching billboard/atlas tiles after visual QA. Blender's mesh
-decimator is only a first pass: manually review alpha cutouts, silhouette,
-double-sided leaves, material names (`Bark`, `Leaves`) and triangle counts
-before shipping. Material-aware LODs or impostors may be preferable.
+The forest uses the LOD0 exports for oak variants 1 and 2 at canonical
+terrain-aligned sites. Igor's hybrid renderer builds the medium and far mesh
+proxies from those same textured assets. Hero Oak remains variant zero.
+Missing or invalid prefabs use the procedural fallback.
 
 ## About the imported pond
 

@@ -3,25 +3,5 @@ name = "igor_renderer"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = ["demo"]
-gpu = ["dep:wgpu"]
-demo = ["gpu", "dep:winit", "dep:pollster"]
-
-[[bin]]
-name = "igor_renderer"
-path = "src/main.rs"
-required-features = ["demo"]
-
 [dependencies]
 glam = "0.27"
-bytemuck = { version = "1.15", features = ["derive"] }
-wgpu = { version = "0.19", optional = true }
-winit = { version = "0.29", optional = true }
-pollster = { version = "0.3", optional = true }
-gltf = { version = "1.4", default-features = false, features = ["utils"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
-
-[dev-dependencies]
-naga = { version = "0.19", features = ["wgsl-in"] }

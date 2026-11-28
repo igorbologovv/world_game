@@ -1,223 +1,38 @@
 # World vegetation
 
-Install `ProceduralForestPlugin` alongside the shared world space plugin. It
-reads `WorldCamera`, the floating-origin frame, and the authoritative terrain
-and river queries from `world-core`. It has no dependency on player movement,
-terrain rendering, or water rendering.
+`ProceduralForestPlugin` streams deterministic tree sites around the world
+camera. Terrain, climate, slope, water, clearings and construction determine
+placement. Each tree uses the planet grid, a local radial up axis and its
+canonical scale and yaw. The canopy material, ferns and ground cover read
+the same placement data.
 
-## Quality controls
+## Hybrid tree renderer
 
-Press **F8** to toggle the overlay. It shows active mesh LODs and blends plus
-resident impostor and forest batches, placement work, asynchronous jobs, and
-the retirement queue. Counts are taken before the renderer's frustum cull.
+The `igor_renderer` Rust library builds two spatial mesh proxies from each
+LOD0 model. It simplifies wood and reduces foliage using alpha-tested
+coverage measured from multiple directions. The shared meshes keep the
+source UVs, textures and normals. Bark converges to its next positions
+while redundant foliage retires progressively. A stable rank spreads
+the handoff across trees, and reversing camera movement reverses a
+transition in progress.
 
-Insert a `VegetationSettings` resource to override the defaults. The reference
-view is 1080p at a 60-degree vertical FOV. The defaults are about 30 m for the
-detailed mesh, 30–100 m for simplified meshes, 100–400 m for impostors, and
-2 km for the outer forest fade. Mesh LOD thresholds use projected tree height
-with 10% hysteresis. Tree size, viewport height, and FOV affect the mesh and
-impostor transition distances.
+Bevy draws shared indexed meshes in its normal material and shadow passes.
+Those passes use the same current mesh, wind displacement and foliage
+retirement. Streaming tests padded camera-relative bounds, including trees
+whose directional shadows can reach the camera's shadow cascades. The tree
+meshes fade into the terrain canopy between 79% and 100% of the forest range.
 
-## Ownership inside the crate
+`VegetationSettings` controls the reference LOD distances, hysteresis,
+transition duration, stream range and preload margin. The default reference
+distances are 97 and 242 m for a 15 m tree at 1080p and 60 degrees vertical
+FOV. The default forest range is 2 km. F8 displays resident tree counts and
+triangles by LOD, transitions, placement, and understory diagnostics.
 
-- `placement` assigns canonical tree sites with the existing spherical
-  latitude patches, seeds, biome rules, and height and river queries.
-- `streaming` discovers an all-direction preload ring and prioritizes nearby
-  and forward chunks. It budgets height queries on the main thread. Workers
-  bake meshes from immutable site lists, and the main thread limits uploads,
-  detail admission, and retirement. The cache holds up to 300 individual
-  detail trees. Impostor coverage stays available when a detail request is
-  waiting for that budget.
-- `lod` owns projected-size selection, reversible transitions, and the shared
-  material palette. Shared mesh and material handles allow Bevy 0.20 to batch
-  matching detailed instances on supported render backends.
-- `impostor` captures each LOD0 tree from 25 directions. The atlas stores
-  albedo, cutout coverage, normals, transmission, and depth. The shader blends
-  neighboring views in the tree's local frame, reprojects nearby samples using
-  depth, and lights them with the scene lights.
-- `proxy` merges one camera-facing quad per tree into a chunk. Parent forest
-  batches use the same views, tree rotations, framing, and atlas as their child
-  batches.
-- `ground_cover` preloads plant patches beyond their dithered display range
-  and batches both LODs in the planet's floating-origin grid.
-
-All tree tiers use the same screen-space dither pattern. Their coverage
-intervals meet at the same thresholds and give each shared pixel to one tier.
-The coarse parent fades behind resident impostors. A chunk's impostors cover
-its sites until the detail entities are ready. Frustum culling uses conservative mesh bounds, and parent
-forest batches are also culled against the spherical horizon. A teleport into
-a cold region still requires streaming.
-
-Hero Oak trunk meshes share mipmapped albedo, normal, and roughness maps from
-the supplied Jolcham Oak Bark pack. Albedo is sRGB. The OpenGL normal and
-metallic-roughness maps are linear, with roughness in green and zero metallic
-in blue. The trunk uses four repeats across the circumference, with matched
-normals across each UV seam. The loader prepares tangents once and uses the
-bark embedded in the GLBs if the standalone maps are unavailable or incompatible.
-See the [terrain material baker](../world-terrain/README.md) for the source
-pack and rebuild command.
-
-## Streamed tree assets
-
-| Model | Placement | Mesh triangles LOD0 / LOD1 / LOD2 | Source textures |
-| --- | --- | ---: | --- |
-| Coconut Palm (*Cocos nucifera*) | Hot, humid lowlands and warm coasts | 5,092 / 3,487 / 2,807 | Five `Tree_0Mat`–`Tree_4Mat` sets with base color, normal, and metallic-roughness. `Tree_2Mat` is the cutout frond material. |
-| Tree (part9), unnamed broadleaf | One warm, humid jungle variant | 5,358 / 3,464 / 2,643 | `bark8` base color and normal, plus four cutout base-color maps (`tree4_leaf_small1`, `tree4_leaf_small2`, `tree5_leaf_small3`, and `trees_bushes_0001_a_1`). |
-| Woodland trees 00 and 01, stylized deciduous trees | Two temperate oak variants | 4,599 / 2,934 / 2,160 each | Shared `Bark` base color, normal, and metallic-roughness, and `Leaves` base color and normal. |
-
-| Hero Oak | Temperate oak variant | 33,524 / 17,803 / 14,280 | Shared bark maps and embedded cutout foliage. |
-
-The source exports identify the palm. The broadleaf and woodland sources give
-no botanical species. The oak and jungle assignments reflect their shapes
-and gameplay biomes. Hero Oak retains its existing variant. Procedural pines
-and acacias still fill cool forest and warm, drier sites respectively.
-
-Potential coastal palms sample terrain in eight directions up to 220 m away.
-A probe below the sea datum classifies a warm site within 45 m of sea level as
-coastal. Tropical groves use the forest's temperature and moisture fields and
-may extend up to 420 m elevation. All sites still use the shared height, river,
-and slope checks and the same deterministic patch seeds.
-
-The assets under `assets/models/vegetation/` are standalone glTF meshes with
-shared external textures across the three LODs. Each tree has one bark mesh and
-one foliage mesh per LOD. The authored LODs keep the LOD0 coordinate system
-and material definitions. Simplification budgets favor foliage, where
-decimation can break fronds and cutout silhouettes. Procedural trees keep the
-same seeded trunk, branches and crown lobes across all mesh LODs. Coarser
-levels reduce subdivisions, roots and individual leaf details.
-
-The atlas uses 16 horizon views, eight elevated views, and one zenith view
-per tree. The complete pack carries 73 silhouettes, including the 13 stock
-slots, and uses about 76 MiB across two mipmapped GPU arrays. The views are
-64 pixels per side to keep the larger library within that footprint. The
-loader matches the packaged atlas to the decoded authored sources and
-bakes custom or missing variants asynchronously.
-
-Broadleaf meshes and impostors use the same rough leaf reflectance, diffuse
-transmission, and crown extinction. The shader estimates the incoming light's
-path through an ellipsoid in canonical tree space. Meshes use the fragment's
-local position and impostors reconstruct it from captured depth. The atlas
-retains unlit albedo, includes tangent-space leaf normals when available, and
-filters albedo and decoded normal directions before encoding the next mip.
-
-Export with Blender and Pillow. The first command extracts the two woodland
-intermediates from the original scene. The second packs the runtime models.
-
-```sh
-blender -b --python-exit-code 1 --python tools/extract_woodland_prefabs.py -- \
-  --auto-trees 2 --output "$PWD/target/woodland_raw"
-blender -b --python-exit-code 1 --python tools/build_tree_prefabs.py -- \
-  --woodland-input "$PWD/target/woodland_raw"
-```
-
-Regenerate LOD1 and LOD2 from the packaged LOD0 trees, then rebuild the
-impostor pack. Rerun the pack bake after changing procedural tree geometry or
-the capture code.
-
-```sh
-blender -b --python-exit-code 1 --python tools/build_tree_lods.py
-cargo test --locked -p world-vegetation bake_tree_impostors -- --ignored
-```
-
-The shipped mesh tests measure silhouette overlap with LOD0 across all 25
-view directions. The GPU sweep follows the same Palm Coast tree through
-the mesh and impostor bands, then captures all four representations from
-one fixed viewpoint and records a moving handoff.
-
-```sh
-FOREST_CAPTURE_DIR=target/tree-lod-sweep \
-  cargo test --locked -p world-client tree_lod_sweep -- --ignored --nocapture
-FOREST_CAPTURE_DIR=target/broadleaf-lighting \
-  cargo test --locked -p world-client broadleaf_lighting_sweep -- --ignored --nocapture
-```
-
-The baseline and revised runs used Vulkan on a Radeon RX 6750 XT at
-832 × 468. The timings include the full client update and GPU wait.
-Each pose uses 36 measured frames after a warmup, excluding image readback.
-
-| Camera pose | Baseline median (ms) | Revised median (ms) | Baseline P95 (ms) | Revised P95 (ms) |
-| --- | ---: | ---: | ---: | ---: |
-| 17 m | 28.91 | 28.41 | 29.94 | 30.41 |
-| 33 m | 28.30 | 28.73 | 29.92 | 29.90 |
-| 51 m | 28.50 | 28.77 | 29.66 | 30.88 |
-| 62 m handoff | 28.28 | 28.10 | 29.67 | 29.20 |
-| 81 m impostor | 29.10 | 28.87 | 31.65 | 30.11 |
-| 81 m side view | 27.42 | 26.85 | 28.96 | 27.77 |
-| 81 m elevated view | 23.65 | 23.48 | 24.69 | 25.76 |
-| 330 m forest | 24.55 | 27.99 | 26.23 | 29.88 |
-
-The authored mesh LODs averaged 89.2–99.8% silhouette overlap with their
-LOD0 source across the 25 views. The comparison uses intersection over
-union of rasterized alpha masks, with the same camera framing at every LOD.
-
-The runtime assets are adaptations of **Coconut Palm** by evolveduk,
-**Tree (part9)** by YN14R, and **Low Poly Tree Scene Free** by Nicholas-3D.
-The adaptations separate trees from source scenes, normalize their geometry,
-simplify LODs, and repack textures. [Coconut Palm](https://sketchfab.com/3d-models/coconut-palm-26e787f2ff2e4c0fb004c3b0210805a3), [Tree (part9)](https://sketchfab.com/3d-models/tree-part9-6fbd1594b62b4f94951dcca9e74a7347), [Low Poly Tree Scene Free](https://sketchfab.com/3d-models/low-poly-tree-scene-free-89daa5e21f0d4f08a59dba0d566e88bd), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-
-## Tree asset library
-
-The library adds 30 tree types, two seeded shapes per type, and three indexed
-GLB meshes per shape. Each shape yields 25 impostor views from its LOD0 with
-the same albedo, alpha mask, and framing. Both mesh variants and the texture
-maps are shared across instances. The forest still batches the distant
-quads by chunk and uses its projected-size transitions.
-
-| Habitat | Library trees |
-| --- | --- |
-| Temperate broadleaf | European beech, English oak, silver birch, sugar maple, weeping willow, quaking aspen, American sycamore |
-| Cool evergreen | Norway spruce, Scots pine, Douglas fir, western red cedar, Colorado blue spruce |
-| Cold and snowy | White spruce, stone pine, subalpine fir, Siberian larch |
-| Dry woodland | Umbrella thorn, fever tree, desert ironwood, Joshua tree, ghaf |
-| Humid tropical | Kapok, bigleaf mahogany, rubber fig, red mangrove, breadfruit, silver tree fern |
-| Warm lowlands and coasts | Date palm, Mexican fan palm, Canary Island date palm |
-
-Tree placement uses the existing climate families and candidate density.
-Snow-covered conifers are selected at high latitudes or cold elevations.
-Red mangroves stay in lowland tropical sites. Terrain canopy color uses
-the alpha-masked mean of each foliage map in linear space, calibrated against
-lit impostor stands at the terrain handoff. The canopy bake uses the visible
-area of each zenith impostor for coverage and accounts for the terrain
-shader's two-layer zenith blend. The near canopy's crown radius and height
-come from the LOD0 geometry. See [asset sources and licenses](../../assets/models/vegetation/library/SOURCES.md).
-
-From the workspace root, rebuild with Python, NumPy, and Pillow. Blender is
-used for studio review. The source bark textures are included alongside the
-GLBs under the library's shared texture directory.
-
-```sh
-python3 tools/build_tree_library.py
-cargo test --locked -p world-vegetation bake_tree_impostors -- --ignored
-cargo run --locked -p world-vegetation --example bake_canopy -- assets
-blender -b --threads 6 --python-exit-code 1 --python tools/render_tree_library.py
-
-FOREST_CAPTURE_DIR="$PWD/target/tree-library-gameplay" \
-  cargo test --locked -p world-client tree_library_pilot -- --ignored --nocapture
-```
-
-The pilot reviewed Norway spruce, European beech, and umbrella thorn in
-Blender and at close and distant gameplay viewpoints before the remaining
-trees were generated. The studio sheet covers all 30 types. The asset test
-opens all 60 variants, checks decreasing triangle counts, and verifies the
-pack against their canonical meshes. LOD0 has a 6,000-triangle ceiling.
-
-The matched ground-to-orbit sweep used Vulkan on a Radeon RX 6750 XT at
-832 × 468. Frame times include client update and a GPU wait, measured over
-36 frames per pose after warmup. A separate run measured GPU timestamps for
-the opaque pass, which includes the forest and terrain.
-
-| Camera pose | Baseline median / P95 (ms) | Library median / P95 (ms) | Library opaque GPU median / P95 (ms) |
-| --- | ---: | ---: | ---: |
-| Ground | 22.76 / 24.20 | 22.54 / 23.54 | 5.83 / 6.41 |
-| Grazing | 28.12 / 29.91 | 22.65 / 25.67 | 2.95 / 4.19 |
-| Canopy handoff | 23.37 / 24.67 | 20.47 / 22.03 | 1.71 / 2.26 |
-| Aerial | 22.09 / 23.26 | 19.75 / 20.80 | 1.60 / 1.96 |
-| Orbit | 21.54 / 22.40 | 19.24 / 20.91 | 1.42 / 1.70 |
-
-The altitude sweep captures both terrain canopy and impostors from one
-fixed woodland viewpoint. The terrain canopy is slightly darker at this
-handoff. Use `FOREST_GPU_TIMESTAMPS=0` to collect frame times with GPU
-timestamp instrumentation disabled.
+The renderer uses the shipped LOD0 assets for Hero Oak, Coconut Palm,
+Tree (part9), the woodland oaks and the library variants. The stock procedural
+variants provide fallback geometry when an authored asset is unavailable.
+See the [library sources and licenses](../../assets/models/vegetation/library/SOURCES.md)
+and the [vendored library provenance](../../vendor/igor-renderer/README.md).
 
 ## Woodland Fern
 
@@ -276,40 +91,15 @@ one detailed patch. Legacy grass and gravel fill gaps between clumps.
 The five runtime GLBs contain the generated meshes used by the streamer.
 See the [plant library rebuild command and source catalog](../../tools/PROCEDURAL_PLANTS.md).
 
-## Validation
-
-```sh
-cargo fmt --all --check
-cargo check --workspace --all-targets
-cargo test --workspace
-```
-
-The graphics comparison uses the complete client rendered offscreen at
-832 × 468 with Mesa llvmpipe and Bevy's OpenGL backend. The deterministic
-135-frame camera path starts at the starter region, travels about 930 m, and
-rises from ground level to 166 m. It uses a fixed 100 ms simulation step.
-Frame timings cover the client update and a render-device wait. Measurements
-exclude the first 25 frames and do not include image readback. These results
-measure the software renderer on this route.
-
-| Build | FPS | Mean frame | Median frame | P95 frame | Worst frame |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Before | 6.98 | 143.31 ms | 134.74 ms | 208.65 ms | 671.29 ms |
-| Continuous vegetation | 6.40 | 156.28 ms | 149.87 ms | 220.97 ms | 235.93 ms |
-
-Wider forest coverage came with higher mean and P95 frame times on this run.
-The worst measured frame fell by 65%. Native GPU performance requires a
-separate measurement.
-
 ## Orbital canopy
 
 The terrain samples a 1024 × 1024 cubemap per face with eleven mip levels.
 Each texel estimates foliage cover and color from stratified groups of the
-same tree candidates used for impostors and meshes. The bake uses the shared
+same tree candidates used by the hybrid renderer. The bake uses the shared
 terrain, hydrology, slope, climate and biome checks. The cubemap filters
 across face boundaries and averages linear, premultiplied color and coverage
 over the texel solid angles. Camera-centered layers resolve finer stands and
-crowns for the impostor handoff. F9 cycles the coverage and color diagnostics.
+crowns near the mesh fade. F9 cycles the coverage and color diagnostics.
 
 The default world ships its own bake at `assets/world/planet-canopy-v2.gz`.
 Regenerate it after changing the terrain inputs or the canopy sampling
@@ -336,8 +126,11 @@ coastal ground, inland handoff, 24 km aerial, and 1,450 km orbital views and
 prints median and 95th-percentile synchronized frame times.
 
 ```sh
-WGPU_BACKEND=vulkan cargo test --locked -p world-client forest_altitude_sweep -- --ignored --nocapture
+WGPU_BACKEND=vulkan cargo test --locked --release -p world-client forest_altitude_sweep -- --ignored --nocapture
 ```
 
 Screenshots are written to `target/forest-sweep`. Set `FOREST_CAPTURE_DIR`
 to keep different runs separate.
+
+Run `tree_lod_sweep` for the fixed-camera LOD comparisons and camera dolly,
+or `broadleaf_lighting_sweep` for the forward and shadow shader checks.

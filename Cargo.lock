@@ -3614,11 +3614,7 @@ dependencies = [
 name = "igor_renderer"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "glam 0.27.0",
- "gltf",
- "image",
- "tracing",
 ]
 
 [[package]]
@@ -7695,7 +7691,6 @@ dependencies = [
  "blake3",
  "flate2",
  "igor_renderer",
- "naga",
  "noise",
  "world-core",
  "world-regions",

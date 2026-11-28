@@ -37,7 +37,7 @@ The terrain owner maintains `assets/shaders/spherical.wesl`, the planetary
 cloud shaders, and `assets/textures/terrain/`. The water
 owner maintains `ocean.wgsl`, `river_water.wgsl`, and `water_common.wgsl`.
 The vegetation owner maintains
-`foliage.wgsl`, `distant_forest.wgsl`, `assets/models/hero_oak/`, and their
+`foliage.wesl`, `hybrid_tree.wesl`, `assets/models/hero_oak/`, and their
 source exports and build tooling. Generator outputs in `assets/world/` and
 `assets/terrains/spherical/source/height/` are shared with runtime consumers.
 Coordinate changes to their layout and encoding with core and the affected
@@ -100,7 +100,7 @@ The generator builds without the Bevy renderer or the path crate.
   patches to produce six 1024² cube faces. A background worker prepares their
   mip chain and the renderer stages at most 1 MiB of orbital texture per
   frame. Camera-centered layers supplement the cubemap at finer resolutions.
-  Near the impostor handoff, full tree patches supply species-specific crown
+  Near the forest mesh fade, full tree patches supply species-specific crown
   silhouettes and relief. Terrain blends these by screen footprint and
   distance, independently of terrain chunk size. See the
   [canopy bake and camera sweep](../crates/world-vegetation/README.md#orbital-canopy).
