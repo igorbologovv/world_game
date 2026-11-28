@@ -10,8 +10,10 @@ use bevy::time::TimeUpdateStrategy;
 
 use bevy::{
     app::PluginsState,
-    camera::RenderTarget,
+    asset::RenderAssetUsages,
+    camera::{visibility::RenderLayers, RenderTarget},
     diagnostic::{DiagnosticPath, DiagnosticsStore},
+    image::{ImageSampler, ImageType},
     math::DVec3,
     render::{
         diagnostic::RenderDiagnosticsPlugin,
@@ -154,6 +156,91 @@ fn forest_altitude_sweep() {
         let stats = app.world().resource::<ForestRenderStats>();
         assert_eq!(stats.triangles() > 0, expect_meshes, "{label}");
     }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and writes screenshots"]
+fn distant_canopy_handoff() {
+    let output = std::env::var_os("FOREST_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/distant-canopy"));
+    fs::create_dir_all(&output).unwrap();
+    let (mut app, target) = render_app();
+    let up = DVec3::new(-0.3628517435, 0.8249897523, 0.4332788026).normalize();
+    wait_for_forest(&mut app);
+    let world = app.world_mut();
+    for (name, mut visibility) in world.query::<(&Name, &mut Visibility)>().iter_mut(world) {
+        if name.as_str() == "Planetary clouds" {
+            *visibility = Visibility::Hidden;
+        }
+    }
+    for mut hud in world
+        .query_filtered::<&mut Node, Without<ChildOf>>()
+        .iter_mut(world)
+    {
+        hud.display = Display::None;
+    }
+    set_camera(world, up, 1_700.0, 0.78);
+    for _ in 0..150 {
+        render_frame(&mut app);
+    }
+    assert_forest_drawn(&app);
+    super::terrain_render::assert_material_pipeline(&app, "shaders/distant_canopy.wesl");
+    capture(&mut app, &target, &output, "hybrid-to-mesh");
+
+    set_camera(app.world_mut(), up, 2_350.0, 0.94);
+    for _ in 0..60 {
+        render_frame(&mut app);
+    }
+    assert_eq!(app.world().resource::<ForestRenderStats>().triangles(), 0);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    measure(&mut app, &target, &output, "mesh-to-terrain");
+    let world = app.world_mut();
+    let canopy = world
+        .query::<(Entity, &Name)>()
+        .iter(world)
+        .find_map(|(entity, name)| (name.as_str() == "Distant forest canopy").then_some(entity))
+        .expect("canopy mesh was published");
+    world.entity_mut(canopy).insert(RenderLayers::layer(31));
+    measure(&mut app, &target, &output, "terrain-only");
+    let read_capture = |file| {
+        let image = Image::from_buffer(
+            &fs::read(output.join(file)).unwrap(),
+            ImageType::Extension("png"),
+            CompressedImageFormats::empty(),
+            true,
+            ImageSampler::Default,
+            RenderAssetUsages::MAIN_WORLD,
+        )
+        .unwrap();
+        image.data.unwrap()
+    };
+    let mesh = read_capture("mesh-to-terrain.png");
+    let terrain = read_capture("terrain-only.png");
+    let changed = mesh
+        .chunks_exact(4)
+        .zip(terrain.chunks_exact(4))
+        .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 3))
+        .count();
+    assert!(changed > 500, "canopy mesh changed {changed} pixels");
+
+    app.world_mut().entity_mut(canopy).remove::<RenderLayers>();
+    let world = app.world_mut();
+    let camera = world
+        .query_filtered::<Entity, With<WorldCamera>>()
+        .single(world)
+        .unwrap();
+    world.entity_mut(camera).insert(Msaa::Off);
+    for _ in 0..25 {
+        render_frame(&mut app);
+    }
+    super::terrain_render::assert_material_pipeline(&app, "shaders/distant_canopy.wesl");
+    set_camera(app.world_mut(), up, 24_000.0, 0.94);
+    render_frame(&mut app);
+    assert_eq!(
+        app.world().get::<Visibility>(canopy),
+        Some(&Visibility::Hidden)
+    );
 }
 
 #[test]

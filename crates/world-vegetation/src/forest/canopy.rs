@@ -2,6 +2,7 @@
 
 mod bake;
 mod crowns;
+mod distant_mesh;
 mod globe;
 
 pub use bake::bake_planet_canopy;
@@ -43,6 +44,9 @@ const MAX_JOBS: usize = 3;
 struct AtlasStream {
     construction_revision: u64,
     renderer: bool,
+    mesh_enabled: bool,
+    eye_radius: Option<f64>,
+    mesh: Option<distant_mesh::PreparedMesh>,
     jobs: [Option<Task<Layer>>; LAYERS],
     centers: [Option<DVec3>; CANOPY_CASCADES],
 }
@@ -51,6 +55,7 @@ struct Layer {
     bytes: Vec<u8>,
     frame: Frame,
     crowns: Option<Vec<u8>>,
+    mesh: Option<distant_mesh::PreparedMesh>,
 }
 
 #[derive(Clone, Copy)]
@@ -100,8 +105,15 @@ impl Frame {
 
 pub(super) fn install(app: &mut App) {
     globe::install(app);
+    let renderer = app.get_sub_app(bevy::render::RenderApp).is_some();
+    let mesh_enabled =
+        renderer && std::env::var_os("WORLD_DISTANT_CANOPY").as_deref() != Some("0".as_ref());
+    if mesh_enabled {
+        distant_mesh::install(app);
+    }
     app.insert_resource(AtlasStream {
-        renderer: app.get_sub_app(bevy::render::RenderApp).is_some(),
+        renderer,
+        mesh_enabled,
         ..default()
     })
     .add_systems(Startup, create.after(WorldReady))
@@ -156,6 +168,7 @@ fn stream(
     mut images: ResMut<Assets<Image>>,
     time: Res<Time>,
 ) {
+    stream.eye_radius = None;
     let Ok((entity, camera)) = cameras.single() else {
         return;
     };
@@ -166,10 +179,12 @@ fn stream(
     let Some(up) = eye.try_normalize() else {
         return;
     };
+    stream.eye_radius = Some(eye.length());
     if stream.construction_revision != heights.construction_revision() {
         stream.construction_revision = heights.construction_revision();
         stream.jobs = std::array::from_fn(|_| None);
         stream.centers = [None; CANOPY_CASCADES];
+        stream.mesh = None;
     }
     let fade = settings.forest_band();
     if canopy.layout.fade.truncate().truncate() != fade {
@@ -215,6 +230,7 @@ fn stream(
             let mut image = crowns::image();
             image.data = Some(crowns);
             canopy.crowns = images.add(image);
+            stream.mesh = layer.mesh;
         }
         let weight = canopy.layout.cascades[index].center.w;
         canopy.layout.cascades[index] = layer.frame.uniform();
@@ -245,19 +261,29 @@ fn stream(
         let frame = Frame::new(up, width);
         let heights = heights.clone();
         let cached = (index == 0).then(|| forest.cached_sites());
+        let mesh_enabled = stream.mesh_enabled;
         stream.jobs[index] = Some(pool.spawn(async move {
-            let (bytes, crowns) = match cached {
+            let (bytes, crowns, mesh) = match cached {
                 Some(cached) => {
                     let mut raster = CrownRaster::new(frame.half_width);
                     let bytes = fine_layer(frame, &heights, clearing, cached, Some(&mut raster));
-                    (bytes, Some(raster.finish()))
+                    let relief = raster.finish();
+                    let mesh = mesh_enabled
+                        .then(|| {
+                            distant_mesh::PreparedMesh::build(frame, &relief, |up| {
+                                heights.sample(up)
+                            })
+                        })
+                        .flatten();
+                    (bytes, Some(relief), mesh)
                 }
-                None => (coarse_local(frame, &heights, clearing), None),
+                None => (coarse_local(frame, &heights, clearing), None, None),
             };
             Layer {
                 bytes,
                 frame,
                 crowns,
+                mesh,
             }
         }));
         budget -= 1;

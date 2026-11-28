@@ -12,9 +12,9 @@ use crate::forest::{placement::Site, Species};
 
 use super::half_width;
 
-const SIDE: usize = 1024;
+pub(super) const SIDE: usize = 1024;
 const MIP_TEXELS: usize = (SIDE * SIDE * 4 - 1) / 3;
-const HEIGHT_RANGE: f32 = 40.0;
+pub(super) const HEIGHT_RANGE: f32 = 40.0;
 
 pub(super) fn image() -> Image {
     let mut result = Image::new_uninit(

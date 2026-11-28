@@ -329,7 +329,7 @@ fn set_camera(world: &mut World, site: &Site, altitude: f64, tilt: f64) -> f64 {
     ground
 }
 
-fn assert_material_pipeline(app: &App, path: &'static str) {
+pub(super) fn assert_material_pipeline(app: &App, path: &'static str) {
     let shader = app.world().resource::<AssetServer>().load::<Shader>(path);
     let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
     let mut ready = false;

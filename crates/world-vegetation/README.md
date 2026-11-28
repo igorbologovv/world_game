@@ -88,6 +88,28 @@ one detailed patch. Legacy grass and gravel fill gaps between clumps.
 The five runtime GLBs contain the generated meshes used by the streamer.
 See the [plant library rebuild command and source catalog](../../tools/PROCEDURAL_PLANTS.md).
 
+## Distant canopy mesh
+
+The finest canopy atlas layer also supplies a terrain-following mesh. It uses
+an indexed 128 × 128 grid with triangles only around occupied cells. Each
+vertex follows the planet's sampled ground height plus filtered crown height.
+The fragment shader samples the existing crown atlas at the pixel footprint
+to keep narrow boundaries and clearings, and shares the terrain canopy's
+color calculations and Bevy lighting.
+
+With the default 2 km hybrid range, the mesh starts fading in at 1.58 km
+using Igor's ordered sample coverage. It fades back to the terrain material
+between 2.4 and 3.45 km and also feathers at the edge of the resident atlas
+projection. Set `WORLD_DISTANT_CANOPY=0` at launch to compare against the
+original hybrid-to-terrain transition.
+
+```sh
+WGPU_BACKEND=vulkan cargo test --locked --release -p world-client distant_canopy_handoff -- --ignored --nocapture
+```
+
+The test captures both handoffs and a terrain-only reference in
+`target/distant-canopy`. It also checks the shader with and without MSAA.
+
 ## Orbital canopy
 
 The terrain samples a 1024 × 1024 cubemap per face with eleven mip levels.
