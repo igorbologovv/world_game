@@ -37,8 +37,8 @@ The terrain owner maintains `assets/shaders/spherical.wesl`, the planetary
 cloud shaders, and `assets/textures/terrain/`. The water
 owner maintains `ocean.wgsl`, `river_water.wgsl`, and `water_common.wgsl`.
 The vegetation owner maintains
-`foliage.wesl`, `hybrid_tree.wesl`, `assets/models/hero_oak/`, and their
-source exports and build tooling. Generator outputs in `assets/world/` and
+`foliage.wesl`, `vendor/igor-renderer/`, `assets/models/hero_oak/`, and
+their source exports and build tooling. Generator outputs in `assets/world/` and
 `assets/terrains/spherical/source/height/` are shared with runtime consumers.
 Coordinate changes to their layout and encoding with core and the affected
 consumers.

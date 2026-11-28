@@ -1,21 +1,14 @@
-//! Streams canonical sites and attaches the shared hybrid meshes to the planet.
+//! Streams canonical sites, forest regions, and gameplay markers.
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
 use bevy::{
-    camera::{
-        primitives::{Frustum, Sphere},
-        visibility::VisibilityRange,
-    },
-    light::CascadeShadowConfig,
     math::DVec3,
-    mesh::MeshTag,
     prelude::*,
     tasks::{block_on, poll_once, AsyncComputeTaskPool, Task},
 };
-use igor_renderer::Detail;
 use world_core::{
     planet::RADIUS,
     runtime::{GridTransform, PlanetRoot, ReferenceFrames, WorldCamera},
@@ -23,8 +16,8 @@ use world_core::{
 };
 
 use super::{
-    hybrid::{HybridModels, Model},
-    lod::{VegetationSettings, View},
+    hybrid::{ModelLoading, RenderChunk},
+    lod::VegetationSettings,
     placement::{NodeKey, PatchKey, Site},
     within_horizon, CoconutPalm, ForestClearing, Species,
 };
@@ -33,8 +26,8 @@ const MAX_NODES: usize = 112;
 const NODE_ALLOWANCE: f32 = 480.0;
 const DISCOVERY_INTERVAL: f64 = 0.16;
 const PLACEMENT_JOBS: usize = 12;
-const SPAWNS_PER_FRAME: usize = 384;
-const CELL_METERS: f64 = 32.0;
+const REGION_JOBS: usize = 12;
+const PALM_MARKER_RANGE: f64 = 320.0;
 
 pub(super) type Sites = Arc<[Site]>;
 
@@ -43,7 +36,16 @@ struct Leaf {
     anchor: DVec3,
     sites: Option<Sites>,
     placement: Option<Task<Sites>>,
-    trees: Vec<Tree>,
+    region: RegionState,
+    palms: Vec<Entity>,
+}
+
+#[derive(Default)]
+enum RegionState {
+    #[default]
+    Waiting,
+    Building(Task<Option<RenderChunk>>),
+    Ready(Option<Arc<RenderChunk>>),
 }
 
 struct Node {
@@ -53,51 +55,8 @@ struct Node {
 
 impl Node {
     fn despawn(&self, commands: &mut Commands) {
-        for tree in self.leaves.iter().flat_map(|leaf| &leaf.trees) {
-            tree.despawn(commands);
-        }
-    }
-}
-
-struct Tree {
-    parts: Option<[Option<Entity>; 2]>,
-    center: DVec3,
-    radius: f32,
-    cell_center: DVec3,
-    rank: f32,
-    detail: Option<Detail>,
-    phase: u32,
-}
-
-impl Tree {
-    fn new(site: Site, model: &Model, index: usize, key: PatchKey, anchor: DVec3) -> Self {
-        let up = anchor.normalize();
-        let (east, north) = super::tangent_basis(up);
-        let offset = site.position - anchor;
-        let cell = [offset.dot(east), offset.dot(north)].map(|v| (v / CELL_METERS).floor() as i32);
-        let cell_center = anchor
-            + east * ((f64::from(cell[0]) + 0.5) * CELL_METERS)
-            + north * ((f64::from(cell[1]) + 0.5) * CELL_METERS)
-            + up * offset.dot(up);
-        let id = (key.0 as u32).wrapping_mul(0x9e3779b9)
-            ^ (key.1 as u32).wrapping_mul(0x85ebca6b)
-            ^ index as u32;
-        let center = site.position
-            + (site.rotation() * Vec3::from(model.bounds.center) * site.scale).as_dvec3();
-        Self {
-            parts: None,
-            center,
-            radius: model.bounds.half_extents.length() * site.scale,
-            cell_center,
-            rank: igor_renderer::rank(id, cell),
-            detail: None,
-            phase: 0,
-        }
-    }
-
-    fn despawn(&self, commands: &mut Commands) {
-        for entity in self.parts.iter().flatten().flatten() {
-            commands.entity(*entity).despawn();
+        for &marker in self.leaves.iter().flat_map(|leaf| &leaf.palms) {
+            commands.entity(marker).despawn();
         }
     }
 }
@@ -111,7 +70,6 @@ pub(super) struct ForestStream {
     last_eye: Option<DVec3>,
     last_view: DVec3,
     settings_extent: f32,
-    next_report: f64,
     pub stats: StreamStats,
 }
 
@@ -120,12 +78,19 @@ pub(super) struct StreamStats {
     pub nodes: usize,
     pub unsampled: usize,
     pub jobs: usize,
-    pub levels: [usize; 3],
-    pub blends: usize,
-    pub triangles: usize,
 }
 
 impl ForestStream {
+    pub fn chunks(&self) -> impl Iterator<Item = (PatchKey, Arc<RenderChunk>)> + '_ {
+        self.nodes
+            .values()
+            .flat_map(|node| &node.leaves)
+            .filter_map(|leaf| match &leaf.region {
+                RegionState::Ready(Some(chunk)) => Some((leaf.key, Arc::clone(chunk))),
+                _ => None,
+            })
+    }
+
     pub fn cached_sites(&self) -> HashMap<PatchKey, Sites> {
         self.nodes
             .values()
@@ -208,7 +173,8 @@ impl ForestStream {
                         anchor: anchor(heights, patch.center()),
                         sites: None,
                         placement: None,
-                        trees: Vec::new(),
+                        region: RegionState::Waiting,
+                        palms: Vec::new(),
                     })
                     .collect();
                 Node {
@@ -277,13 +243,13 @@ pub(super) fn stream(
     root: Res<PlanetRoot>,
     heights: Res<SurfaceHeights>,
     clearing: Option<Res<ForestClearing>>,
-    cameras: Query<(Entity, GridTransform, &Camera, &Projection), With<WorldCamera>>,
-    lights: Query<(&DirectionalLight, &Transform, &CascadeShadowConfig), Without<WorldCamera>>,
+    cameras: Query<(Entity, GridTransform), With<WorldCamera>>,
     frames: ReferenceFrames,
-    models: Res<HybridModels>,
+    models: Option<Res<ModelLoading>>,
+    lights: Query<(&DirectionalLight, &GlobalTransform)>,
     mut forest: ResMut<ForestStream>,
 ) {
-    let Ok((camera_entity, camera, view, projection)) = cameras.single() else {
+    let Ok((camera_entity, camera)) = cameras.single() else {
         return;
     };
     let Some(planet_frame) = frames.parent_frame(camera_entity) else {
@@ -305,13 +271,12 @@ pub(super) fn stream(
     let forward = (camera.transform.rotation * Vec3::NEG_Z).as_dvec3();
     let band = settings.forest_band();
     let preload = settings.preload_margin.clamp(90.0, 420.0);
-    let now = time.elapsed_secs_f64();
     forest.plan(
         &mut commands,
         eye,
         up,
         forward,
-        now,
+        time.elapsed_secs_f64(),
         band.y + preload,
         &heights,
     );
@@ -321,186 +286,79 @@ pub(super) fn stream(
         nodes: forest.nodes.len(),
         ..default()
     };
-    let frustum = projection.compute_frustum(&GlobalTransform::from(Transform::from_rotation(
-        camera.transform.rotation,
-    )));
-    let shadows: Vec<_> = lights
-        .iter()
-        .filter(|(light, _, _)| light.shadow_maps_enabled)
-        .filter_map(|(_, transform, config)| {
-            Some((*transform.back(), config.bounds.last().copied()?))
-        })
-        .collect();
-    let view = View::new(view, projection);
-    let selection = settings.selection();
-    let elapsed = time.delta_secs().min(0.075);
-    let range = VisibilityRange {
-        start_margin: 0.0..0.0,
-        end_margin: band.x..band.y,
-        use_aabb: false,
-    };
-    let mut budget = SPAWNS_PER_FRAME;
-    for key in &forest.order {
-        let node = forest.nodes.get_mut(key).unwrap();
-        for leaf in &mut node.leaves {
-            stats.jobs += usize::from(leaf.placement.is_some());
-            let Some(sites) = &leaf.sites else {
-                stats.unsampled += 1;
-                continue;
-            };
-            if !models.ready() {
-                continue;
-            }
-            let leaf_distance = eye.distance(leaf.anchor);
-            if leaf.trees.is_empty() && leaf_distance > f64::from(band.y) + 240.0 {
-                continue;
-            }
-            if leaf.trees.is_empty() {
-                leaf.trees = sites
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(i, site)| Tree::new(site, models.model(site), i, leaf.key, leaf.anchor))
-                    .collect();
-            }
-            for (&site, tree) in sites.iter().zip(&mut leaf.trees) {
-                let offset = tree.center - eye;
-                let distance = offset.length() as f32;
-                let resident = distance <= band.y + tree.radius + 12.0
-                    && potentially_visible(
-                        &frustum,
-                        offset.as_vec3(),
-                        distance,
-                        tree.radius,
-                        tree.parts.is_some(),
-                        &shadows,
-                    )
-                    && within_horizon(eye, tree.center, f64::from(tree.radius));
-                if !resident {
-                    if tree.parts.is_some() {
-                        tree.despawn(&mut commands);
-                        tree.parts = None;
-                        tree.detail = None;
-                    }
-                    continue;
-                }
-                if tree.parts.is_none() && budget == 0 {
-                    continue;
-                }
-                let pixels = view.pixels(2.0 * tree.radius, distance - tree.radius);
-                let cell_radius =
-                    CELL_METERS as f32 * std::f32::consts::FRAC_1_SQRT_2 + tree.radius;
-                let cell_pixels = view.pixels(
-                    2.0 * cell_radius,
-                    eye.distance(tree.cell_center) as f32 - cell_radius,
-                );
-                let phase =
-                    selection.select(&mut tree.detail, pixels, cell_pixels, tree.rank, elapsed);
-                let stage = phase.floor() as usize;
-                let tag = (phase.fract() * 65535.0).round() as u32;
-                let packed = tag | ((stage as u32) << 16);
-                let model = models.model(site);
-                let parts = [model.wood.as_ref(), Some(&model.leaves)];
-                stats.levels[stage] += 1;
-                stats.blends += usize::from(tag != 0);
-                stats.triangles += parts
-                    .iter()
-                    .flatten()
-                    .map(|part| part.triangles[stage])
-                    .sum::<usize>();
-                if let Some(entities) = tree.parts {
-                    if packed != tree.phase || settings.is_changed() {
-                        for (entity, part) in entities.into_iter().zip(parts) {
-                            let Some((id, part)) = entity.zip(part) else {
-                                continue;
-                            };
-                            let mut entity = commands.entity(id);
-                            if packed != tree.phase {
-                                entity.insert(MeshTag::new(tag));
-                                if stage != (tree.phase >> 16) as usize {
-                                    entity.insert(Mesh3d(part.meshes[stage].clone()));
-                                }
-                            }
-                            if settings.is_changed() {
-                                entity.insert(range.clone());
-                            }
-                        }
-                    }
-                } else {
-                    let (cell, translation) = planet_frame.translation_to_grid(site.position);
-                    let transform = Transform::from_translation(translation)
-                        .with_rotation(site.rotation())
-                        .with_scale(Vec3::splat(site.scale));
-                    let mut ids = [None; 2];
-                    for (i, part) in parts.into_iter().enumerate() {
-                        let Some(part) = part else { continue };
-                        let mut entity = root.spawn(
-                            &mut commands,
-                            (
-                                transform,
-                                cell,
-                                part.bounds,
-                                range.clone(),
-                                MeshTag::new(tag),
-                                Mesh3d(part.meshes[stage].clone()),
-                                MeshMaterial3d(part.material.clone()),
-                            ),
-                        );
-                        if i == 1 {
-                            let name = super::library::asset(site.species, site.variant)
-                                .map_or_else(
-                                    || {
-                                        if site.species == Species::Jungle && site.variant == 1 {
-                                            "tree_part9/tree"
-                                        } else {
-                                            "Forest tree"
-                                        }
-                                    },
-                                    |asset| asset.path,
-                                );
-                            entity.insert(Name::new(name));
-                            if site.species == Species::Palm && site.variant == 0 {
-                                entity.insert(CoconutPalm);
-                            }
-                        }
-                        ids[i] = Some(entity.id());
-                    }
-                    tree.parts = Some(ids);
-                    budget -= 1;
-                }
-                tree.phase = packed;
+    let models = models.as_ref().and_then(|loading| loading.models.as_ref());
+    let mut building = 0;
+    let mut waiting = Vec::new();
+    for leaf in forest.nodes.values_mut().flat_map(|node| &mut node.leaves) {
+        stats.jobs += usize::from(leaf.placement.is_some());
+        let Some(sites) = &leaf.sites else {
+            stats.unsampled += 1;
+            continue;
+        };
+        if models.is_none() || sites.is_empty() {
+            continue;
+        }
+        if let RegionState::Building(task) = &mut leaf.region {
+            if let Some(region) = block_on(poll_once(task)) {
+                leaf.region = RegionState::Ready(region.map(Arc::new));
+            } else {
+                building += 1;
             }
         }
+        let distance = eye.distance(leaf.anchor);
+        update_palms(&mut commands, &root, planet_frame, leaf, distance);
+        if matches!(leaf.region, RegionState::Waiting)
+            && distance <= f64::from(band.y + preload)
+            && within_horizon(eye, leaf.anchor, 60.0)
+        {
+            waiting.push((distance, leaf));
+        }
     }
-    if models.ready() && now >= forest.next_report {
-        forest.next_report = now + 5.0;
-        info!("Hybrid forest: LOD={:?} transitions={} resident_triangles={} nodes={} placement_jobs={}",
-              stats.levels, stats.blends, stats.triangles, stats.nodes, stats.jobs);
+    if let Some(models) = models {
+        waiting.sort_unstable_by(|(dist_a, a), (dist_b, b)| {
+            dist_a.total_cmp(dist_b).then(a.key.cmp(&b.key))
+        });
+        let pool = AsyncComputeTaskPool::get();
+        let sun = super::hybrid::sun_direction(&lights);
+        for (_, leaf) in waiting
+            .into_iter()
+            .take(REGION_JOBS.saturating_sub(building))
+        {
+            let models = Arc::clone(models);
+            let sites = Arc::clone(leaf.sites.as_ref().unwrap());
+            let anchor = leaf.anchor;
+            leaf.region = RegionState::Building(
+                pool.spawn(async move { RenderChunk::build(&models, anchor, &sites, sun) }),
+            );
+        }
     }
     forest.stats = stats;
 }
 
-// Use camera-relative centers to keep small crowns precise across planet cells.
-// Keep the near ring and trees whose directional shadow can reach a cascade.
-fn potentially_visible(
-    frustum: &Frustum,
-    offset: Vec3,
-    distance: f32,
-    radius: f32,
-    was_resident: bool,
-    shadows: &[(Vec3, f32)],
-) -> bool {
-    if distance < 180.0 + radius {
-        return true;
+fn update_palms(
+    commands: &mut Commands,
+    root: &PlanetRoot,
+    frame: &world_core::runtime::ReferenceFrame,
+    leaf: &mut Leaf,
+    distance: f64,
+) {
+    if distance > PALM_MARKER_RANGE {
+        for marker in leaf.palms.drain(..) {
+            commands.entity(marker).despawn();
+        }
+    } else if leaf.palms.is_empty() {
+        for site in leaf
+            .sites
+            .iter()
+            .flat_map(|sites| sites.iter())
+            .filter(|site| site.species == Species::Palm && site.variant == 0)
+        {
+            let (cell, translation) = frame.translation_to_grid(site.position);
+            let transform = Transform::from_translation(translation)
+                .with_rotation(site.rotation())
+                .with_scale(Vec3::splat(site.scale));
+            leaf.palms
+                .push(root.spawn(commands, (cell, transform, CoconutPalm)).id());
+        }
     }
-    let margin = if was_resident { 0.22 } else { 0.15 };
-    let sphere = Sphere {
-        center: offset.into(),
-        radius: radius + distance * margin,
-    };
-    frustum.intersects_sphere(&sphere, false)
-        || shadows.iter().any(|&(sun, reach)| {
-            let shadow_offset = offset - sun * offset.dot(sun).max(0.0);
-            shadow_offset.length_squared() < (reach * 1.42 + radius).powi(2)
-        })
 }

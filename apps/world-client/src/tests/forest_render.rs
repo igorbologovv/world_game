@@ -18,7 +18,7 @@ use bevy::{
         pipelined_rendering::PipelinedRenderingPlugin,
         render_resource::{PollType, TextureFormat},
         renderer::RenderDevice,
-        view::screenshot::{save_to_disk, Screenshot},
+        view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured},
         RenderApp,
     },
     ui::IsDefaultUiCamera,
@@ -26,7 +26,8 @@ use bevy::{
     winit::WinitPlugin,
 };
 
-use world_core::{canopy::ForestCanopy, runtime::GridCell};
+use world_core::canopy::ForestCanopy;
+use world_vegetation::ForestRenderStats;
 
 use super::*;
 
@@ -64,90 +65,10 @@ fn tree_library_pilot() {
     ] {
         let up = direction.normalize();
         set_camera(app.world_mut(), up, 2.5, 0.0);
-        let path = format!("library/{species}/");
-        for frame in 0..720 {
-            render_frame(&mut app);
-            if frame > 85 && frame % 15 == 0 {
-                let world = app.world_mut();
-                if world
-                    .query::<&Name>()
-                    .iter(world)
-                    .any(|name| name.as_str().starts_with(&path))
-                {
-                    break;
-                }
-            }
-        }
-        let world = app.world_mut();
-        let root = world.resource::<PlanetRoot>().entity();
-        let frame = world.get::<ReferenceFrame>(root).unwrap().clone();
-        let mut nearby = world.query::<(&Name, &GridCell, &Transform)>();
-        let sites: Vec<_> = nearby
-            .iter(world)
-            .filter(|(name, _, _)| {
-                name.as_str() == "Forest tree" || name.as_str().starts_with("library/")
-            })
-            .map(|(name, cell, transform)| {
-                (
-                    name.as_str().starts_with(&path),
-                    frame.grid_position_double(cell, transform),
-                )
-            })
-            .collect();
-        let heights = world.resource::<SurfaceHeights>();
-        let sun = DVec3::new(-0.78, 0.60, -0.18).normalize();
-        let mut best = None;
-        for (_, tree) in sites.iter().filter(|(selected, _)| *selected) {
-            let radial = tree.normalize();
-            let tangent = (sun - radial * sun.dot(radial)).normalize();
-            let focus = tree + radial * (height * 0.47);
-            for i in 0..12 {
-                let angle = f64::from(i) * std::f64::consts::TAU / 12.0;
-                let arm = tangent * angle.cos() + radial.cross(tangent) * angle.sin();
-                let eye = tree + radial * (height * 0.53) + arm * (height * 1.34);
-                if heights
-                    .sample(eye.normalize())
-                    .is_some_and(|ground| eye.length() < RADIUS + ground + 2.0)
-                {
-                    continue;
-                }
-                let ray = eye - focus;
-                let clearance = sites
-                    .iter()
-                    .filter(|(_, other)| *other != *tree)
-                    .map(|(_, other)| {
-                        let center = *other + other.normalize() * (height * 0.5);
-                        let t = ((center - focus).dot(ray) / ray.length_squared()).clamp(0.05, 1.0);
-                        center.distance(focus + ray * t)
-                    })
-                    .fold(35.0_f64, f64::min);
-                let score = clearance + tangent.dot(arm) * 2.5;
-                if best.is_none_or(|(old, _, _, _)| score > old) {
-                    best = Some((score, *tree, radial, arm));
-                }
-            }
-        }
-        let (_, tree, radial, arm) =
-            best.unwrap_or_else(|| panic!("{species} did not stream in its habitat"));
-        for (label, distance) in [("detail", height * 1.34), ("distance", height * 8.0)] {
-            let mut eye = tree + radial * (height * 0.53) + arm * distance;
-            if label == "distance" {
-                let direction = eye.normalize();
-                let ground = app
-                    .world()
-                    .resource::<SurfaceHeights>()
-                    .sample(direction)
-                    .unwrap_or(0.0);
-                let minimum = RADIUS + ground + height * 1.3;
-                eye = direction * eye.length().max(minimum);
-            }
-            aim_at_tree(
-                app.world_mut(),
-                eye,
-                tree + radial * (height * 0.47),
-                radial,
-            );
-            for _ in 0..64 {
+        wait_for_forest(&mut app);
+        for (label, distance) in [("detail", height * 1.7), ("distance", height * 8.0)] {
+            set_camera(app.world_mut(), up, distance, 0.85);
+            for _ in 0..80 {
                 render_frame(&mut app);
             }
             measure(&mut app, &target, &output, &format!("{species}-{label}"));
@@ -189,12 +110,20 @@ fn forest_altitude_sweep() {
         ("orbit", woodland, 1_450_000.0, 1.0, 90),
     ] {
         set_camera(app.world_mut(), up, height, tilt);
+        if label == "ground" {
+            wait_for_forest(&mut app);
+        }
         for _ in 0..warmup {
             render_frame(&mut app);
         }
         measure(&mut app, &target, &output, label);
-        if label == "ground" {
-            assert_hybrid_pipelines(&app);
+        match label {
+            "ground" | "grazing" | "handoff" => assert_forest_drawn(&app),
+            "aerial" | "orbit" => {
+                let stats = app.world().resource::<ForestRenderStats>();
+                assert_eq!(stats.triangles(), 0, "{label} uses the terrain canopy");
+            }
+            _ => unreachable!(),
         }
     }
     let layout = app.world().resource::<ForestCanopy>().layout;
@@ -210,9 +139,9 @@ fn forest_altitude_sweep() {
     let settings = *app
         .world()
         .resource::<world_vegetation::VegetationSettings>();
-    for (label, forest_range) in [
-        ("reference-hybrid-meshes", 3_000.0),
-        ("reference-canopy", 1_200.0),
+    for (label, forest_range, expect_meshes) in [
+        ("reference-hybrid-meshes", 3_000.0, true),
+        ("reference-canopy", 1_000.0, false),
     ] {
         app.insert_resource(world_vegetation::VegetationSettings {
             forest_range,
@@ -222,6 +151,8 @@ fn forest_altitude_sweep() {
             render_frame(&mut app);
         }
         capture(&mut app, &target, &output, label);
+        let stats = app.world().resource::<ForestRenderStats>();
+        assert_eq!(stats.triangles() > 0, expect_meshes, "{label}");
     }
 }
 
@@ -233,9 +164,7 @@ fn tree_lod_sweep() {
         .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/tree-lod-sweep"));
     fs::create_dir_all(&output).unwrap();
     let (mut app, target) = render_app();
-    for _ in 0..300 {
-        render_frame(&mut app);
-    }
+    wait_for_forest(&mut app);
     let world = app.world_mut();
     let root = world.resource::<PlanetRoot>().entity();
     let origin = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction) * RADIUS;
@@ -276,62 +205,49 @@ fn tree_lod_sweep() {
         measure(&mut app, &target, &output, label);
     }
 
-    // From the spawn clearing, keep foreground trees out of this comparison.
-    // Hold the view fixed and force the representation on either side of the fade.
-    let view = (origin - tree - up * (origin - tree).dot(up)).normalize();
-    let position = |distance| focus + distance * (view * 0.997 + up * 0.077);
-    aim_at_tree(app.world_mut(), position(400.0), focus, up);
-    let defaults = *app
-        .world()
-        .resource::<world_vegetation::VegetationSettings>();
-    let mut compared = std::collections::HashSet::new();
-    for (label, mesh) in [
-        ("paired-lod0", [1_200.0, 1_700.0]),
-        ("paired-lod1", [10.0, 1_200.0]),
-        ("paired-lod2", [10.0, 20.0]),
-    ] {
-        app.insert_resource(world_vegetation::VegetationSettings {
-            mesh_distances: mesh,
-            ..defaults
-        });
-        for _ in 0..75 {
-            render_frame(&mut app);
-        }
-        let world = app.world_mut();
-        let frame = world.get::<ReferenceFrame>(root).unwrap().clone();
-        let mut palms = world.query_filtered::<
-            (&GridCell, &Transform, &Mesh3d, &bevy::mesh::MeshTag),
-            With<world_vegetation::CoconutPalm>,
-        >();
-        let (_, _, mesh, phase) = palms
-            .iter(world)
-            .find(|(cell, transform, _, _)| {
-                frame
-                    .grid_position_double(cell, transform)
-                    .distance_squared(tree)
-                    < 0.0001
-            })
-            .expect("the same planetary palm must remain resident");
-        assert_eq!(phase.value, 0, "{label} should have settled");
-        assert!(
-            compared.insert(mesh.id()),
-            "{label} must exercise a distinct mesh prefix"
-        );
-        capture(&mut app, &target, &output, label);
+    let close_eye = focus + tangent * 17.0 + up;
+    aim_at_tree(app.world_mut(), close_eye, focus, up);
+    let world = app.world_mut();
+    let camera = world
+        .query_filtered::<Entity, With<WorldCamera>>()
+        .single(world)
+        .unwrap();
+    let samples = *world.get::<Msaa>(camera).unwrap();
+    for msaa in [Msaa::Off, samples] {
+        app.world_mut().entity_mut(camera).insert(msaa);
+        verify_shared_depth(&mut app, &target, close_eye, focus, up);
     }
-    assert_hybrid_pipelines(&app);
-    app.insert_resource(defaults);
-    for _ in 0..75 {
+
+    // Fly away from the same palm and back through both transition bands.
+    let view = (origin - tree - up * (origin - tree).dot(up)).normalize();
+    let position = |distance| focus + distance * (view * 0.97 + up * 0.24);
+    aim_at_tree(app.world_mut(), position(30.0), focus, up);
+    for _ in 0..50 {
         render_frame(&mut app);
     }
-    for frame in 0..=100 {
-        let distance = 45.0 + 4.2 * f64::from(frame);
+    let mut seen_levels = [false; 3];
+    let mut seen_transitions = [false; 2];
+    for frame in 0..=240 {
+        let distance = 30.0 + 6.1 * f64::from(frame.min(240 - frame));
         aim_at_tree(app.world_mut(), position(distance), focus, up);
         render_frame(&mut app);
-        if frame % 10 == 0 {
+        let stats = app.world().resource::<ForestRenderStats>();
+        for (seen, count) in seen_levels.iter_mut().zip(stats.levels()) {
+            *seen |= count != 0;
+        }
+        for (seen, count) in seen_transitions.iter_mut().zip(stats.transitions()) {
+            *seen |= count != 0;
+        }
+        if frame % 40 == 0 {
             capture(&mut app, &target, &output, &format!("dolly-{frame:03}"));
         }
     }
+    assert_eq!(seen_levels, [true; 3], "Igor must draw all three LODs");
+    assert_eq!(
+        seen_transitions, [true; 2],
+        "Igor must traverse both transition bands"
+    );
+    assert_forest_drawn(&app);
 }
 
 #[test]
@@ -342,107 +258,105 @@ fn broadleaf_lighting_sweep() {
         .unwrap_or_else(|| Path::new(WORKSPACE_ROOT).join("target/broadleaf-lighting"));
     fs::create_dir_all(&output).unwrap();
     let (mut app, target) = render_app();
-    let settings = *app
-        .world()
-        .resource::<world_vegetation::VegetationSettings>();
-    let mesh_settings = world_vegetation::VegetationSettings {
-        mesh_distances: [180.0, 210.0],
-        ..settings
-    };
-    app.insert_resource(mesh_settings);
-    for _ in 0..360 {
-        render_frame(&mut app);
-    }
-    let coast = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
+    let up = terrain_aligned_direction(PALM_COAST_REGION.spawn.direction);
+    set_camera(app.world_mut(), up, 35.0, 0.85);
+    wait_for_forest(&mut app);
+    let ground = app.world().resource::<SurfaceHeights>().sample(up).unwrap();
+    let focus = up * (RADIUS + ground + 6.0);
     let world = app.world_mut();
-    let root = world.resource::<PlanetRoot>().entity();
-    let frame = world.get::<ReferenceFrame>(root).unwrap().clone();
-    let mut sites = world.query::<(&Name, &GridCell, &Transform)>();
-    let tree = sites
-        .iter(world)
-        .filter(|(name, _, _)| name.as_str() == "tree_part9/tree")
-        .map(|(_, cell, transform)| frame.grid_position_double(cell, transform))
-        .min_by(|a, b| {
-            a.distance_squared(coast * RADIUS)
-                .total_cmp(&b.distance_squared(coast * RADIUS))
-        })
-        .expect("Palm Coast must stream the authored tropical broadleaf");
-    println!("Tracked broadleaf at {tree:?}");
-    let up = tree.normalize();
     let sun = world
-        .query::<(&Transform, &bevy::light::SunDisk)>()
+        .query::<(&DirectionalLight, &GlobalTransform)>()
         .iter(world)
-        .find(|(_, disk)| disk.intensity > 0.0)
-        .unwrap()
-        .0
-        .rotation
-        * Vec3::Z;
-    let sun = sun.as_dvec3();
+        .max_by(|(a, _), (b, _)| a.illuminance.total_cmp(&b.illuminance))
+        .map(|(_, transform)| transform.back().as_dvec3())
+        .expect("terrain supplies a directional sun");
     let toward_sun = (sun - up * sun.dot(up)).normalize();
-    let focus = tree + up * 13.0;
     for (side, direction) in [("sunward", toward_sun), ("leeward", -toward_sun)] {
-        aim_at_tree(
-            app.world_mut(),
-            focus + direction * 52.0 + up * 4.0,
-            focus,
-            up,
-        );
-        for (representation, lods) in [
-            ("mesh", mesh_settings),
-            (
-                "hybrid-middle",
-                world_vegetation::VegetationSettings {
-                    mesh_distances: [10.0, 180.0],
-                    ..settings
-                },
-            ),
-        ] {
-            app.insert_resource(lods);
-            for _ in 0..120 {
+        for (label, distance) in [("near", 52.0), ("distance", 250.0)] {
+            aim_at_tree(
+                app.world_mut(),
+                focus + direction * distance + up * 20.0,
+                focus,
+                up,
+            );
+            for _ in 0..80 {
                 render_frame(&mut app);
             }
-            capture(
-                &mut app,
-                &target,
-                &output,
-                &format!("{side}-{representation}"),
+            assert_forest_drawn(&app);
+            capture(&mut app, &target, &output, &format!("{side}-{label}"));
+        }
+    }
+}
+
+fn verify_shared_depth(app: &mut App, target: &Handle<Image>, eye: DVec3, focus: DVec3, up: DVec3) {
+    render_frame(app);
+    let world = app.world_mut();
+    let forward = (focus - eye).normalize().as_vec3();
+    let camera = world
+        .query_filtered::<&GlobalTransform, With<WorldCamera>>()
+        .single(world)
+        .unwrap();
+    let translation = camera.translation() + forward * 2.0;
+    let mesh = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(10.0, 10.0, 0.2));
+    let material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.0, 1.0),
+            unlit: true,
+            ..default()
+        });
+    let occluder = world
+        .spawn((
+            Transform::from_translation(translation).looking_to(forward, up.as_vec3()),
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+        ))
+        .id();
+    for _ in 0..24 {
+        render_frame(app);
+    }
+    assert_forest_drawn(app);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.world_mut()
+        .spawn(Screenshot::image(target.clone()))
+        .observe(move |capture: On<ScreenshotCaptured>| {
+            tx.send(capture.image.clone()).unwrap();
+        });
+    let image = (0..20)
+        .find_map(|_| {
+            render_frame(app);
+            rx.try_recv().ok()
+        })
+        .expect("shared depth screenshot");
+    let center = UVec2::new(image.width() / 2, image.height() / 2);
+    for y in center.y - 16..center.y + 16 {
+        for x in center.x - 16..center.x + 16 {
+            let p = image.get_color_at(x, y).unwrap().to_srgba();
+            assert!(
+                p.red > p.green + 0.35 && p.blue > p.green + 0.35,
+                "forest drew through an opaque foreground mesh at ({x}, {y}): {p:?}"
             );
         }
     }
-    assert_hybrid_pipelines(&app);
+    app.world_mut().entity_mut(occluder).despawn();
 }
 
-fn assert_hybrid_pipelines(app: &App) {
-    use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
-
-    let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
-    let assets = app.world().resource::<AssetServer>();
-    for path in [
-        "shaders/hybrid_tree.wesl",
-        "shaders/hybrid_tree_prepass.wesl",
-    ] {
-        let shader = assets.load::<Shader>(path);
-        let mut ready = false;
-        for pipeline in cache.pipelines() {
-            let PipelineDescriptor::RenderPipelineDescriptor(descriptor) = &pipeline.descriptor
-            else {
-                continue;
-            };
-            if descriptor
-                .fragment
-                .as_ref()
-                .is_some_and(|stage| stage.shader == shader)
-            {
-                assert!(
-                    !matches!(pipeline.state, CachedPipelineState::Err(_)),
-                    "{path}: {:?}",
-                    pipeline.state
-                );
-                ready |= matches!(pipeline.state, CachedPipelineState::Ok(_));
-            }
-        }
-        assert!(ready, "{path} did not compile");
+fn wait_for_forest(app: &mut App) {
+    let start = Instant::now();
+    render_frame(app);
+    while app.world().resource::<ForestRenderStats>().triangles() == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "Igor forest did not stream"
+        );
+        render_frame(app);
     }
+}
+
+fn assert_forest_drawn(app: &App) {
+    assert!(app.world().resource::<ForestRenderStats>().triangles() > 0);
 }
 
 fn aim_at_tree(world: &mut World, eye: DVec3, focus: DVec3, up: DVec3) {
@@ -523,11 +437,11 @@ fn measure(app: &mut App, target: &Handle<Image>, output: &std::path::Path, labe
         )
     }
 
-    let opaque_pass = DiagnosticPath::const_new("render/main_opaque_pass_3d/elapsed_gpu");
+    let forest_pass = DiagnosticPath::const_new("render/igor_hybrid_forest/elapsed_gpu");
     let gpu_measurement = |app: &App| {
         app.world()
             .get_resource::<DiagnosticsStore>()
-            .and_then(|store| store.get(&opaque_pass))
+            .and_then(|store| store.get(&forest_pass))
             .and_then(|diagnostic| diagnostic.measurement())
             .map(|sample| (sample.time, sample.value))
     };
@@ -549,7 +463,7 @@ fn measure(app: &mut App, target: &Handle<Image>, output: &std::path::Path, labe
     println!("{label} median={median:.2} ms p95={p95:.2} ms",);
     if !gpu_samples.is_empty() {
         let (median, p95) = percentiles(gpu_samples);
-        println!("{label} opaque GPU median={median:.2} ms p95={p95:.2} ms");
+        println!("{label} forest GPU median={median:.2} ms p95={p95:.2} ms");
     }
 
     capture(app, target, output, label);

@@ -3,7 +3,6 @@ pub(crate) mod canopy;
 mod debug;
 mod fern;
 mod ground_cover;
-mod hero_oak;
 mod hybrid;
 mod library;
 mod lod;
@@ -11,27 +10,18 @@ mod palm;
 mod placement;
 mod streaming;
 mod textures;
-mod tree_assets;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::primitives::{Aabb, MeshAabb},
     math::DVec3,
-    mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef},
-    pbr::{
-        ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
-        MaterialPlugin,
-    },
+    pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin},
     prelude::*,
     reflect::TypePath,
     render::{
         mesh::Indices,
-        render_resource::{
-            AsBindGroup, PrimitiveTopology, RenderPipelineDescriptor, SpecializedMeshPipelineError,
-            VertexFormat,
-        },
+        render_resource::{AsBindGroup, PrimitiveTopology},
     },
-    shader::{ShaderDefVal, ShaderRef},
+    shader::ShaderRef,
 };
 use world_core::{
     planet::{LEGACY_BAKED_RADIUS, RADIUS, SEA_LEVEL},
@@ -40,11 +30,11 @@ use world_core::{
 };
 
 pub use fern::FernSettings;
+pub use hybrid::ForestRenderStats;
 pub use lod::VegetationSettings;
 
 const VARIANTS: usize = 3;
 const FOLIAGE_CUTOFF: f32 = 0.39;
-const BROADLEAF_TRANSMISSION: f32 = 0.18;
 
 type FoliageMaterial = ExtendedMaterial<StandardMaterial, Wind>;
 
@@ -52,14 +42,12 @@ type FoliageMaterial = ExtendedMaterial<StandardMaterial, Wind>;
 struct Wind {
     #[uniform(100)]
     coverage: Vec4,
-    crown_frame: Vec2,
 }
 
 impl Default for Wind {
     fn default() -> Self {
         Self {
             coverage: Vec4::new(0.0, 1.0, 0.0, 0.0),
-            crown_frame: Vec2::ZERO,
         }
     }
 }
@@ -72,83 +60,6 @@ impl MaterialExtension for Wind {
 
     fn fragment_shader() -> ShaderRef {
         "shaders/vegetation_fade.wesl".into()
-    }
-}
-
-type HybridMaterial = ExtendedMaterial<StandardMaterial, HybridWind>;
-
-// Foliage displacement amplitude and phase in the hybrid tree vertex shaders.
-const ATTRIBUTE_TREE_WIND: MeshVertexAttribute =
-    MeshVertexAttribute::new("Tree_Wind", 954_572_832, VertexFormat::Float32x2);
-
-#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
-struct HybridWind {
-    #[uniform(100)]
-    crown_frame: Vec2,
-}
-
-impl MaterialExtension for HybridWind {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/hybrid_tree.wesl".into()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        "shaders/hybrid_tree.wesl".into()
-    }
-
-    fn prepass_vertex_shader() -> ShaderRef {
-        "shaders/hybrid_tree_prepass.wesl".into()
-    }
-
-    fn prepass_fragment_shader() -> ShaderRef {
-        "shaders/hybrid_tree_prepass.wesl".into()
-    }
-
-    fn specialize(
-        _: &MaterialExtensionPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
-        _: MaterialExtensionKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        let vertex = &mut descriptor.vertex;
-        let morph = layout.0.contains(hybrid::MORPH);
-        if morph {
-            let attr = layout
-                .0
-                .get_layout(&[hybrid::MORPH.at_shader_location(12)])?;
-            vertex.buffers[0].attributes.extend(attr.attributes);
-            vertex
-                .shader_defs
-                .push(ShaderDefVal::Bool("HYBRID_MORPH".into(), true));
-        }
-        if layout.0.contains(ATTRIBUTE_TREE_WIND) {
-            let wind = layout
-                .0
-                .get_layout(&[ATTRIBUTE_TREE_WIND.at_shader_location(13)])?;
-            vertex.buffers[0].attributes.extend(wind.attributes);
-            vertex
-                .shader_defs
-                .push(ShaderDefVal::Bool("HYBRID_WIND".into(), true));
-        }
-        let instance = ShaderDefVal::Bool("VERTEX_OUTPUT_INSTANCE_INDEX".into(), true);
-        if !vertex.shader_defs.contains(&instance) {
-            vertex.shader_defs.push(instance.clone());
-        }
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            if !fragment.shader_defs.contains(&instance) {
-                fragment.shader_defs.push(instance);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Wind {
-    fn for_crown(bounds: Aabb) -> Self {
-        Self {
-            crown_frame: Vec2::new(bounds.center.y, bounds.half_extents.length()),
-            ..default()
-        }
     }
 }
 
@@ -182,10 +93,6 @@ impl Species {
         self.stock_variants() + library::count(self)
     }
 
-    const fn broadleaf(self) -> bool {
-        matches!(self, Self::Oak | Self::Acacia | Self::Jungle)
-    }
-
     fn colors(self) -> ([f32; 3], [f32; 3]) {
         match self {
             Self::Oak => ([0.35, 0.22, 0.12], [0.23, 0.53, 0.18]),
@@ -195,61 +102,6 @@ impl Species {
             Self::Palm => ([0.39, 0.30, 0.22], [0.22, 0.49, 0.13]),
         }
     }
-}
-
-struct WoodLod {
-    mesh: Handle<Mesh>,
-    bounds: Aabb,
-}
-
-struct ModelLod {
-    wood: Option<WoodLod>,
-    foliage: Handle<Mesh>,
-    foliage_material: Handle<FoliageMaterial>,
-    foliage_bounds: Aabb,
-}
-
-impl ModelLod {
-    fn new(
-        wood: Option<Mesh>,
-        foliage: Mesh,
-        foliage_material: Handle<FoliageMaterial>,
-        meshes: &mut Assets<Mesh>,
-    ) -> Self {
-        let wood = wood.map(|mesh| WoodLod {
-            bounds: mesh.get_aabb().expect("trunks contain vertices"),
-            mesh: meshes.add(mesh),
-        });
-        let foliage_bounds = foliage.get_aabb().expect("canopies contain vertices");
-        Self::from_parts(wood, meshes.add(foliage), foliage_material, foliage_bounds)
-    }
-
-    fn from_parts(
-        wood: Option<WoodLod>,
-        foliage: Handle<Mesh>,
-        foliage_material: Handle<FoliageMaterial>,
-        mut foliage_bounds: Aabb,
-    ) -> Self {
-        foliage_bounds.half_extents += 0.22;
-        Self {
-            wood,
-            foliage,
-            foliage_material,
-            foliage_bounds,
-        }
-    }
-}
-
-struct VariantModels {
-    lods: Vec<ModelLod>,
-    bark: Option<Handle<StandardMaterial>>,
-}
-
-#[derive(Resource)]
-struct ForestModels {
-    variants: Vec<Vec<VariantModels>>,
-    bark_material: Handle<StandardMaterial>,
-    hero_oak: Option<hero_oak::HeroOak>,
 }
 
 /// Reserve space for an authored scene among the procedurally placed trees.
@@ -270,7 +122,7 @@ impl ForestClearing {
     }
 }
 
-/// Marks the render entity for a resident coconut palm.
+/// Marks the planetary placement of a resident coconut palm.
 #[derive(Component)]
 pub struct CoconutPalm;
 
@@ -284,100 +136,17 @@ impl Plugin for ProceduralForestPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             MaterialPlugin::<FoliageMaterial>::default(),
-            MaterialPlugin::<HybridMaterial>::default(),
             MaterialPlugin::<lod::BarkMaterial>::default(),
         ))
         .init_resource::<VegetationSettings>()
         .init_resource::<streaming::ForestStream>()
-        .init_resource::<hybrid::HybridModels>()
-        .add_systems(
-            Startup,
-            (
-                build_models,
-                hero_oak::request_assets,
-                tree_assets::request_assets,
-                debug::spawn,
-            ),
-        )
-        .add_systems(
-            Update,
-            (
-                hero_oak::finish_loading,
-                tree_assets::finish_loading,
-                hybrid::prepare_models,
-                streaming::stream,
-            )
-                .chain()
-                .after(WorldMovement),
-        )
+        .add_systems(Startup, debug::spawn)
+        .add_systems(Update, streaming::stream.after(WorldMovement))
         .add_systems(Update, debug::update.after(fern::FernStreaming));
+        hybrid::install(app);
         app.add_plugins(fern::FernPlugin);
         ground_cover::install(app);
         canopy::install(app);
-    }
-}
-
-fn build_models(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut foliage_materials: ResMut<Assets<FoliageMaterial>>,
-) {
-    let bark_material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        base_color_texture: Some(images.add(textures::bark_texture())),
-        perceptual_roughness: 0.94,
-        ..default()
-    });
-    let mut variants = Vec::with_capacity(Species::ALL.len());
-    for species in Species::ALL {
-        let foliage_image = images.add(textures::canopy_texture(species));
-        let shared_material = (!species.broadleaf())
-            .then(|| foliage_materials.add(cutout_material(foliage_image.clone())));
-        let mut species_variants = Vec::with_capacity(species.variants());
-        for variant in 0..species.stock_variants() {
-            let (wood, leaves) = generate_tree(species, variant as u64);
-            let wood = wood.finish();
-            let leaves = leaves.finish_canopy(variant as f32);
-            let foliage_material = shared_material.clone().unwrap_or_else(|| {
-                let mut material = cutout_material(foliage_image.clone());
-                material.extension = Wind::for_crown(leaves.get_aabb().unwrap());
-                material.base.diffuse_transmission = BROADLEAF_TRANSMISSION;
-                foliage_materials.add(material)
-            });
-            let lod = ModelLod::new(Some(wood), leaves, foliage_material, &mut meshes);
-            species_variants.push(VariantModels {
-                lods: vec![lod],
-                bark: None,
-            });
-        }
-        species_variants.resize_with(species.variants(), || VariantModels {
-            lods: Vec::new(),
-            bark: None,
-        });
-        variants.push(species_variants);
-    }
-    commands.insert_resource(ForestModels {
-        variants,
-        bark_material,
-        hero_oak: None,
-    });
-}
-
-fn cutout_material(texture: Handle<Image>) -> FoliageMaterial {
-    FoliageMaterial {
-        base: StandardMaterial {
-            base_color_texture: Some(texture),
-            alpha_mode: AlphaMode::Mask(FOLIAGE_CUTOFF),
-            perceptual_roughness: 0.80,
-            reflectance: 0.16,
-            diffuse_transmission: 0.34,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        },
-        extension: Wind::default(),
     }
 }
 
@@ -718,20 +487,6 @@ impl MeshBuilder {
         }
     }
 
-    fn finish_canopy(self, variant: f32) -> Mesh {
-        let wind: Vec<_> = self
-            .positions
-            .iter()
-            .map(|&[x, y, z]| {
-                let weight = ((y - 2.5) * 0.009).clamp(0.0, 0.21);
-                [weight, variant * 1.8 + x * 0.21 + z * 0.17 + y * 0.09]
-            })
-            .collect();
-        let mut mesh = self.finish();
-        mesh.insert_attribute(ATTRIBUTE_TREE_WIND, wind);
-        mesh
-    }
-
     fn finish(self) -> Mesh {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -1010,8 +765,6 @@ fn leaf_cluster(
 
 #[cfg(test)]
 mod tests {
-    use bevy::mesh::VertexAttributeValues;
-
     use super::*;
 
     #[test]
@@ -1071,23 +824,6 @@ mod tests {
             let (wood, leaves) = generate_tree(species, 0);
             let count = (wood.indices.len() + leaves.indices.len()) / 3;
             assert!(count < 6000, "{species:?} has {count} triangles");
-        }
-    }
-
-    #[test]
-    fn procedural_tree_wind_is_limited_to_foliage() {
-        for species in Species::ALL {
-            let (wood, leaves) = generate_tree(species, 0);
-            let leaves = leaves.finish_canopy(0.0);
-            let Some(VertexAttributeValues::Float32x2(wind)) =
-                leaves.attribute(ATTRIBUTE_TREE_WIND)
-            else {
-                panic!("{species:?} foliage should have tree wind data");
-            };
-            assert_eq!(wind.len(), leaves.count_vertices());
-            assert!(wind.iter().any(|[weight, _]| *weight > 0.0));
-            assert!(!leaves.contains_attribute(Mesh::ATTRIBUTE_UV_1));
-            assert!(!wood.finish().contains_attribute(ATTRIBUTE_TREE_WIND));
         }
     }
 }

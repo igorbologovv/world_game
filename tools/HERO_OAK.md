@@ -45,15 +45,14 @@ Different deterministic variants:
 blender -b --python build_hero_oak.py -- --output ./oak_variant_2 --seed 18203
 ```
 
-## Bevy runtime
+## World-client runtime
 
-The client loads `assets/models/hero_oak/oak_lod0.glb`. To update the
-runtime model, install a regenerated LOD0 export. The hybrid renderer
-builds its medium and far proxies from that mesh and shares the bark and
-foliage textures across levels. Foliage clips at 0.46 and uses the same
-wind weights during the transitions. See the
-[vegetation crate](../crates/world-vegetation/README.md) for distance bands
-and verification commands.
+Igor_renderer loads the standalone LOD0 export from
+`assets/models/hero_oak/igor/oak_lod0.glb` and the PNGs in its `bark/`
+directory. The GLB supplies the 0.46 alpha cutoff and references the bark
+color and normal textures. Igor derives the middle canopy and far cell
+geometry from these source materials. See the
+[vegetation crate](../crates/world-vegetation/README.md) for integration details.
 
 ## Notes
 

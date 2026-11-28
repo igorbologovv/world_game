@@ -1,4 +1,6 @@
 //! Screen-space detail selection and shared, complementary dither materials.
+const STEPS: f32 = 12.0;
+
 use bevy::{
     pbr::{ExtendedMaterial, MaterialExtension},
     prelude::*,
@@ -7,33 +9,20 @@ use bevy::{
     shader::ShaderRef,
 };
 
-const STEPS: f32 = 12.0;
-const REFERENCE_FOCAL: f32 = 935.3074;
-const REFERENCE_HEIGHT: f32 = 15.0;
-
-/// Vegetation quality controls. Distances describe a 1080p, 60-degree reference view.
+/// Tree streaming distances. Igor_renderer owns projected LOD thresholds and fade timing.
 #[derive(Clone, Copy, Resource)]
 pub struct VegetationSettings {
-    /// Reference distances from detailed to simplified and from simplified to coarse meshes.
-    pub mesh_distances: [f32; 2],
-    /// Outer distance for the dithered forest cutoff, in meters.
+    /// Outer distance of the streamed forest and its terrain canopy coverage, in meters.
     pub forest_range: f32,
     /// Extra radial distance to request chunks before they enter their display range.
     pub preload_margin: f32,
-    /// Fractional hysteresis for the projected size thresholds.
-    pub hysteresis: f32,
-    /// Time in seconds to blend between resident representations.
-    pub transition_seconds: f32,
 }
 
 impl Default for VegetationSettings {
     fn default() -> Self {
         Self {
-            mesh_distances: [97.0, 242.0],
             forest_range: 2_000.0,
             preload_margin: 260.0,
-            hysteresis: 0.12,
-            transition_seconds: 0.40,
         }
     }
 }
@@ -42,50 +31,6 @@ impl VegetationSettings {
     pub(super) fn forest_band(self) -> Vec2 {
         let end = self.forest_range.clamp(420.0, 3_000.0);
         Vec2::new(0.79 * end, end)
-    }
-
-    pub(super) fn selection(self) -> igor_renderer::Selection {
-        let near = self.mesh_distances[0].clamp(2.0, 1_200.0);
-        let far = self.mesh_distances[1].clamp(near + 1.0, 2_000.0);
-        let time = self.transition_seconds.clamp(0.1, 2.0);
-        igor_renderer::Selection {
-            middle_pixels: REFERENCE_HEIGHT * REFERENCE_FOCAL / near,
-            far_pixels: REFERENCE_HEIGHT * REFERENCE_FOCAL / far,
-            cell_pixels: 210.0,
-            hysteresis: self.hysteresis.clamp(0.0, 0.35),
-            seconds: [time, time * (0.65 / 0.40)],
-        }
-    }
-}
-
-pub(super) struct View {
-    pub focal: f32,
-    pub orthographic: bool,
-}
-
-impl View {
-    pub fn new(camera: &Camera, projection: &Projection) -> Self {
-        let height = camera
-            .physical_viewport_size()
-            .map_or(1080.0, |size| size.y.max(1) as f32);
-        let (focal, orthographic) = match projection {
-            Projection::Perspective(view) => (height / (2.0 * (view.fov * 0.5).tan()), false),
-            Projection::Orthographic(view) => (height / view.area.height().max(0.01), true),
-            Projection::Custom(_) => (height, false),
-        };
-        Self {
-            focal,
-            orthographic,
-        }
-    }
-
-    pub fn pixels(&self, diameter: f32, nearest_distance: f32) -> f32 {
-        diameter * self.focal
-            / if self.orthographic {
-                1.0
-            } else {
-                nearest_distance.max(0.05)
-            }
     }
 }
 

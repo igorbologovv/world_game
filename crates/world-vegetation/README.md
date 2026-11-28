@@ -8,34 +8,28 @@ the same placement data.
 
 ## Hybrid tree renderer
 
-Tree foliage carries wind amplitude and phase in a dedicated vertex attribute.
-Bark stays stationary in the wind, and both mesh parts retain their texture UVs.
+World-client runs the multi-species Igor_renderer hybrid forest from
+`f75f11e`. Igor loads the original GLBs and textures, builds the shared middle
+canopy templates and far Surface Nets cells, and selects LODs using the
+original projected bounds, ranked hysteresis, and finite-time coverage
+transitions. The mesh and proxy shaders share direct sunlight and canopy
+shadow attenuation. They retain Igor's wind, alpha cutoffs, world-space
+coverage and ordered sample masks.
 
-The `igor_renderer` Rust library builds two spatial mesh proxies from each
-LOD0 model. It simplifies wood and reduces foliage using alpha-tested
-coverage measured from multiple directions. The shared meshes keep the
-source UVs, textures and normals. Bark converges to its next positions
-while redundant foliage retires progressively. A stable rank spreads
-the handoff across trees, and reversing camera movement reverses a
-transition in progress.
+World-client supplies canonical sites in local tangent frames along with the
+Bevy camera projection and direction to the sun. Igor draws into the camera's
+color and reverse-Z depth before Bevy's opaque pass. Bevy then applies the
+same atmospheric scattering to the forest and terrain. The camera's MSAA
+count drives the sample masks, including the distance fade to terrain canopy.
 
-Bevy draws shared indexed meshes in its normal material and shadow passes.
-Those passes use the same current mesh, wind displacement and foliage
-retirement. Streaming tests padded camera-relative bounds, including trees
-whose directional shadows can reach the camera's shadow cascades. The tree
-meshes fade into the terrain canopy between 79% and 100% of the forest range.
-
-`VegetationSettings` controls the reference LOD distances, hysteresis,
-transition duration, stream range and preload margin. The default reference
-distances are 97 and 242 m for a 15 m tree at 1080p and 60 degrees vertical
-FOV. The default forest range is 2 km. F8 displays resident tree counts and
-triangles by LOD, transitions, placement, and understory diagnostics.
-
-The renderer uses the shipped LOD0 assets for Hero Oak, Coconut Palm,
-Tree (part9), the woodland oaks and the library variants. The stock procedural
-variants provide fallback geometry when an authored asset is unavailable.
-See the [library sources and licenses](../../assets/models/vegetation/library/SOURCES.md)
-and the [vendored library provenance](../../vendor/igor-renderer/README.md).
+`VegetationSettings` controls the stream range and preload margin. Igor's
+`IGOR_CANOPY_*` settings control LOD thresholds, transition durations and
+coverage. F8 shows submitted triangles, selected trees by LOD and ongoing
+transitions. The standalone Hero Oak GLB and textures are shipped under
+`assets/models/hero_oak/igor`. Stock procedural geometry remains the fallback
+for tree variants without a packaged GLB. See the [library sources and
+licenses](../../assets/models/vegetation/library/SOURCES.md) and
+[vendored renderer](../../vendor/igor-renderer/README.md).
 
 ## Woodland Fern
 
@@ -135,5 +129,5 @@ WGPU_BACKEND=vulkan cargo test --locked --release -p world-client forest_altitud
 Screenshots are written to `target/forest-sweep`. Set `FOREST_CAPTURE_DIR`
 to keep different runs separate.
 
-Run `tree_lod_sweep` for the fixed-camera LOD comparisons and camera dolly,
-or `broadleaf_lighting_sweep` for the forward and shadow shader checks.
+Run `tree_lod_sweep` for the near-to-far camera dolly and shared-depth check.
+Run `broadleaf_lighting_sweep` for captures from both sides of the forest sun direction.

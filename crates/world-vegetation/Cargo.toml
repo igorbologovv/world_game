@@ -7,8 +7,8 @@ edition.workspace = true
 bevy.workspace = true
 blake3 = "1"
 flate2 = "1"
+igor_renderer.workspace = true
+image.workspace = true
 world-core = { workspace = true, features = ["runtime"] }
 noise.workspace = true
 world-regions.workspace = true
-
-igor_renderer.workspace = true
